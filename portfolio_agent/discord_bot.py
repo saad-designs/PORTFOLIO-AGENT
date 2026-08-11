@@ -5,6 +5,7 @@ import requests
 import aiohttp
 
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 class ApprovalView(discord.ui.View):
@@ -58,6 +59,24 @@ async def send_alert(thread_id: str, message: str):
 async def on_ready():
     bot.add_view(ApprovalView())
     print(f"Logged in as {bot.user}")
+
+@bot.event
+async def on_message(message):
+    # Ignore messages sent by the bot itself
+    if message.author == bot.user:
+        return
+
+    # Extract the raw text from the user
+    user_query = message.content
+
+    # Let the user know the agent is thinking (UX feedback)
+    async with message.channel.typing():
+        # TODO: Route user_query to LangGraph / RAG pipeline here
+        # For now, echo the receipt to prove the connection works
+        await message.channel.send(f"Signal received. Routing query to agent: {user_query}")
+
+    # Ensure other commands still process correctly
+    await bot.process_commands(message)
 
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")
