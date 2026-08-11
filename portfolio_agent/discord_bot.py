@@ -5,6 +5,8 @@ import requests
 import aiohttp
 import traceback
 from agent import graph as agent_app
+from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
+import asyncio
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -62,10 +64,25 @@ async def on_ready():
     bot.add_view(ApprovalView())
     print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})", flush=True)
 
+@bot.command(name="ingest")
+async def force_ingest(ctx):
+    await ctx.send("⚙️ Initializing manual data sweep. Fetching RSS feeds and generating vectors. This will take a moment...")
+    try:
+        # Run the synchronous ingestion sweep in an async thread to prevent blocking
+        await asyncio.to_thread(sweep_rss_feeds)
+        await ctx.send("✅ RSS Ingestion complete. Vectors stored in Supabase.")
+    except Exception as e:
+        await ctx.send(f"⚠️ Ingestion pipeline failed: {str(e)}")
+
 @bot.event
 async def on_message(message):
     # Ignore messages sent by the bot itself
     if message.author == bot.user:
+        return
+
+    # Allow bot commands to bypass the LangGraph agent
+    if message.content.startswith(bot.command_prefix):
+        await bot.process_commands(message)
         return
 
     # Entry point debug log (forces immediate output in Render console)
@@ -103,8 +120,6 @@ async def on_message(message):
             print(f"❌ [GRAPH ERROR] Full traceback:\n{full_traceback}", flush=True)
             
             await message.channel.send(error_msg)
-
-    await bot.process_commands(message)
 
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")
