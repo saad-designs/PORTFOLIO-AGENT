@@ -20,8 +20,13 @@ async def lifespan(app: FastAPI):
     # Startup
     app.state.graph = agent.get_compiled_graph()
     
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if token:
+    # Retrieve token
+    token = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        print("❌ CRITICAL: DISCORD_TOKEN is missing from environment variables!", flush=True)
+    else:
+        print("🚀 Starting Discord bot in background task...", flush=True)
+        # Start Discord bot concurrently without blocking Uvicorn
         asyncio.create_task(discord_bot.bot.start(token))
         
     scheduler.add_job(
@@ -38,6 +43,8 @@ async def lifespan(app: FastAPI):
     
     yield
     # Shutdown
+    print("🛑 Shutting down Discord bot...", flush=True)
+    await discord_bot.bot.close()
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)

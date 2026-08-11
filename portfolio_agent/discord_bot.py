@@ -60,7 +60,7 @@ async def send_alert(thread_id: str, message: str):
 @bot.event
 async def on_ready():
     bot.add_view(ApprovalView())
-    print(f"Logged in as {bot.user}")
+    print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})", flush=True)
 
 @bot.event
 async def on_message(message):
@@ -68,30 +68,33 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    user_query = message.content
+    # Entry point debug log (forces immediate output in Render console)
+    print(f"📩 [DISCORD EVENT] Received message from {message.author}: '{message.content}'", flush=True)
 
-    # UX feedback: Show "Bot is typing..." in Discord
     async with message.channel.typing():
         try:
-            # 1. Map Discord User ID to PostgreSQL Checkpointer
-            config = {"configurable": {"thread_id": str(message.author.id)}}
+            # Map Discord User ID to PostgreSQL Checkpointer thread_id
+            thread_id = str(message.author.id)
+            config = {"configurable": {"thread_id": thread_id}}
             
-            # 2. Format the payload for the LangGraph State
-            inputs = {"messages": [HumanMessage(content=user_query)]}
+            print(f"🔄 Invoking LangGraph agent for thread_id: {thread_id}...", flush=True)
             
-            # 3. Execute the RAG Pipeline (this triggers retrieve_context and the LLM)
+            inputs = {"messages": [HumanMessage(content=message.content)]}
+            
+            # Execute state machine asynchronously
             response = await agent_app.ainvoke(inputs, config=config)
             
-            # 4. Extract the final agent response from the state
+            # Extract reply
             final_reply = response["messages"][-1].content
+            print(f"📤 Agent response generated successfully. Sending to Discord...", flush=True)
             
-            # 5. Push the response to Discord
             await message.channel.send(final_reply)
-            
-        except Exception as e:
-            await message.channel.send(f"⚠️ System Error: Graph execution failed. Log: {str(e)}")
 
-    # Ensure other commands still process correctly
+        except Exception as e:
+            error_msg = f"⚠️ **Agent Execution Error:** `{str(e)}`"
+            print(f"❌ [GRAPH ERROR] Exception during on_message execution:\n{str(e)}", flush=True)
+            await message.channel.send(error_msg)
+
     await bot.process_commands(message)
 
 def run_bot():
