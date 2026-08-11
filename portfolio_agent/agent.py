@@ -113,3 +113,5 @@ def get_compiled_graph():
     except Exception as e:
         print(f"Warning: Could not connect to Postgres ({e}). Compiling without checkpointer.")
         return workflow.compile()
+
+graph = get_compiled_graph()
