@@ -86,8 +86,11 @@ async def on_message(message):
             # Execute state machine asynchronously via to_thread (since checkpointer is sync)
             response = await asyncio.to_thread(agent_app.invoke, inputs, config)
             
-            # Extract reply
-            final_reply = response["messages"][-1].content
+            # Extract reply safely to patch KeyError vulnerability
+            if "messages" in response and response["messages"]:
+                final_reply = response["messages"][-1].content
+            else:
+                final_reply = f"**Decision:** {response.get('decision', 'N/A')}\n\n**Analysis:**\n{response.get('analysis', 'N/A')}"
             print(f"📤 Agent response generated successfully. Sending to Discord...", flush=True)
             
             await message.channel.send(final_reply)
