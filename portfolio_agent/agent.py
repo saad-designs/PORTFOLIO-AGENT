@@ -24,6 +24,11 @@ def filter_tickers(state: AgentState):
 
 def retrieve_context(query: str) -> str:
     """Generate vector embedding and run Cosine Distance vector search against agent_knowledge."""
+    if not query or not str(query).strip():
+        print("⚠️ [RETRIEVAL WARNING] retrieve_context was passed an empty string. Aborting vector search.", flush=True)
+        return "No context available (empty query provided)."
+    
+    print(f"🔍 [RETRIEVAL] Generating embedding for query: '{query}'", flush=True)
     try:
         embeddings = GoogleGenerativeAIEmbeddings(
             model="models/gemini-embedding-001", 
@@ -50,8 +55,13 @@ def retrieve_context(query: str) -> str:
 
 def analyze_sentiment(state: AgentState):
     """Extract sentiment and actionable tickers using gemini-2.5-flash."""
-    query = " ".join(state.get("tickers", []))
-    context = retrieve_context(query)
+    messages = state.get("messages", [])
+    if messages:
+        user_query = messages[-1].content
+    else:
+        user_query = " ".join(state.get("tickers", [])) # Safely fallback to tickers
+
+    context = retrieve_context(user_query)
     
     prompt = f"Context:\n{context}\n\nAnalyzed {state.get('tickers', [])}"
     # In a full implementation, this uses langchain-google-genai
