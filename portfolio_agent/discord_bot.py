@@ -82,8 +82,9 @@ async def on_message(message):
             
             inputs = {"messages": [HumanMessage(content=message.content)]}
             
-            # Execute state machine asynchronously
-            response = await agent_app.ainvoke(inputs, config=config)
+            import asyncio
+            # Execute state machine asynchronously via to_thread (since checkpointer is sync)
+            response = await asyncio.to_thread(agent_app.invoke, inputs, config)
             
             # Extract reply
             final_reply = response["messages"][-1].content
