@@ -3,6 +3,7 @@ from discord.ext import commands
 import os
 import requests
 import aiohttp
+import traceback
 from langchain_core.messages import HumanMessage
 from agent import graph as agent_app
 
@@ -91,8 +92,13 @@ async def on_message(message):
             await message.channel.send(final_reply)
 
         except Exception as e:
-            error_msg = f"⚠️ **Agent Execution Error:** `{str(e)}`"
-            print(f"❌ [GRAPH ERROR] Exception during on_message execution:\n{str(e)}", flush=True)
+            import traceback
+            full_traceback = traceback.format_exc()
+            error_msg = f"⚠️ **Agent Execution Error:** Check Render logs for the full stack trace."
+            
+            # Print the full traceback to Render console
+            print(f"❌ [GRAPH ERROR] Full traceback:\n{full_traceback}", flush=True)
+            
             await message.channel.send(error_msg)
 
     await bot.process_commands(message)
