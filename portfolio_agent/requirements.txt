@@ -1,0 +1,12 @@
+google-api-python-client
+feedparser
+langchain-google-genai
+psycopg[binary]
+pgvector
+langgraph-checkpoint-postgres
+discord.py
+langgraph
+fastapi
+uvicorn
+requests
+python-dotenv
