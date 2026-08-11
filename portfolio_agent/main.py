@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 import agent
@@ -9,21 +10,41 @@ import uuid
 import os
 import discord_bot
 import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
 
-app = FastAPI()
+scheduler = AsyncIOScheduler()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    app.state.graph = agent.get_compiled_graph()
+    
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if token:
+        asyncio.create_task(discord_bot.bot.start(token))
+        
+    scheduler.add_job(
+        sweep_rss_feeds, 
+        'interval', 
+        hours=4
+    )
+    scheduler.add_job(
+        sweep_youtube_transcripts, 
+        'interval', 
+        hours=24
+    )
+    scheduler.start()
+    
+    yield
+    # Shutdown
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
 
 class WebhookPayload(BaseModel):
     thread_id: str
     action: str
-
-@app.on_event("startup")
-async def startup_event():
-    app.state.graph = agent.get_compiled_graph()
-    
-    # Start bot in the same loop so bot.get_channel works when triggered
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if token:
-        asyncio.create_task(discord_bot.bot.start(token))
 
 @app.post("/webhook/discord")
 async def discord_webhook(payload: WebhookPayload):

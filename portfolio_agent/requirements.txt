@@ -10,3 +10,5 @@ fastapi
 uvicorn
 requests
 python-dotenv
+apscheduler
+youtube-transcript-api
