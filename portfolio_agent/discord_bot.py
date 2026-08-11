@@ -4,7 +4,6 @@ import os
 import requests
 import aiohttp
 import traceback
-from langchain_core.messages import HumanMessage
 from agent import graph as agent_app
 
 intents = discord.Intents.default()
@@ -80,7 +79,7 @@ async def on_message(message):
             
             print(f"🔄 Invoking LangGraph agent for thread_id: {thread_id}...", flush=True)
             
-            inputs = {"messages": [HumanMessage(content=message.content)]}
+            inputs = {"query": message.content}
             
             import asyncio
             # Execute state machine asynchronously via to_thread (since checkpointer is sync)

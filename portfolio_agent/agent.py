@@ -7,6 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 import psycopg
 
 class AgentState(TypedDict):
+    query: str
     tickers: list[str]
     analysis: str
     decision: str
@@ -55,10 +56,8 @@ def retrieve_context(query: str) -> str:
 
 def analyze_sentiment(state: AgentState):
     """Extract sentiment and actionable tickers using gemini-2.5-flash."""
-    messages = state.get("messages", [])
-    if messages:
-        user_query = messages[-1].content
-    else:
+    user_query = state.get("query", "")
+    if not user_query:
         user_query = " ".join(state.get("tickers", [])) # Safely fallback to tickers
 
     context = retrieve_context(user_query)
