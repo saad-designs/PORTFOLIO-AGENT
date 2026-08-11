@@ -26,7 +26,7 @@ def retrieve_context(query: str) -> str:
     """Generate vector embedding and run Cosine Distance vector search against agent_knowledge."""
     try:
         embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001", 
+            model="models/gemini-embedding-001", 
             google_api_key=os.getenv("GEMINI_API_KEY")
         )
         query_embedding = embeddings.embed_query(query)
