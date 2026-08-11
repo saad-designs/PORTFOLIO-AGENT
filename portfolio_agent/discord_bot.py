@@ -4,7 +4,7 @@ import os
 import requests
 import aiohttp
 from langchain_core.messages import HumanMessage
-from portfolio_agent.agent import app as agent_app
+from agent import app as agent_app
 
 intents = discord.Intents.default()
 intents.message_content = True
