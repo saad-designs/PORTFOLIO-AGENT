@@ -82,7 +82,7 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, api_key=os.getenv("GEMINI_API_KEY"))
+llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0.7, api_key=os.getenv("GEMINI_API_KEY"))
 tools = [save_to_knowledge_base, manage_scheduled_task, retrieve_context_tool, execute_trade_tool]
 
 SYSTEM_PROMPT = """You are an intelligent, conversational financial and research AI assistant.
