@@ -1,5 +1,6 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+import datetime
 import os
 import requests
 import aiohttp
@@ -11,6 +12,43 @@ import asyncio
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Ensure DISCORD_CHANNEL_ID is loaded from the environment
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+
+# Set run times in UTC to align with 09:45 AM and 03:45 PM PKT
+market_times = [
+    datetime.time(hour=4, minute=45, tzinfo=datetime.timezone.utc),
+    datetime.time(hour=10, minute=45, tzinfo=datetime.timezone.utc)
+]
+
+@tasks.loop(time=market_times)
+async def daily_market_briefing():
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        return
+        
+    # Prompt the agent to utilize its live tools
+    inputs = {"messages": [("user", "Fetch the live market data for the KSE-100 benchmark. Summarize the current PSX market state, key drivers, and volume. Keep it strictly concise.")]}
+    
+    # Use a dedicated thread ID for background tasks to prevent polluting your chat memory
+    config = {"configurable": {"thread_id": "automated_daily_briefing_thread"}}
+    
+    try:
+        response = await asyncio.to_thread(agent_app.invoke, inputs, config)
+        
+        raw_content = response["messages"][-1].content
+        if isinstance(raw_content, list):
+            final_reply = "".join(
+                block.get("text", "") for block in raw_content 
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            final_reply = str(raw_content)
+            
+        await channel.send(f"📊 **Automated PSX Market Briefing**\n\n{final_reply}")
+    except Exception as e:
+        await channel.send(f"⚠️ **Briefing Execution Error:**\n`{str(e)}`")
 
 class ApprovalView(discord.ui.View):
     def __init__(self, thread_id: str = None):
@@ -62,7 +100,9 @@ async def send_alert(thread_id: str, message: str):
 @bot.event
 async def on_ready():
     bot.add_view(ApprovalView())
+    daily_market_briefing.start()
     print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})", flush=True)
+    print("Automated briefing schedule initialized.", flush=True)
 
 @bot.command(name="ingest")
 async def force_ingest(ctx):
