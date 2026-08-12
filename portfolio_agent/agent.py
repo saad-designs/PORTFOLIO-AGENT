@@ -111,8 +111,12 @@ fallback_llm = ChatGroq(
     max_retries=1
 )
 
-# 3. The Auto-Switching Engine
-llm = primary_llm.with_fallbacks([fallback_llm])
+# 3. The Forced Auto-Switching Engine
+# exceptions_to_handle=(Exception,) forces the wrapper to catch everything, including 503s.
+llm = primary_llm.with_fallbacks(
+    [fallback_llm],
+    exceptions_to_handle=(Exception,)
+)
 
 # Instantiate the search tool
 search_tool = DuckDuckGoSearchRun(name="web_search")
