@@ -1,13 +1,13 @@
-import os
-import yfinance as yf
-import requests
+import psxdata
+import pandas as pd
+from datetime import datetime, timedelta
 import mplfinance as mpf
-
-# 1. Initialize a custom session to bypass Render's shared IP rate limits
-yf_session = requests.Session()
-yf_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-})
+import uuid
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib
 matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
 import matplotlib.pyplot as plt
@@ -25,60 +25,132 @@ from scheduler_config import scheduler
 # KMI-30 Shariah Compliant Tickers
 SHARIAH_COMPLIANT = ["SYS", "LUCK", "MARI", "FCCL", "OGDCL"]
 
+# 1. Refactored Quote Tool
 @tool
 def get_stock_quote(ticker: str) -> str:
-    """Fetches real-time price, volume, and P/E ratio for a given stock ticker."""
+    """Fetches real-time price and volume for a given PSX stock ticker."""
     try:
-        # Auto-format PSX tickers for Yahoo Finance
-        fetch_ticker = f"{ticker}.KA" if "." not in ticker else ticker
-
-        stock = yf.Ticker(fetch_ticker, session=yf_session)
-        info = stock.info
-
-        if not info or ('currentPrice' not in info and 'regularMarketPrice' not in info):
+        # psxdata uses exact tickers, no .KA suffix
+        q = psxdata.quote(ticker.upper())
+        if q is None or q.empty:
             return f"Data Unavailable. Could not fetch live data for {ticker}."
 
-        price = info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))
-        prev_close = info.get('previousClose', 'N/A')
-        volume = info.get('volume', 'N/A')
-        pe_ratio = info.get('trailingPE', 'N/A')
+        # Safely extract data whether psxdata returns a DataFrame or Series
+        if isinstance(q, pd.DataFrame):
+            data = q.iloc[0].to_dict()
+        else:
+            data = q.to_dict()
 
-        return (f"Live Data for {ticker}:\n"
+        price = data.get('price', data.get('current', data.get('close', 'N/A')))
+        volume = data.get('volume', 'N/A')
+
+        return (f"Live PSX Data for {ticker.upper()}:\n"
                 f"- Current Price: Rs. {price}\n"
-                f"- Previous Close: Rs. {prev_close}\n"
-                f"- Volume: {volume}\n"
-                f"- P/E Ratio: {pe_ratio}")
+                f"- Volume: {volume}")
     except Exception as e:
         return f"System Error: Could not fetch stock data. Details: {str(e)}"
 
+# 2. Refactored Charting Tool
 @tool
 def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
     """Generates a technical price chart for a given ticker. Valid periods: '1mo', '3mo', '6mo', '1y'."""
     try:
-        fetch_ticker = f"{ticker}.KA" if "." not in ticker else ticker
-        hist = yf.Ticker(fetch_ticker, session=yf_session).history(period=period)
+        end_date = datetime.today()
+        if period == '1mo': start_date = end_date - timedelta(days=30)
+        elif period == '6mo': start_date = end_date - timedelta(days=180)
+        elif period == '1y': start_date = end_date - timedelta(days=365)
+        else: start_date = end_date - timedelta(days=90)
+
+        # Fetch historical OHLCV DataFrame
+        hist = psxdata.stocks(ticker.upper(), start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
 
         if hist.empty:
-            return f"Data Unavailable. Could not fetch historical data for {ticker}. API returned empty dataframe."
+            return f"Data Unavailable. Could not fetch historical data for {ticker}."
+
+        # Standardize columns for mplfinance requirements
+        hist.columns = [col.capitalize() for col in hist.columns]
+        if 'Datetime' in hist.columns:
+            hist.set_index('Datetime', inplace=True)
+        elif 'Date' in hist.columns:
+            hist.set_index('Date', inplace=True)
+
+        hist.index = pd.to_datetime(hist.index)
 
         filepath = f"/tmp/{ticker}_chart_{uuid.uuid4().hex[:6]}.png"
 
-        # Generate professional candlestick chart with volume and moving averages
         mpf.plot(
             hist, 
-            type='candle',           # Use candlesticks instead of a line
-            volume=True,             # Add volume bars at the bottom
-            mav=(20, 50),            # Overlay 20-day and 50-day moving averages
-            style='nightclouds',     # Apply a sleek dark theme
-            title=f"{ticker} Technical Chart ({period})",
+            type='candle',
+            volume=True,
+            mav=(20, 50),
+            style='nightclouds',
+            title=f"{ticker.upper()} PSX Chart ({period})",
             ylabel='Price (PKR)',
             ylabel_lower='Volume',
-            savefig=filepath         # Save directly to the temporary path
+            savefig=filepath
         )
 
         return f"Chart generated. [FILE: {filepath}]"
     except Exception as e:
         return f"System Error: Chart generation failed. {str(e)}"
+
+# 3. Refactored Portfolio Tracker
+@tool
+def get_portfolio_status() -> str:
+    """Fetches current portfolio holdings and calculates real-time unrealized P/L against live PSX prices."""
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT ticker, quantity, average_price FROM portfolio_holdings')
+        holdings = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not holdings:
+            return "Data Unavailable. The portfolio is currently empty."
+
+        report = ["📊 **Live PSX Portfolio Status**\n"]
+        total_invested = 0
+        total_current_value = 0
+
+        for row in holdings:
+            ticker = row['ticker'].upper()
+            qty = float(row['quantity'])
+            avg_price = float(row['average_price'])
+
+            invested = qty * avg_price
+            total_invested += invested
+
+            q = psxdata.quote(ticker)
+            if q is None or q.empty:
+                report.append(f"- **{ticker}**: {qty} shares @ Rs. {avg_price:.2f} (Live market data unavailable)")
+                continue
+
+            if isinstance(q, pd.DataFrame):
+                data = q.iloc[0].to_dict()
+            else:
+                data = q.to_dict()
+
+            live_price = float(data.get('price', data.get('current', data.get('close', 0))))
+
+            current_value = qty * live_price
+            total_current_value += current_value
+            pnl = current_value - invested
+            pnl_percent = (pnl / invested) * 100
+
+            report.append(f"- **{ticker}**: {qty} shares | Avg: Rs. {avg_price:.2f} | Live: Rs. {live_price:.2f} | P/L: Rs. {pnl:.2f} ({pnl_percent:.2f}%)")
+
+        total_pnl = total_current_value - total_invested
+        total_pnl_percent = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
+
+        report.append("\n**Summary:**")
+        report.append(f"- Total Invested: Rs. {total_invested:.2f}")
+        report.append(f"- Total Current Value: Rs. {total_current_value:.2f}")
+        report.append(f"- Total P/L: Rs. {total_pnl:.2f} ({total_pnl_percent:.2f}%)")
+
+        return "\n".join(report)
+    except Exception as e:
+        return f"System Error: Could not calculate portfolio status. Details: {str(e)}"
 
 @tool
 def retrieve_context_tool(query: str) -> str:
@@ -193,6 +265,7 @@ search_tool = DuckDuckGoSearchRun(name="web_search")
 tools = [
     get_stock_quote,
     generate_stock_chart,
+    get_portfolio_status,
     search_tool,
     retrieve_context_tool,
     save_to_knowledge_base,

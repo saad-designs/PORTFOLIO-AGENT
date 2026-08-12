@@ -15,8 +15,9 @@ youtube-transcript-api
 ddgs
 langchain-community
 langchain-groq
-yfinance
 matplotlib
 pandas
 curl_cffi
 mplfinance
+psycopg2-binary
+psxdata
