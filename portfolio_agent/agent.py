@@ -54,6 +54,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
 from langchain_core.language_models import BaseChatModel
+from langchain_core.outputs import ChatResult
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
@@ -263,29 +264,24 @@ class CustomAutoSwitchLLM(BaseChatModel):
     primary: BaseChatModel
     secondary: BaseChatModel
 
-    def __init__(self, primary: BaseChatModel, secondary: BaseChatModel, **kwargs):
-        super().__init__(**kwargs)
-        object.__setattr__(self, 'primary', primary)
-        object.__setattr__(self, 'secondary', secondary)
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         try:
-            # Attempt execution with primary (Gemini)
+            # Attempt execution with primary engine
             return self.primary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as e:
-            print(f"⚠️ Primary model (Gemini) failed: {str(e)}. Auto-switching to Groq secondary...")
-            # Fall back to Groq on ANY exception (including 429 Quota limits)
+            print(f"⚠️ Primary model failed: {str(e)}. Auto-switching to secondary...")
+            # Fallback to secondary engine on any exception (including 429 quota limits)
             return self.secondary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     @property
     def _llm_type(self) -> str:
         return "custom_autoswitch_llm"
 
-# 1. Initialize Engines
+# 1. Initialize Primary and Secondary Engines
 primary_engine = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0)
 secondary_engine = ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=os.getenv("GROQ_API_KEY"), temperature=0)
 
-# 2. Bind the custom auto-switch wrapper
+# 2. Instantiate with Pydantic field assignment
 llm = CustomAutoSwitchLLM(primary=primary_engine, secondary=secondary_engine)
 
 # Instantiate the search tool
