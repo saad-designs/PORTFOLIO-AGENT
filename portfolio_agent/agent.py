@@ -1,4 +1,5 @@
 import os
+import yfinance as yf
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
@@ -10,6 +11,32 @@ from scheduler_config import scheduler
 
 # KMI-30 Shariah Compliant Tickers
 SHARIAH_COMPLIANT = ["SYS", "LUCK", "MARI", "FCCL", "OGDCL"]
+
+@tool
+def get_stock_quote(ticker: str) -> str:
+    """Fetches real-time price, volume, and P/E ratio for a given stock ticker."""
+    try:
+        # Auto-format PSX tickers for Yahoo Finance
+        fetch_ticker = f"{ticker}.KA" if "." not in ticker else ticker
+
+        stock = yf.Ticker(fetch_ticker)
+        info = stock.info
+
+        if not info or ('currentPrice' not in info and 'regularMarketPrice' not in info):
+            return f"Data Unavailable. Could not fetch live data for {ticker}."
+
+        price = info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))
+        prev_close = info.get('previousClose', 'N/A')
+        volume = info.get('volume', 'N/A')
+        pe_ratio = info.get('trailingPE', 'N/A')
+
+        return (f"Live Data for {ticker}:\n"
+                f"- Current Price: Rs. {price}\n"
+                f"- Previous Close: Rs. {prev_close}\n"
+                f"- Volume: {volume}\n"
+                f"- P/E Ratio: {pe_ratio}")
+    except Exception as e:
+        return f"System Error: Could not fetch stock data. Details: {str(e)}"
 
 @tool
 def retrieve_context_tool(query: str) -> str:
@@ -122,6 +149,7 @@ llm = primary_llm.with_fallbacks(
 search_tool = DuckDuckGoSearchRun(name="web_search")
 
 tools = [
+    get_stock_quote,
     search_tool,
     retrieve_context_tool,
     save_to_knowledge_base,
