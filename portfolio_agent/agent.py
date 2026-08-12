@@ -58,14 +58,23 @@ def save_to_knowledge_base(content: str, category: str = "user_memory") -> str:
         return f"Error saving to knowledge base: {e}"
 
 @tool
-def manage_scheduled_task(action: str, task_name: str, schedule_cron: str = None) -> str:
+def manage_scheduled_task(action: str, task_name: str = None, schedule_cron: str = None) -> str:
     """
-    Updates, adds, or deletes scheduled background tasks (e.g., RSS sweeps, alert checks).
+    Updates, adds, deletes, or lists scheduled background tasks.
     Action can be 'add', 'update', 'delete', or 'list'.
     """
     if action == "list":
         jobs = scheduler.get_jobs()
-        return f"Active tasks: {[j.id for j in jobs]}"
+        if not jobs:
+            return "No active scheduled tasks found."
+        
+        details = []
+        for j in jobs:
+            name = getattr(j, "name", "Unnamed Task")
+            next_run = j.next_run_time.strftime("%Y-%m-%d %H:%M:%S UTC") if j.next_run_time else "Paused"
+            details.append(f"Task: '{name}' | ID: `{j.id}` | Next Run: {next_run}")
+        
+        return "\n".join(details)
     
     # Placeholder logic for dynamic job management
     return f"Task '{task_name}' successfully updated with action '{action}'."

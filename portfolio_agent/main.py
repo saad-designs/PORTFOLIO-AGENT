@@ -31,12 +31,16 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         sweep_rss_feeds, 
         'interval', 
-        hours=4
+        hours=4,
+        id="rss_ingestion_periodic",
+        name="Periodic RSS Feed Sweep"
     )
     scheduler.add_job(
         sweep_youtube_transcripts, 
         'interval', 
-        hours=24
+        hours=24,
+        id="youtube_ingestion_daily",
+        name="Daily YouTube Transcript Sweep"
     )
     scheduler.start()
     
