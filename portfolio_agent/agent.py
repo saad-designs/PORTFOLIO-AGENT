@@ -1,5 +1,10 @@
 import os
 import yfinance as yf
+import matplotlib
+matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
+import matplotlib.pyplot as plt
+import pandas as pd
+import uuid
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
@@ -37,6 +42,37 @@ def get_stock_quote(ticker: str) -> str:
                 f"- P/E Ratio: {pe_ratio}")
     except Exception as e:
         return f"System Error: Could not fetch stock data. Details: {str(e)}"
+
+@tool
+def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
+    """Generates a technical price chart for a given ticker. Valid periods: '1mo', '3mo', '6mo', '1y'."""
+    try:
+        fetch_ticker = f"{ticker}.KA" if "." not in ticker else ticker
+        hist = yf.Ticker(fetch_ticker).history(period=period)
+
+        if hist.empty:
+            return f"Data Unavailable. Could not fetch historical data for {ticker}."
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(hist.index, hist['Close'], label='Close Price', color='#1DB954', linewidth=2)
+
+        # Apply a dark minimalist aesthetic
+        plt.style.use('dark_background')
+        plt.title(f"{ticker} Price Action ({period})", color='white')
+        plt.xlabel("Date", color='gray')
+        plt.ylabel("Price (PKR)", color='gray')
+        plt.grid(True, linestyle='--', alpha=0.3)
+        plt.legend()
+
+        # Save to Render's temporary directory
+        filepath = f"/tmp/{ticker}_chart_{uuid.uuid4().hex[:6]}.png"
+        plt.savefig(filepath, bbox_inches='tight', facecolor='#0e0e0e')
+        plt.close()
+
+        # Pass the explicit file marker back to the Discord bot
+        return f"Chart generated. [FILE: {filepath}]"
+    except Exception as e:
+        return f"System Error: Chart generation failed. {str(e)}"
 
 @tool
 def retrieve_context_tool(query: str) -> str:
@@ -150,6 +186,7 @@ search_tool = DuckDuckGoSearchRun(name="web_search")
 
 tools = [
     get_stock_quote,
+    generate_stock_chart,
     search_tool,
     retrieve_context_tool,
     save_to_knowledge_base,
