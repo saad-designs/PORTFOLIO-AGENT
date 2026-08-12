@@ -105,7 +105,10 @@ async def on_message(message):
                 final_reply = response["messages"][-1].content
                 print(f"📤 Agent response generated successfully. Sending to Discord...", flush=True)
                 
-                await message.channel.send(final_reply)
+                # Discord imposes a strict 2000-character limit per message
+                chunk_size = 1900 # 100-character buffer for safety
+                for i in range(0, len(final_reply), chunk_size):
+                    await message.channel.send(final_reply[i:i + chunk_size])
 
             except Exception as e:
                 import traceback
