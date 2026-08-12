@@ -12,8 +12,7 @@ import discord_bot
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
-
-scheduler = AsyncIOScheduler()
+from scheduler_config import scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
