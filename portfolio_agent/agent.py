@@ -7,12 +7,49 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import matplotlib
-matplotlib.use('Agg')
-import matplotlib
 matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
 import matplotlib.pyplot as plt
-import pandas as pd
-import uuid
+
+# Helper: Clean numeric float parsing
+def clean_float(val, default=0.0):
+    if val is None or pd.isna(val):
+        return default
+    try:
+        clean_str = str(val).replace(',', '').strip()
+        return float(clean_str)
+    except (ValueError, TypeError):
+        return default
+
+# Helper: Sanitize psxdata DataFrame for mplfinance
+def sanitize_psx_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    # Standardize column headers
+    df.columns = [str(col).capitalize() for col in df.columns]
+    
+    # Set date index
+    date_col = next((c for c in ['Date', 'Datetime'] if c in df.columns), None)
+    if date_col:
+        df[date_col] = pd.to_datetime(df[date_col])
+        df.set_index(date_col, inplace=True)
+    
+    df.index = pd.to_datetime(df.index)
+    
+    # CRITICAL: Sort chronologically ascending (oldest -> newest)
+    df.sort_index(ascending=True, inplace=True)
+    
+    # Clean numeric columns
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(',', '').str.strip()
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+    df.dropna(subset=['Close'], inplace=True)
+    if 'Volume' in df.columns:
+        df['Volume'] = df['Volume'].fillna(0)
+        
+    return df
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
@@ -30,23 +67,22 @@ SHARIAH_COMPLIANT = ["SYS", "LUCK", "MARI", "FCCL", "OGDCL"]
 def get_stock_quote(ticker: str) -> str:
     """Fetches real-time price and volume for a given PSX stock ticker."""
     try:
-        # psxdata uses exact tickers, no .KA suffix
         q = psxdata.quote(ticker.upper())
-        if q is None or q.empty:
+        if q is None or (isinstance(q, (pd.DataFrame, pd.Series)) and q.empty):
             return f"Data Unavailable. Could not fetch live data for {ticker}."
-
-        # Safely extract data whether psxdata returns a DataFrame or Series
-        if isinstance(q, pd.DataFrame):
-            data = q.iloc[0].to_dict()
-        else:
-            data = q.to_dict()
-
-        price = data.get('price', data.get('current', data.get('close', 'N/A')))
-        volume = data.get('volume', 'N/A')
-
+        
+        data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
+        
+        raw_price = data.get('price', data.get('current', data.get('close', 0)))
+        raw_volume = data.get('volume', data.get('vol', 'N/A'))
+        
+        price = clean_float(raw_price)
+        volume_val = clean_float(raw_volume, default=None)
+        volume_str = f"{int(volume_val):,}" if volume_val is not None else "N/A"
+        
         return (f"Live PSX Data for {ticker.upper()}:\n"
-                f"- Current Price: Rs. {price}\n"
-                f"- Volume: {volume}")
+                f"- Current Price: Rs. {price:.2f}\n"
+                f"- Volume: {volume_str}")
     except Exception as e:
         return f"System Error: Could not fetch stock data. Details: {str(e)}"
 
@@ -60,36 +96,27 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
         elif period == '6mo': start_date = end_date - timedelta(days=180)
         elif period == '1y': start_date = end_date - timedelta(days=365)
         else: start_date = end_date - timedelta(days=90)
-
-        # Fetch historical OHLCV DataFrame
-        hist = psxdata.stocks(ticker.upper(), start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-
+        
+        raw_hist = psxdata.stocks(ticker.upper(), start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+        hist = sanitize_psx_df(raw_hist)
+        
         if hist.empty:
             return f"Data Unavailable. Could not fetch historical data for {ticker}."
-
-        # Standardize columns for mplfinance requirements
-        hist.columns = [col.capitalize() for col in hist.columns]
-        if 'Datetime' in hist.columns:
-            hist.set_index('Datetime', inplace=True)
-        elif 'Date' in hist.columns:
-            hist.set_index('Date', inplace=True)
-
-        hist.index = pd.to_datetime(hist.index)
-
+            
         filepath = f"/tmp/{ticker}_chart_{uuid.uuid4().hex[:6]}.png"
-
+        
         mpf.plot(
             hist, 
             type='candle',
-            volume=True,
-            mav=(20, 50),
+            volume='Volume' in hist.columns,
+            mav=(20, 50) if len(hist) >= 50 else (10, 20),
             style='nightclouds',
             title=f"{ticker.upper()} PSX Chart ({period})",
             ylabel='Price (PKR)',
             ylabel_lower='Volume',
             savefig=filepath
         )
-
+        
         return f"Chart generated. [FILE: {filepath}]"
     except Exception as e:
         return f"System Error: Chart generation failed. {str(e)}"
@@ -115,30 +142,27 @@ def get_portfolio_status() -> str:
 
         for row in holdings:
             ticker = row['ticker'].upper()
-            qty = float(row['quantity'])
-            avg_price = float(row['average_price'])
-
+            qty = clean_float(row['quantity'])
+            avg_price = clean_float(row['average_price'])
+            
             invested = qty * avg_price
             total_invested += invested
 
             q = psxdata.quote(ticker)
-            if q is None or q.empty:
-                report.append(f"- **{ticker}**: {qty} shares @ Rs. {avg_price:.2f} (Live market data unavailable)")
+            if q is None or (isinstance(q, (pd.DataFrame, pd.Series)) and q.empty):
+                report.append(f"- **{ticker}**: {qty} shares @ Rs. {avg_price:.2f} (Live data unavailable)")
                 continue
-
-            if isinstance(q, pd.DataFrame):
-                data = q.iloc[0].to_dict()
-            else:
-                data = q.to_dict()
-
-            live_price = float(data.get('price', data.get('current', data.get('close', 0))))
-
+                
+            data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
+            raw_price = data.get('price', data.get('current', data.get('close', 0)))
+            live_price = clean_float(raw_price)
+            
             current_value = qty * live_price
             total_current_value += current_value
             pnl = current_value - invested
-            pnl_percent = (pnl / invested) * 100
+            pnl_percent = (pnl / invested) * 100 if invested > 0 else 0
 
-            report.append(f"- **{ticker}**: {qty} shares | Avg: Rs. {avg_price:.2f} | Live: Rs. {live_price:.2f} | P/L: Rs. {pnl:.2f} ({pnl_percent:.2f}%)")
+            report.append(f"- **{ticker}**: {qty:.0f} shares | Avg: Rs. {avg_price:.2f} | Live: Rs. {live_price:.2f} | P/L: Rs. {pnl:.2f} ({pnl_percent:.2f}%)")
 
         total_pnl = total_current_value - total_invested
         total_pnl_percent = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
