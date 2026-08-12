@@ -106,16 +106,16 @@ def get_compiled_graph():
             source_type TEXT NOT NULL,
             source_url TEXT,
             content TEXT NOT NULL,
-            embedding halfvec(3072),
+            embedding halfvec(768),
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         """)
         
         checkpointer = PostgresSaver(conn)
         checkpointer.setup()
-        return create_react_agent(llm, tools, state_modifier=SYSTEM_PROMPT, checkpointer=checkpointer)
+        return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
     except Exception as e:
         print(f"Warning: Could not connect to Postgres ({e}). Compiling without checkpointer.")
-        return create_react_agent(llm, tools, state_modifier=SYSTEM_PROMPT)
+        return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 graph = get_compiled_graph()
