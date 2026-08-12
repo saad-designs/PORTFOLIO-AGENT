@@ -19,3 +19,4 @@ yfinance
 matplotlib
 pandas
 curl_cffi
+mplfinance

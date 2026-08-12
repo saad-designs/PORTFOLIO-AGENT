@@ -1,6 +1,7 @@
 import os
 import yfinance as yf
 import requests
+import mplfinance as mpf
 
 # 1. Initialize a custom session to bypass Render's shared IP rate limits
 yf_session = requests.Session()
@@ -60,23 +61,21 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
         if hist.empty:
             return f"Data Unavailable. Could not fetch historical data for {ticker}. API returned empty dataframe."
 
-        plt.figure(figsize=(10, 5))
-        plt.plot(hist.index, hist['Close'], label='Close Price', color='#1DB954', linewidth=2)
-
-        # Apply a dark minimalist aesthetic
-        plt.style.use('dark_background')
-        plt.title(f"{ticker} Price Action ({period})", color='white')
-        plt.xlabel("Date", color='gray')
-        plt.ylabel("Price (PKR)", color='gray')
-        plt.grid(True, linestyle='--', alpha=0.3)
-        plt.legend()
-
-        # Save to Render's temporary directory
         filepath = f"/tmp/{ticker}_chart_{uuid.uuid4().hex[:6]}.png"
-        plt.savefig(filepath, bbox_inches='tight', facecolor='#0e0e0e')
-        plt.close()
 
-        # Pass the explicit file marker back to the Discord bot
+        # Generate professional candlestick chart with volume and moving averages
+        mpf.plot(
+            hist, 
+            type='candle',           # Use candlesticks instead of a line
+            volume=True,             # Add volume bars at the bottom
+            mav=(20, 50),            # Overlay 20-day and 50-day moving averages
+            style='nightclouds',     # Apply a sleek dark theme
+            title=f"{ticker} Technical Chart ({period})",
+            ylabel='Price (PKR)',
+            ylabel_lower='Volume',
+            savefig=filepath         # Save directly to the temporary path
+        )
+
         return f"Chart generated. [FILE: {filepath}]"
     except Exception as e:
         return f"System Error: Chart generation failed. {str(e)}"
