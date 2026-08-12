@@ -53,6 +53,7 @@ def sanitize_psx_df(df):
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
+from langchain_core.language_models import BaseChatModel
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
@@ -258,30 +259,34 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-# 1. Primary Model: Gemini
-# Temperature 0 forces factual, deterministic responses
-# max_retries=1 ensures it fails fast so the fallback can take over
-primary_llm = ChatGoogleGenerativeAI(
-    model="gemini-3.6-flash", 
-    temperature=0, 
-    max_retries=1
-)
+class CustomAutoSwitchLLM(BaseChatModel):
+    primary: BaseChatModel
+    secondary: BaseChatModel
 
-# 2. Fallback Model: Groq (Llama 3.3 70B)
-# Extremely fast reasoning model on 100% free API
-fallback_llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    groq_api_key=os.getenv("GROQ_API_KEY"),
-    temperature=0,
-    max_retries=1
-)
+    def __init__(self, primary: BaseChatModel, secondary: BaseChatModel, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, 'primary', primary)
+        object.__setattr__(self, 'secondary', secondary)
 
-# 3. The Forced Auto-Switching Engine
-# exceptions_to_handle=(Exception,) forces the wrapper to catch everything, including 503s.
-llm = primary_llm.with_fallbacks(
-    [fallback_llm],
-    exceptions_to_handle=(Exception,)
-)
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        try:
+            # Attempt execution with primary (Gemini)
+            return self.primary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        except Exception as e:
+            print(f"⚠️ Primary model (Gemini) failed: {str(e)}. Auto-switching to Groq secondary...")
+            # Fall back to Groq on ANY exception (including 429 Quota limits)
+            return self.secondary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    @property
+    def _llm_type(self) -> str:
+        return "custom_autoswitch_llm"
+
+# 1. Initialize Engines
+primary_engine = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0)
+secondary_engine = ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=os.getenv("GROQ_API_KEY"), temperature=0)
+
+# 2. Bind the custom auto-switch wrapper
+llm = CustomAutoSwitchLLM(primary=primary_engine, secondary=secondary_engine)
 
 # Instantiate the search tool
 search_tool = DuckDuckGoSearchRun(name="web_search")
