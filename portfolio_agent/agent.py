@@ -97,7 +97,7 @@ def execute_trade_tool(ticker: str, action: str) -> str:
 # Temperature 0 forces factual, deterministic responses
 # max_retries=1 ensures it fails fast so the fallback can take over
 primary_llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash", 
+    model="gemini-3.6-flash", 
     temperature=0, 
     max_retries=1
 )
