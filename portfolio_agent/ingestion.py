@@ -47,7 +47,11 @@ def insert_knowledge(source_type: str, source_url: str, text: str):
 def sweep_rss_feeds(urls: list[str] = None):
     """Fetch macro news from RSS URLs, chunk, embed, and insert."""
     if not urls:
-        urls = ["https://feeds.a.dj.com/rss/RSSMarketsMain.xml"]
+        urls = [
+            "https://www.brecorder.com/trends/rss",
+            "https://www.dawn.com/feeds/home/",
+            "https://tribune.com.pk/feed/business"
+        ]
         
     for url in urls:
         try:
