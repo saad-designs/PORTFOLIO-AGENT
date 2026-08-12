@@ -152,13 +152,14 @@ async def on_message(message):
                 else:
                     final_reply = str(raw_content)
         
-                # 2. Intercept the file marker
+                # 2. Intercept the file path (catches [FILE: /tmp/...] OR Markdown ![alt](/tmp/...))
                 file_path = None
-                match = re.search(r'\[FILE:\s*(.*?)\]', final_reply)
+                match = re.search(r'/tmp/[\w_.-]+\.png', final_reply)
+
                 if match:
-                    file_path = match.group(1)
-                    # Strip the marker from the text so it doesn't print in Discord
-                    final_reply = final_reply.replace(match.group(0), "").strip()
+                    file_path = match.group(0)
+                    # Strip markdown image syntax or [FILE: ...] tags from the output text
+                    final_reply = re.sub(r'(!\[.*?\]\(/tmp/[\w_.-]+\.png\)|\[FILE:\s*/tmp/[\w_.-]+\.png\])', '', final_reply).strip()
         
                 # 3. Send text in chunks
                 if final_reply:
