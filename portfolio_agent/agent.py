@@ -4,6 +4,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_groq import ChatGroq
 import psycopg
 from scheduler_config import scheduler
 
@@ -92,7 +93,26 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0.7, api_key=os.getenv("GEMINI_API_KEY"))
+# 1. Primary Model: Gemini
+# Temperature 0 forces factual, deterministic responses
+# max_retries=1 ensures it fails fast so the fallback can take over
+primary_llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash", 
+    temperature=0, 
+    max_retries=1
+)
+
+# 2. Fallback Model: Groq (Llama 3.3 70B)
+# Extremely fast reasoning model on 100% free API
+fallback_llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    groq_api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0,
+    max_retries=1
+)
+
+# 3. The Auto-Switching Engine
+llm = primary_llm.with_fallbacks([fallback_llm])
 
 # Instantiate the search tool
 search_tool = DuckDuckGoSearchRun(name="web_search")
@@ -105,12 +125,18 @@ tools = [
     execute_trade_tool
 ]
 
-SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent collaborator.
-- Speak naturally, directly, and concisely.
-- **Live Research Tactic:** When a user asks about current market data, live news, real-time events, or facts not present in your local long-term database, you MUST proactively use the `web_search` tool to fetch live data before formulating an answer.
-- **Memory Tactic:** If the user shares long-term preferences, strategies, or important notes, invoke `save_to_knowledge_base`.
-- **Guardrails:** Any trade execution must pass through `execute_trade_tool` to check Shariah KMI-30 compliance.
-- Never expose raw JSON, structural keys, or metadata blocks. Deliver clean, formatted answers."""
+SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent. You operate under absolute factual strictness.
+
+### CORE DIRECTIVES
+1. **Zero Hallucination:** You must NEVER invent, fabricate, or guess data. If a tool returns no data, or a database query is empty, explicitly state: "I do not have the data to answer this." Do not attempt to extrapolate.
+2. **Strict Data Parsing:** When extracting data from web searches, tools, or user inputs, maintain absolute structural integrity. Never combine distinct categories or product variations into single items (e.g., if extracting lists, keep distinct items entirely separate). Never invent options or parameters that were not explicitly provided in the raw context.
+3. **Live Research:** You MUST proactively use the `web_search` tool to fetch live data for any query regarding current market data, live news, or real-time events before formulating an answer.
+4. **Tool Integrity:** Any trade execution must pass through `execute_trade_tool`. 
+
+### OUTPUT FORMATTING
+- Speak directly, logically, and concisely. 
+- No generic motivation, empty praise, or vague advice. Provide hard facts and clear reasoning.
+- Never expose raw JSON, structural keys, or metadata blocks in your final response."""
 
 def get_compiled_graph():
     """Connect to a Supabase PostgreSQL instance using psycopg[binary]. Configure pgvector and langgraph-checkpoint-postgres."""
