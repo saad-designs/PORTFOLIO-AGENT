@@ -120,14 +120,8 @@ async def on_message(message):
                     await message.channel.send(final_reply[i:i + chunk_size])
 
             except Exception as e:
-                import traceback
-                full_traceback = traceback.format_exc()
-                error_msg = f"⚠️ **Agent Execution Error:** Check Render logs for the full stack trace."
-                
-                # Print the full traceback to Render console
-                print(f"❌ [GRAPH ERROR] Full traceback:\n{full_traceback}", flush=True)
-                
-                await message.channel.send(error_msg)
+                # This catches any graph-level crash and tells you immediately in Discord
+                await message.channel.send(f"⚠️ **I ran into a system error processing that:**\n`{str(e)}`")
 
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")

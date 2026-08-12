@@ -56,7 +56,7 @@ def save_to_knowledge_base(content: str, category: str = "user_memory") -> str:
             """, ("conversational_memory", f"category:{category}", content, str(embedding)))
         return f"Successfully remembered: '{content[:50]}...'"
     except Exception as e:
-        return f"Error saving to knowledge base: {e}"
+        return f"Database Error: Could not save memory. Details: {str(e)}"
 
 @tool
 def manage_scheduled_task(action: str, task_name: str = None, schedule_cron: str = None) -> str:
@@ -88,7 +88,7 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     """
     ticker = ticker.upper()
     if ticker not in SHARIAH_COMPLIANT:
-        raise ValueError(f"Trade execution rejected: Ticker '{ticker}' is not KMI-30 Shariah Compliant.")
+        return f"System Error: Transaction Rejected. {ticker} is not in the KMI-30 Shariah compliant list."
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
