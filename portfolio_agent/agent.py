@@ -1,5 +1,12 @@
 import os
 import yfinance as yf
+import requests
+
+# 1. Initialize a custom session to bypass Render's shared IP rate limits
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+})
 import matplotlib
 matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
 import matplotlib.pyplot as plt
@@ -24,7 +31,7 @@ def get_stock_quote(ticker: str) -> str:
         # Auto-format PSX tickers for Yahoo Finance
         fetch_ticker = f"{ticker}.KA" if "." not in ticker else ticker
 
-        stock = yf.Ticker(fetch_ticker)
+        stock = yf.Ticker(fetch_ticker, session=yf_session)
         info = stock.info
 
         if not info or ('currentPrice' not in info and 'regularMarketPrice' not in info):
@@ -48,10 +55,10 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
     """Generates a technical price chart for a given ticker. Valid periods: '1mo', '3mo', '6mo', '1y'."""
     try:
         fetch_ticker = f"{ticker}.KA" if "." not in ticker else ticker
-        hist = yf.Ticker(fetch_ticker).history(period=period)
+        hist = yf.Ticker(fetch_ticker, session=yf_session).history(period=period)
 
         if hist.empty:
-            return f"Data Unavailable. Could not fetch historical data for {ticker}."
+            return f"Data Unavailable. Could not fetch historical data for {ticker}. API returned empty dataframe."
 
         plt.figure(figsize=(10, 5))
         plt.plot(hist.index, hist['Close'], label='Close Price', color='#1DB954', linewidth=2)
