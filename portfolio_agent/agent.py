@@ -2,6 +2,7 @@ import os
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
+from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 import psycopg
 from scheduler_config import scheduler
@@ -92,14 +93,24 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
 llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0.7, api_key=os.getenv("GEMINI_API_KEY"))
-tools = [save_to_knowledge_base, manage_scheduled_task, retrieve_context_tool, execute_trade_tool]
 
-SYSTEM_PROMPT = """You are an intelligent, conversational financial and research AI assistant.
-- Speak naturally, directly, and concisely as a human collaborator.
-- Use your tools to search knowledge, schedule/manage tasks, or store new information when requested.
-- If the user shares an important fact or asks you to remember something, call `save_to_knowledge_base`.
-- Synthesize all context into clear, conversational answers without exposing raw JSON or structural keys unless explicitly requested.
-- When the user wants to execute a trade, you MUST use execute_trade_tool."""
+# Instantiate the search tool
+search_tool = DuckDuckGoSearchRun(name="web_search")
+
+tools = [
+    search_tool,
+    retrieve_context_tool,
+    save_to_knowledge_base,
+    manage_scheduled_task,
+    execute_trade_tool
+]
+
+SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent collaborator.
+- Speak naturally, directly, and concisely.
+- **Live Research Tactic:** When a user asks about current market data, live news, real-time events, or facts not present in your local long-term database, you MUST proactively use the `web_search` tool to fetch live data before formulating an answer.
+- **Memory Tactic:** If the user shares long-term preferences, strategies, or important notes, invoke `save_to_knowledge_base`.
+- **Guardrails:** Any trade execution must pass through `execute_trade_tool` to check Shariah KMI-30 compliance.
+- Never expose raw JSON, structural keys, or metadata blocks. Deliver clean, formatted answers."""
 
 def get_compiled_graph():
     """Connect to a Supabase PostgreSQL instance using psycopg[binary]. Configure pgvector and langgraph-checkpoint-postgres."""

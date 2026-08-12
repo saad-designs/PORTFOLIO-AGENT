@@ -12,3 +12,4 @@ requests
 python-dotenv
 apscheduler
 youtube-transcript-api
+duckduckgo-search
