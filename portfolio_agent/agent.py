@@ -80,6 +80,7 @@ from typing import Any
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatResult
@@ -153,12 +154,16 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
 
 # 3. Refactored Portfolio Tracker
 @tool
-def get_portfolio_status() -> str:
+def get_portfolio_status(config: RunnableConfig) -> str:
     """Fetches current portfolio holdings and calculates real-time unrealized P/L against live PSX prices."""
+    user_id = config.get("configurable", {}).get("user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+
     try:
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT ticker, quantity, average_price FROM portfolio_holdings')
+        cur.execute('SELECT ticker, quantity, average_price FROM portfolio_holdings WHERE discord_user_id = %s', (user_id,))
         holdings = cur.fetchall()
         cur.close()
         conn.close()
@@ -284,27 +289,32 @@ class PortfolioPositionSchema(BaseModel):
 
 # 2. Bind the strict schema to the tool
 @tool(args_schema=PortfolioPositionSchema)
-def add_portfolio_position(ticker: str, quantity: float, price: float) -> str:
+def add_portfolio_position(ticker: str, quantity: float, price: float, config: RunnableConfig) -> str:
     """Manually log a new stock position into the portfolio holdings database."""
+    # 1. Extract the secure user ID injected by the Discord handler
+    user_id = config.get("configurable", {}).get("user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+
     try:
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor()
         
-        # Note: mapping 'price' to your database's 'average_price' column
+        # 2. Update SQL to enforce the composite primary key
         cur.execute(
-            '''INSERT INTO portfolio_holdings (ticker, quantity, average_price) 
-               VALUES (%s, %s, %s)
-               ON CONFLICT (ticker) 
+            '''INSERT INTO portfolio_holdings (discord_user_id, ticker, quantity, average_price) 
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (discord_user_id, ticker) 
                DO UPDATE SET 
                   quantity = portfolio_holdings.quantity + EXCLUDED.quantity,
                   average_price = ((portfolio_holdings.quantity * portfolio_holdings.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price)) / (portfolio_holdings.quantity + EXCLUDED.quantity)''',
-            (ticker.upper(), quantity, price)
+            (user_id, ticker.upper(), quantity, price)
         )
         conn.commit()
         cur.close()
         conn.close()
         
-        return f"Database updated: Added {quantity} shares of {ticker.upper()} at {price} PKR."
+        return f"Database updated: Added {quantity} shares of {ticker.upper()} at {price} PKR for user {user_id}."
     except Exception as e:
         return f"Database Error: {str(e)}"
 

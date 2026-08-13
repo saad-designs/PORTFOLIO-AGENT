@@ -135,7 +135,8 @@ async def on_message(message):
                 try:
                     # Map Discord Channel ID to PostgreSQL Checkpointer thread_id
                     thread_id = str(message.channel.id)
-                    config = {"configurable": {"thread_id": thread_id}}
+                    author_id = str(message.author.id)
+                    config = {"configurable": {"thread_id": thread_id, "user_id": author_id}}
                     
                     print(f"🔄 Invoking LangGraph agent for thread_id: {thread_id}...", flush=True)
                     
