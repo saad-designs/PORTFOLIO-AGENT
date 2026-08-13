@@ -10,6 +10,32 @@ import matplotlib
 matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
 import matplotlib.pyplot as plt
 
+# Helper: Fetch Quote with Corporate Action Fallback
+def fetch_quote_with_fallback(ticker: str):
+    suffixes = ["", "XD", "XB", "XR"]
+    for suffix in suffixes:
+        test_ticker = f"{ticker}{suffix}".upper()
+        try:
+            q = psxdata.quote(test_ticker)
+            if q is not None and not (isinstance(q, (pd.DataFrame, pd.Series)) and q.empty):
+                return q, test_ticker
+        except Exception:
+            continue
+    return None, ticker
+
+# Helper: Fetch Stocks with Corporate Action Fallback
+def fetch_stocks_with_fallback(ticker: str, start: str, end: str):
+    suffixes = ["", "XD", "XB", "XR"]
+    for suffix in suffixes:
+        test_ticker = f"{ticker}{suffix}".upper()
+        try:
+            raw_hist = psxdata.stocks(test_ticker, start=start, end=end)
+            if raw_hist is not None and not raw_hist.empty:
+                return raw_hist, test_ticker
+        except Exception:
+            continue
+    return pd.DataFrame(), ticker
+
 # Helper: Clean numeric float parsing
 def clean_float(val, default=0.0):
     if val is None or pd.isna(val):
@@ -71,8 +97,8 @@ SHARIAH_COMPLIANT = ["SYS", "LUCK", "MARI", "FCCL", "OGDCL"]
 def get_stock_quote(ticker: str) -> str:
     """Fetches real-time price and volume for a given PSX stock ticker."""
     try:
-        q = psxdata.quote(ticker.upper())
-        if q is None or (isinstance(q, (pd.DataFrame, pd.Series)) and q.empty):
+        q, resolved_ticker = fetch_quote_with_fallback(ticker)
+        if q is None:
             return f"Data Unavailable. Could not fetch live data for {ticker}."
         
         data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
@@ -84,7 +110,7 @@ def get_stock_quote(ticker: str) -> str:
         volume_val = clean_float(raw_volume, default=None)
         volume_str = f"{int(volume_val):,}" if volume_val is not None else "N/A"
         
-        return (f"Live PSX Data for {ticker.upper()}:\n"
+        return (f"Live PSX Data for {resolved_ticker}:\n"
                 f"- Current Price: Rs. {price:.2f}\n"
                 f"- Volume: {volume_str}")
     except Exception as e:
@@ -101,7 +127,7 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
         elif period == '1y': start_date = end_date - timedelta(days=365)
         else: start_date = end_date - timedelta(days=90)
         
-        raw_hist = psxdata.stocks(ticker.upper(), start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+        raw_hist, resolved_ticker = fetch_stocks_with_fallback(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
         hist = sanitize_psx_df(raw_hist)
         
         if hist.empty:
@@ -115,7 +141,7 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
             volume='Volume' in hist.columns,
             mav=(20, 50) if len(hist) >= 50 else (10, 20),
             style='nightclouds',
-            title=f"{ticker.upper()} PSX Chart ({period})",
+            title=f"{resolved_ticker} PSX Chart ({period})",
             ylabel='Price (PKR)',
             ylabel_lower='Volume',
             savefig=filepath
@@ -152,8 +178,8 @@ def get_portfolio_status() -> str:
             invested = qty * avg_price
             total_invested += invested
 
-            q = psxdata.quote(ticker)
-            if q is None or (isinstance(q, (pd.DataFrame, pd.Series)) and q.empty):
+            q, resolved_ticker = fetch_quote_with_fallback(ticker)
+            if q is None:
                 report.append(f"- **{ticker}**: {qty} shares @ Rs. {avg_price:.2f} (Live data unavailable)")
                 continue
                 
@@ -166,7 +192,7 @@ def get_portfolio_status() -> str:
             pnl = current_value - invested
             pnl_percent = (pnl / invested) * 100 if invested > 0 else 0
 
-            report.append(f"- **{ticker}**: {qty:.0f} shares | Avg: Rs. {avg_price:.2f} | Live: Rs. {live_price:.2f} | P/L: Rs. {pnl:.2f} ({pnl_percent:.2f}%)")
+            report.append(f"- **{resolved_ticker}**: {qty:.0f} shares | Avg: Rs. {avg_price:.2f} | Live: Rs. {live_price:.2f} | P/L: Rs. {pnl:.2f} ({pnl_percent:.2f}%)")
 
         total_pnl = total_current_value - total_invested
         total_pnl_percent = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
