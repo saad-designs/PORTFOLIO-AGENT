@@ -50,6 +50,7 @@ def sanitize_psx_df(df):
         df['Volume'] = df['Volume'].fillna(0)
         
     return df
+from typing import Any
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
@@ -261,16 +262,29 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
 class CustomAutoSwitchLLM(BaseChatModel):
-    primary: BaseChatModel
-    secondary: BaseChatModel
+    primary: Any
+    secondary: Any
+
+    def bind_tools(self, tools, **kwargs):
+        """Passes tool definitions down to both primary and secondary models."""
+        return CustomAutoSwitchLLM(
+            primary=self.primary.bind_tools(tools, **kwargs),
+            secondary=self.secondary.bind_tools(tools, **kwargs)
+        )
+
+    def invoke(self, input, config=None, **kwargs):
+        """Handles LangGraph execution calls with fallback protection."""
+        try:
+            return self.primary.invoke(input, config=config, **kwargs)
+        except Exception as e:
+            print(f"⚠️ Primary model failed: {str(e)}. Auto-switching to secondary...")
+            return self.secondary.invoke(input, config=config, **kwargs)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         try:
-            # Attempt execution with primary engine
             return self.primary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as e:
             print(f"⚠️ Primary model failed: {str(e)}. Auto-switching to secondary...")
-            # Fallback to secondary engine on any exception (including 429 quota limits)
             return self.secondary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     @property
