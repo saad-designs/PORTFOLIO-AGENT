@@ -325,8 +325,18 @@ class CustomAutoSwitchLLM(BaseChatModel):
         return "custom_autoswitch_llm"
 
 # 1. Initialize Primary and Secondary Engines
-primary_engine = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0)
-secondary_engine = ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=os.getenv("GROQ_API_KEY"), temperature=0)
+# Setting max_retries=0 forces the Google SDK to throw the 429 error immediately 
+# instead of silently sleeping the thread.
+primary_engine = ChatGoogleGenerativeAI(
+    model="gemini-3.6-flash", 
+    temperature=0, 
+    max_retries=0
+)
+secondary_engine = ChatGroq(
+    model="llama-3.3-70b-versatile", 
+    groq_api_key=os.getenv("GROQ_API_KEY"), 
+    temperature=0
+)
 
 # 2. Instantiate with Pydantic field assignment
 llm = CustomAutoSwitchLLM(primary=primary_engine, secondary=secondary_engine)
