@@ -6,6 +6,8 @@ import re
 import requests
 import aiohttp
 import traceback
+import base64
+from langchain_core.messages import HumanMessage
 from agent import graph as agent_app
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
 import asyncio
@@ -137,7 +139,34 @@ async def on_message(message):
                     
                     print(f"🔄 Invoking LangGraph agent for thread_id: {thread_id}...", flush=True)
                     
-                    inputs = {"messages": [("user", message.content)]}
+                    content_payload = []
+
+                    # 1. Add text prompt if provided
+                    if message.content:
+                        content_payload.append({"type": "text", "text": message.content})
+
+                    # 2. Extract image attachments and convert to Base64
+                    for attachment in message.attachments:
+                        if attachment.content_type and attachment.content_type.startswith("image/"):
+                            image_bytes = await attachment.read()
+                            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                            content_payload.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{attachment.content_type};base64,{base64_image}"}
+                            })
+
+                    # Return early if message contains neither text nor images
+                    if not content_payload:
+                        return
+
+                    # 3. If image present without text, add default instruction
+                    if message.attachments and not message.content:
+                        content_payload.insert(0, {"type": "text", "text": "Extract and process the text/data from this image."})
+
+                    # Pass structured input array or text string to the agent
+                    prompt_input = content_payload if message.attachments else message.content
+
+                    inputs = {"messages": [HumanMessage(content=prompt_input)]}
                     
                     import asyncio
                     # Execute state machine asynchronously via to_thread (since checkpointer is sync)
