@@ -3,6 +3,7 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import agent
 from langgraph.types import Command
@@ -51,6 +52,12 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+
+# A dedicated, microscopic endpoint for cron-job.org
+@app.get("/ping", response_class=PlainTextResponse)
+@app.head("/ping", response_class=PlainTextResponse)
+async def ping():
+    return "OK"
 
 @app.get("/")
 @app.head("/")
