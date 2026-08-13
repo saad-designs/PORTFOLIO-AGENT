@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 import os
 import re
 import requests
@@ -21,8 +21,8 @@ CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
 # Set run times in UTC to align with 09:45 AM and 03:45 PM PKT
 market_times = [
-    datetime.time(hour=4, minute=45, tzinfo=datetime.timezone.utc),
-    datetime.time(hour=10, minute=45, tzinfo=datetime.timezone.utc)
+    time(hour=4, minute=45, tzinfo=timezone.utc),
+    time(hour=10, minute=45, tzinfo=timezone.utc)
 ]
 
 @tasks.loop(time=market_times)
