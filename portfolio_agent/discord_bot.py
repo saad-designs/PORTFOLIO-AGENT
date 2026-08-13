@@ -419,6 +419,28 @@ async def dividend_watchdog():
     except Exception as e:
         print(f"Dividend Watchdog Error: {str(e)}")
 
+@bot.command(name="test_youtube")
+async def test_youtube(ctx, *, mentor_name: str):
+    await ctx.send(f"🔍 Searching YouTube and extracting transcript for: **{mentor_name}**...")
+    
+    try:
+        # The function expects a list, so we wrap the single string in brackets
+        transcripts_data = fetch_mentor_transcripts([mentor_name])
+        
+        if not transcripts_data or mentor_name not in transcripts_data:
+            await ctx.send(f"❌ **Failed.** No transcript extracted for {mentor_name}. Check your Render logs for API errors.")
+            return
+            
+        raw_text = transcripts_data[mentor_name]
+        
+        # Cap the output to fit within Discord's 2000 character limit
+        preview = raw_text[:1500] + "..." if len(raw_text) > 1500 else raw_text
+        
+        await ctx.send(f"✅ **Success!** Extracted {len(raw_text)} characters.\n\n**Transcript Preview:**\n```{preview}```")
+
+    except Exception as e:
+        await ctx.send(f"⚠️ **Error:** {str(e)}")
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
