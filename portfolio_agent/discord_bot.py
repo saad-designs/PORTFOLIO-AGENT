@@ -328,7 +328,7 @@ async def test_scraper(ctx, ticker: str):
 
 # Execute daily at 16:30 (4:30 PM) Pakistan Standard Time
 tz_pkt = pytz.timezone('Asia/Karachi')
-dividend_time = datetime.time(hour=16, minute=30, tzinfo=tz_pkt)
+dividend_time = time(hour=16, minute=30, tzinfo=tz_pkt)
 
 @tasks.loop(time=dividend_time)
 async def dividend_watchdog():
