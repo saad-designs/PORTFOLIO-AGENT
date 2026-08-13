@@ -412,52 +412,29 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-class CustomAutoSwitchLLM(BaseChatModel):
-    primary: Any
-    secondary: Any
-
-    def bind_tools(self, tools, **kwargs):
-        """Passes tool definitions down to both primary and secondary models."""
-        return CustomAutoSwitchLLM(
-            primary=self.primary.bind_tools(tools, **kwargs),
-            secondary=self.secondary.bind_tools(tools, **kwargs)
-        )
-
-    def invoke(self, input, config=None, **kwargs):
-        """Handles LangGraph execution calls with fallback protection."""
-        try:
-            return self.primary.invoke(input, config=config, **kwargs)
-        except Exception as e:
-            print(f"⚠️ Primary model failed: {str(e)}. Auto-switching to secondary...")
-            return self.secondary.invoke(input, config=config, **kwargs)
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-        try:
-            return self.primary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
-        except Exception as e:
-            print(f"⚠️ Primary model failed: {str(e)}. Auto-switching to secondary...")
-            return self.secondary._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
-
-    @property
-    def _llm_type(self) -> str:
-        return "custom_autoswitch_llm"
-
-# 1. Initialize Primary and Secondary Engines
-# Setting max_retries=0 forces the Google SDK to throw the 429 error immediately 
-# instead of silently sleeping the thread.
-primary_engine = ChatGoogleGenerativeAI(
+# 1. Define the three execution tiers
+tier1_gemini = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash", 
     temperature=0, 
     max_retries=0
 )
-secondary_engine = ChatGroq(
+
+tier2_groq_70b = ChatGroq(
     model="llama-3.3-70b-versatile", 
     groq_api_key=os.getenv("GROQ_API_KEY"), 
     temperature=0
 )
 
-# 2. Instantiate with Pydantic field assignment
-llm = CustomAutoSwitchLLM(primary=primary_engine, secondary=secondary_engine)
+tier3_groq_8b = ChatGroq(
+    model="llama-3.1-8b-instant", 
+    groq_api_key=os.getenv("GROQ_API_KEY"), 
+    temperature=0
+)
+
+# 2. Bind them into a sequential fallback chain
+# If Tier 1 hits a 429/quota error, it instantly hands off to Tier 2. 
+# If Tier 2 hits its daily token limit (TPD), it cascades to Tier 3.
+llm = tier1_gemini.with_fallbacks([tier2_groq_70b, tier3_groq_8b])
 
 # Instantiate the search tool
 search_tool = DuckDuckGoSearchRun(name="web_search")
