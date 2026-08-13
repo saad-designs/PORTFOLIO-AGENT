@@ -76,7 +76,7 @@ def sanitize_psx_df(df):
         df['Volume'] = df['Volume'].fillna(0)
         
     return df
-from typing import Any
+from typing import Any, Optional
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
@@ -165,15 +165,20 @@ def get_portfolio_status(config: RunnableConfig) -> str:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute('SELECT ticker, quantity, average_price FROM portfolio_holdings WHERE discord_user_id = %s', (user_id,))
         holdings = cur.fetchall()
+        
+        cur.execute('SELECT SUM(amount) AS total_cash FROM public.cash_ledger WHERE discord_user_id = %s', (user_id,))
+        cash_res = cur.fetchone()
+        liquid_cash = float(cash_res['total_cash']) if cash_res and cash_res.get('total_cash') is not None else 0.0
+        
         cur.close()
         conn.close()
-
-        if not holdings:
-            return "Data Unavailable. The portfolio is currently empty."
 
         report = ["📊 **Live PSX Portfolio Status**\n"]
         total_invested = 0
         total_current_value = 0
+
+        if not holdings and liquid_cash == 0.0:
+            return "Data Unavailable. The portfolio and cash ledger are currently empty."
 
         for row in holdings:
             ticker = row['ticker'].upper()
@@ -201,15 +206,65 @@ def get_portfolio_status(config: RunnableConfig) -> str:
 
         total_pnl = total_current_value - total_invested
         total_pnl_percent = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
+        
+        true_total_value = total_current_value + liquid_cash
 
         report.append("\n**Summary:**")
-        report.append(f"- Total Invested: Rs. {total_invested:.2f}")
-        report.append(f"- Total Current Value: Rs. {total_current_value:.2f}")
-        report.append(f"- Total P/L: Rs. {total_pnl:.2f} ({total_pnl_percent:.2f}%)")
+        report.append(f"- Liquid Cash (Buying Power): Rs. {liquid_cash:.2f}")
+        report.append(f"- Total Invested (Equities): Rs. {total_invested:.2f}")
+        report.append(f"- Equities Current Value: Rs. {total_current_value:.2f}")
+        report.append(f"- Equities P/L: Rs. {total_pnl:.2f} ({total_pnl_percent:.2f}%)")
+        report.append(f"- **True Total Portfolio Value**: Rs. {true_total_value:.2f}")
 
         return "\n".join(report)
     except Exception as e:
         return f"System Error: Could not calculate portfolio status. Details: {str(e)}"
+
+class CashTransactionSchema(BaseModel):
+    transaction_type: str = Field(description="Must be 'DEPOSIT', 'WITHDRAWAL', or 'DIVIDEND'")
+    amount: float = Field(description="The amount of the transaction. For withdrawals, pass as negative.")
+    ticker: Optional[str] = Field(None, description="Optional ticker symbol, e.g., for dividends.")
+
+@tool(args_schema=CashTransactionSchema)
+def log_cash_transaction(transaction_type: str, amount: float, ticker: Optional[str], config: RunnableConfig) -> str:
+    """Logs a cash deposit, withdrawal, or dividend into the ledger."""
+    user_id = config.get("configurable", {}).get("user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+        
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+        cur.execute(
+            '''INSERT INTO public.cash_ledger (discord_user_id, transaction_type, amount, ticker) 
+               VALUES (%s, %s, %s, %s)''',
+            (user_id, transaction_type.upper(), amount, ticker.upper() if ticker else None)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Ledger updated: {transaction_type.upper()} of {amount} PKR recorded for user {user_id}."
+    except Exception as e:
+        return f"Database Error: {str(e)}"
+
+@tool
+def get_liquid_cash(config: RunnableConfig) -> str:
+    """Fetches the user's current buying power / liquid cash from the ledger."""
+    user_id = config.get("configurable", {}).get("user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+        
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+        cur.execute('SELECT SUM(amount) FROM public.cash_ledger WHERE discord_user_id = %s', (user_id,))
+        res = cur.fetchone()
+        liquid_cash = float(res[0]) if res and res[0] is not None else 0.0
+        cur.close()
+        conn.close()
+        return f"Total Liquid Cash / Buying Power for user {user_id}: Rs. {liquid_cash:.2f}"
+    except Exception as e:
+        return f"Database Error: {str(e)}"
 
 @tool
 def retrieve_context_tool(query: str) -> str:
@@ -389,7 +444,9 @@ tools = [
     save_to_knowledge_base,
     manage_scheduled_task,
     add_portfolio_position,
-    execute_trade_tool
+    execute_trade_tool,
+    log_cash_transaction,
+    get_liquid_cash
 ]
 
 SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent. You operate under absolute factual strictness.
