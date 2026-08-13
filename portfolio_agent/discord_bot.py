@@ -121,60 +121,64 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Allow bot commands to bypass the LangGraph agent
-    await bot.process_commands(message)
+    try:
+        # Allow bot commands to bypass the LangGraph agent
+        await bot.process_commands(message)
 
-    if not message.content.startswith(bot.command_prefix):
-        # Entry point debug log (forces immediate output in Render console)
-        print(f"📩 [DISCORD EVENT] Received message from {message.author}: '{message.content}'", flush=True)
+        if not message.content.startswith(bot.command_prefix):
+            # Entry point debug log (forces immediate output in Render console)
+            print(f"📩 [DISCORD EVENT] Received message from {message.author}: '{message.content}'", flush=True)
 
-        async with message.channel.typing():
-            try:
-                # Map Discord Channel ID to PostgreSQL Checkpointer thread_id
-                thread_id = str(message.channel.id)
-                config = {"configurable": {"thread_id": thread_id}}
-                
-                print(f"🔄 Invoking LangGraph agent for thread_id: {thread_id}...", flush=True)
-                
-                inputs = {"messages": [("user", message.content)]}
-                
-                import asyncio
-                # Execute state machine asynchronously via to_thread (since checkpointer is sync)
-                response = await asyncio.to_thread(agent_app.invoke, inputs, config)
-                
-                # 1. Parse the LLM's raw output
-                raw_content = response["messages"][-1].content
-                if isinstance(raw_content, list):
-                    final_reply = "".join(
-                        block.get("text", "") for block in raw_content 
-                        if isinstance(block, dict) and block.get("type") == "text"
-                    )
-                else:
-                    final_reply = str(raw_content)
-        
-                # 2. Intercept the file path (catches [FILE: /tmp/...] OR Markdown ![alt](/tmp/...))
-                file_path = None
-                match = re.search(r'/tmp/[\w_.-]+\.png', final_reply)
+            async with message.channel.typing():
+                try:
+                    # Map Discord Channel ID to PostgreSQL Checkpointer thread_id
+                    thread_id = str(message.channel.id)
+                    config = {"configurable": {"thread_id": thread_id}}
+                    
+                    print(f"🔄 Invoking LangGraph agent for thread_id: {thread_id}...", flush=True)
+                    
+                    inputs = {"messages": [("user", message.content)]}
+                    
+                    import asyncio
+                    # Execute state machine asynchronously via to_thread (since checkpointer is sync)
+                    response = await asyncio.to_thread(agent_app.invoke, inputs, config)
+                    
+                    # 1. Parse the LLM's raw output
+                    raw_content = response["messages"][-1].content
+                    if isinstance(raw_content, list):
+                        final_reply = "".join(
+                            block.get("text", "") for block in raw_content 
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        )
+                    else:
+                        final_reply = str(raw_content)
+            
+                    # 2. Intercept the file path (catches [FILE: /tmp/...] OR Markdown ![alt](/tmp/...))
+                    file_path = None
+                    match = re.search(r'/tmp/[\w_.-]+\.png', final_reply)
 
-                if match:
-                    file_path = match.group(0)
-                    # Strip markdown image syntax or [FILE: ...] tags from the output text
-                    final_reply = re.sub(r'(!\[.*?\]\(/tmp/[\w_.-]+\.png\)|\[FILE:\s*/tmp/[\w_.-]+\.png\])', '', final_reply).strip()
-        
-                # 3. Send text in chunks
-                if final_reply:
-                    chunk_size = 1900
-                    for i in range(0, len(final_reply), chunk_size):
-                        await message.channel.send(final_reply[i:i + chunk_size])
-        
-                # 4. Upload the image and clear the temporary file
-                if file_path and os.path.exists(file_path):
-                    await message.channel.send(file=discord.File(file_path))
-                    os.remove(file_path)
+                    if match:
+                        file_path = match.group(0)
+                        # Strip markdown image syntax or [FILE: ...] tags from the output text
+                        final_reply = re.sub(r'(!\[.*?\]\(/tmp/[\w_.-]+\.png\)|\[FILE:\s*/tmp/[\w_.-]+\.png\])', '', final_reply).strip()
+            
+                    # 3. Send text in chunks
+                    if final_reply:
+                        chunk_size = 1900
+                        for i in range(0, len(final_reply), chunk_size):
+                            await message.channel.send(final_reply[i:i + chunk_size])
+            
+                    # 4. Upload the image and clear the temporary file
+                    if file_path and os.path.exists(file_path):
+                        await message.channel.send(file=discord.File(file_path))
+                        os.remove(file_path)
 
-            except Exception as e:
-                # This catches any graph-level crash and tells you immediately in Discord
-                await message.channel.send(f"⚠️ **I ran into a system error processing that:**\n`{str(e)}`")
+                except Exception as e:
+                    # This catches any graph-level crash and tells you immediately in Discord
+                    await message.channel.send(f"⚠️ **I ran into a system error processing that:**\n`{str(e)}`")
+    except Exception as e:
+        # Prevent silent crashes by reporting the exact exception to Discord
+        await message.channel.send(f"⚠️ **Critical Handler Error:** `{str(e)}`")
 
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")
