@@ -324,6 +324,17 @@ def get_dividend_data(ticker: str):
         print(f"Scraper failed for {ticker}: {str(e)}")
         return 0.0, None
 
+@bot.command(name="test_scraper")
+async def test_scraper(ctx, ticker: str):
+    await ctx.send(f"Scraping PSX portal for {ticker.upper()}...")
+    
+    dividend, ex_date = get_dividend_data(ticker)
+    
+    if dividend == 0.0 and ex_date is None:
+        await ctx.send(f"❌ Scraper failed or no data found for {ticker.upper()}.")
+    else:
+        await ctx.send(f"✅ **{ticker.upper()} Data:**\nDividend: {dividend} PKR\nEx-Date: '{ex_date}'")
+
 
 # Execute daily at 16:30 (4:30 PM) Pakistan Standard Time
 tz_pkt = pytz.timezone('Asia/Karachi')
