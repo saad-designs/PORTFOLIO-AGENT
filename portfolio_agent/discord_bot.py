@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-import datetime
+from datetime import datetime, time
 import os
 import re
 import requests
