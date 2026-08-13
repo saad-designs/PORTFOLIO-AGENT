@@ -283,11 +283,108 @@ async def market_watchdog():
     except Exception as e:
         print(f"Watchdog Error: {str(e)}")
 
+from bs4 import BeautifulSoup
+
+def get_dividend_data(ticker: str):
+    """
+    Scrapes the PSX Data Portal for the most recent cash dividend and its Ex-Date.
+    Returns a tuple: (dividend_amount, ex_date_string) or (0.0, None)
+    """
+    try:
+        url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return 0.0, None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        payouts_table = soup.find('table', class_='table payout-history') 
+        
+        if not payouts_table:
+            return 0.0, None
+            
+        latest_row = payouts_table.find('tbody').find('tr')
+        if not latest_row:
+            return 0.0, None
+            
+        columns = latest_row.find_all('td')
+        
+        # Extract Dividend Amount
+        raw_dividend_text = columns[1].text.strip()
+        match = re.search(r"(\d+\.\d+|\d+)", raw_dividend_text)
+        dividend_amount = float(match.group(1)) if match else 0.0
+        
+        # Extract Ex-Date (Usually Column 4 in PSX DOM, formatted as 'DD MMM YYYY')
+        ex_date_text = columns[4].text.strip()
+        
+        return dividend_amount, ex_date_text
+
+    except Exception as e:
+        print(f"Scraper failed for {ticker}: {str(e)}")
+        return 0.0, None
+
+
+# Execute daily at 16:30 (4:30 PM) Pakistan Standard Time
+tz_pkt = pytz.timezone('Asia/Karachi')
+dividend_time = datetime.time(hour=16, minute=30, tzinfo=tz_pkt)
+
+@tasks.loop(time=dividend_time)
+async def dividend_watchdog():
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        cur.execute("SELECT discord_user_id, ticker, quantity FROM portfolio_holdings WHERE quantity > 0")
+        holdings = cur.fetchall()
+
+        if not holdings:
+            return
+
+        unique_tickers = set(h['ticker'] for h in holdings)
+        
+        # Get today's date formatted to match PSX portal (e.g., '13 Aug 2026')
+        today_str = datetime.datetime.now(tz_pkt).strftime('%d %b %Y')
+        
+        for ticker in unique_tickers:
+            dividend_per_share, ex_date = get_dividend_data(ticker)
+            
+            # The brutal gate check: Does it pay out, and is TODAY the actual ex-date?
+            if not dividend_per_share or ex_date != today_str:
+                continue
+
+            # Calculate and Distribute Cash
+            for holding in holdings:
+                if holding['ticker'] == ticker:
+                    user_id = holding['discord_user_id']
+                    quantity = holding['quantity']
+                    payout = float(quantity) * float(dividend_per_share)
+                    
+                    # Inject into Cash Ledger
+                    cur.execute(
+                        '''INSERT INTO cash_ledger (discord_user_id, transaction_type, amount, ticker)
+                           VALUES (%s, 'DIVIDEND', %s, %s)''',
+                        (user_id, payout, ticker)
+                    )
+                    
+                    user = await bot.fetch_user(int(user_id))
+                    if user:
+                        await user.send(f"💰 **DIVIDEND DEPOSIT:** {ticker} went Ex-Dividend today at {dividend_per_share} PKR per share. Based on your {quantity} shares, **{payout:.2f} PKR** has been deposited into your cash ledger.")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        print(f"Dividend Watchdog Error: {str(e)}")
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     if not market_watchdog.is_running():
         market_watchdog.start()
+    if not dividend_watchdog.is_running():
+        dividend_watchdog.start()
 
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")
