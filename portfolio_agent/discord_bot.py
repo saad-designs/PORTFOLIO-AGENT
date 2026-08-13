@@ -12,6 +12,7 @@ from agent import graph as agent_app
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
 import asyncio
 from youtube_scraper import fetch_mentor_transcripts
+from googleapiclient.discovery import build
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -262,7 +263,7 @@ async def market_watchdog():
     try:
         # 1. Strict Market-Hours Time Gate
         tz_pkt = pytz.timezone('Asia/Karachi')
-        now_pkt = datetime.datetime.now(tz_pkt)
+        now_pkt = datetime.now(tz_pkt)
         
         # Block weekends (5 = Saturday, 6 = Sunday)
         if now_pkt.weekday() >= 5:
@@ -270,8 +271,8 @@ async def market_watchdog():
             
         # Block outside 09:30 AM - 03:30 PM trading hours
         current_time = now_pkt.time()
-        market_open = datetime.datetime.strptime("09:30", "%H:%M").time()
-        market_close = datetime.datetime.strptime("15:30", "%H:%M").time()
+        market_open = datetime.strptime("09:30", "%H:%M").time()
+        market_close = datetime.strptime("15:30", "%H:%M").time()
         
         if not (market_open <= current_time <= market_close):
             return 
@@ -385,7 +386,7 @@ async def dividend_watchdog():
         unique_tickers = set(h['ticker'] for h in holdings)
         
         # Get today's date formatted to match PSX portal (e.g., '13 Aug 2026')
-        today_str = datetime.datetime.now(tz_pkt).strftime('%d %b %Y')
+        today_str = datetime.now(tz_pkt).strftime('%d %b %Y')
         
         for ticker in unique_tickers:
             dividend_per_share, ex_date = get_dividend_data(ticker)
@@ -440,6 +441,25 @@ async def test_youtube(ctx, *, mentor_name: str):
 
     except Exception as e:
         await ctx.send(f"⚠️ **Error:** {str(e)}")
+
+@bot.command(name="debug_youtube")
+async def debug_youtube(ctx):
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        await ctx.send("❌ Error: GOOGLE_API_KEY environment variable is missing.")
+        return
+        
+    try:
+        await ctx.send("Pinging Google's YouTube Data v3 API directly...")
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.search().list(part="id", q="Investkaar", type="channel", maxResults=1)
+        response = request.execute()
+        
+        channel_id = response['items'][0]['id']['channelId']
+        await ctx.send(f"✅ **API Connection Successful!** Channel ID resolved: `{channel_id}`\nIf you see this, the API works and the failure is inside the transcript or audio fallback logic.")
+        
+    except Exception as e:
+        await ctx.send(f"❌ **API Crash Details:**\n```python\n{str(e)}\n```")
 
 @bot.event
 async def on_ready():
