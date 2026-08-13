@@ -210,6 +210,67 @@ async def on_message(message):
         # Prevent silent crashes by reporting the exact exception to Discord
         await message.channel.send(f"⚠️ **Critical Handler Error:** `{str(e)}`")
 
+import psycopg2
+import psycopg2.extras
+import pandas as pd
+from agent import fetch_quote_with_fallback, clean_float
+
+@tasks.loop(minutes=15)
+async def market_watchdog():
+    try:
+        # 1. Connect to DB and get all ACTIVE alerts
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT alert_id, discord_user_id, ticker, target_price, condition FROM price_alerts WHERE is_active = TRUE")
+        alerts = cur.fetchall()
+
+        if not alerts:
+            cur.close()
+            conn.close()
+            return # Do nothing if no alerts are set
+
+        # 2. Iterate and Check Prices
+        for alert in alerts:
+            # Re-use your fetch_quote_with_fallback function here to get the live price
+            q, resolved_ticker = fetch_quote_with_fallback(alert['ticker'])
+            if q is None:
+                continue
+                
+            data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
+            raw_price = data.get('price', data.get('current', data.get('close', 0)))
+            live_price = clean_float(raw_price)
+            
+            if not live_price:
+                continue
+                
+            trigger = False
+            if alert['condition'] == 'ABOVE' and live_price >= alert['target_price']:
+                trigger = True
+            elif alert['condition'] == 'BELOW' and live_price <= alert['target_price']:
+                trigger = True
+
+            # 3. Fire the Alert & Deactivate it
+            if trigger:
+                user = await bot.fetch_user(int(alert['discord_user_id']))
+                if user:
+                    await user.send(f"🚨 **MARKET ALERT:** {alert['ticker']} has crossed your target of {alert['target_price']} PKR. Current price: **{live_price} PKR**.")
+                
+                # Mark alert as inactive so it doesn't spam the user every 15 minutes
+                cur.execute("UPDATE price_alerts SET is_active = FALSE WHERE alert_id = %s", (alert['alert_id'],))
+                conn.commit()
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        print(f"Watchdog Error: {str(e)}")
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+    if not market_watchdog.is_running():
+        market_watchdog.start()
+
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")
     if token:

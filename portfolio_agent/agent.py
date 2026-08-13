@@ -373,6 +373,33 @@ def add_portfolio_position(ticker: str, quantity: float, price: float, config: R
     except Exception as e:
         return f"Database Error: {str(e)}"
 
+class PriceAlertSchema(BaseModel):
+    ticker: str = Field(description="The exact stock ticker symbol, e.g., 'SYS'")
+    target_price: float = Field(description="The target price that triggers the alert")
+    condition: str = Field(description="Must be 'ABOVE' or 'BELOW'")
+
+@tool(args_schema=PriceAlertSchema)
+def set_price_alert(ticker: str, target_price: float, condition: str, config: RunnableConfig) -> str:
+    """Logs a price alert to watch a stock."""
+    user_id = config.get("configurable", {}).get("user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+        
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+        cur.execute(
+            '''INSERT INTO public.price_alerts (discord_user_id, ticker, target_price, condition) 
+               VALUES (%s, %s, %s, %s)''',
+            (user_id, ticker.upper(), target_price, condition.upper())
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Alert set: Will notify when {ticker.upper()} goes {condition.upper()} {target_price} PKR."
+    except Exception as e:
+        return f"Database Error: {str(e)}"
+
 @tool
 def execute_trade_tool(ticker: str, action: str) -> str:
     """
@@ -446,7 +473,8 @@ tools = [
     add_portfolio_position,
     execute_trade_tool,
     log_cash_transaction,
-    get_liquid_cash
+    get_liquid_cash,
+    set_price_alert
 ]
 
 SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent. You operate under absolute factual strictness.
