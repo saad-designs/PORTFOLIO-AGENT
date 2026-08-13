@@ -22,4 +22,4 @@ mplfinance
 psycopg2-binary
 psxdata
 pytz
-beautifulsoup4
+yfinance

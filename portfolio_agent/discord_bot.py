@@ -283,45 +283,35 @@ async def market_watchdog():
     except Exception as e:
         print(f"Watchdog Error: {str(e)}")
 
-from bs4 import BeautifulSoup
+import yfinance as yf
+from datetime import datetime
 
 def get_dividend_data(ticker: str):
     """
-    Scrapes the PSX Data Portal for the most recent cash dividend and its Ex-Date.
+    Fetches the most recent cash dividend and its Ex-Date using Yahoo Finance.
     Returns a tuple: (dividend_amount, ex_date_string) or (0.0, None)
     """
     try:
-        url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        # Yahoo Finance tracks PSX tickers with the .KA suffix
+        stock = yf.Ticker(f"{ticker.upper()}.KA")
         
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return 0.0, None
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        payouts_table = soup.find('table', class_='table payout-history') 
+        dividends = stock.dividends
         
-        if not payouts_table:
+        # If no dividend history exists, return safely
+        if dividends.empty:
             return 0.0, None
             
-        latest_row = payouts_table.find('tbody').find('tr')
-        if not latest_row:
-            return 0.0, None
-            
-        columns = latest_row.find_all('td')
+        # Extract the most recent dividend payout
+        latest_date = dividends.index[-1]
+        dividend_amount = float(dividends.iloc[-1])
         
-        # Extract Dividend Amount
-        raw_dividend_text = columns[1].text.strip()
-        match = re.search(r"(\d+\.\d+|\d+)", raw_dividend_text)
-        dividend_amount = float(match.group(1)) if match else 0.0
-        
-        # Extract Ex-Date (Usually Column 4 in PSX DOM, formatted as 'DD MMM YYYY')
-        ex_date_text = columns[4].text.strip()
+        # Format the date to match the '13 Aug 2026' string structure in your watchdog loop
+        ex_date_text = latest_date.strftime('%d %b %Y')
         
         return dividend_amount, ex_date_text
 
     except Exception as e:
-        print(f"Scraper failed for {ticker}: {str(e)}")
+        print(f"yfinance failed for {ticker}: {str(e)}")
         return 0.0, None
 
 @bot.command(name="test_scraper")
