@@ -1,8 +1,12 @@
 import os
+import glob
+import yt_dlp
+import google.generativeai as genai
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 
 YOUTUBE_API_KEY = os.getenv("GOOGLE_API_KEY") 
+genai.configure(api_key=YOUTUBE_API_KEY)
 
 def get_channel_id(youtube, channel_name: str) -> str:
     """Dynamically searches for a channel by name and returns its official ID."""
@@ -51,11 +55,59 @@ def get_video_transcript(video_id: str) -> str:
         print(f"Transcript Error for video {video_id}: {str(e)}")
         return None
 
+def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
+    """
+    Fallback mechanism: Downloads the audio stream and uses Gemini 1.5 Flash 
+    to transcribe and summarize it when YouTube subtitles are disabled.
+    """
+    print(f"⚠️ Subtitles disabled for {mentor_name}. Triggering audio extraction fallback...")
+    
+    # yt-dlp config: Download ONLY the lowest memory audio format directly. No video.
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': f'{video_id}.%(ext)s',
+        'quiet': True,
+        'no_warnings': True
+    }
+    
+    audio_filename = None
+    uploaded_file = None
+    
+    try:
+        # 1. Download the audio file to the Render server
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+            
+        # Locate the downloaded file (extensions vary by YouTube's backend delivery)
+        search_files = glob.glob(f'{video_id}.*')
+        if not search_files:
+            return None
+        audio_filename = search_files[0]
+        
+        # 2. Upload to Google's servers
+        print(f"Uploading {audio_filename} to Gemini for processing...")
+        uploaded_file = genai.upload_file(path=audio_filename)
+        
+        # 3. Prompt the model to extract the data natively from the audio
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        prompt = f"Listen to this audio from {mentor_name}. Transcribe the core financial and stock market insights into a detailed text summary. Ignore fluff and promotional content."
+        
+        response = model.generate_content([prompt, uploaded_file])
+        
+        return response.text
+
+    except Exception as e:
+        print(f"Audio extraction failed for {video_id}: {str(e)}")
+        return None
+        
+    finally:
+        # 4. CRITICAL: Prevent server disk space exhaustion by deleting the files
+        if uploaded_file:
+            genai.delete_file(uploaded_file.name)
+        if audio_filename and os.path.exists(audio_filename):
+            os.remove(audio_filename)
+
 def fetch_mentor_transcripts(mentor_names: list) -> dict:
-    """
-    Takes a list of mentor names, resolves their channels, 
-    and returns a dictionary mapping the mentor to their latest video transcript.
-    """
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
     transcripts = {}
     
@@ -70,8 +122,15 @@ def fetch_mentor_transcripts(mentor_names: list) -> dict:
         if not video_id:
             continue
             
+        # First attempt: The fast, cheap text transcript
         transcript = get_video_transcript(video_id)
+        
         if transcript:
             transcripts[name] = transcript
+        else:
+            # Second attempt: The audio fallback
+            audio_summary = extract_audio_with_gemini(video_id, name)
+            if audio_summary:
+                transcripts[name] = audio_summary
             
     return transcripts

@@ -23,3 +23,5 @@ psycopg2-binary
 psxdata
 pytz
 yfinance
+yt-dlp
+google-generativeai
