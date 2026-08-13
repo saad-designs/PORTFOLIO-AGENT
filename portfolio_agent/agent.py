@@ -54,6 +54,7 @@ from typing import Any
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatResult
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -249,6 +250,38 @@ def manage_scheduled_task(action: str, task_name: str = None, schedule_cron: str
     # Placeholder logic for dynamic job management
     return f"Task '{task_name}' successfully updated with action '{action}'."
 
+# 1. Force strict parameter validation
+class PortfolioPositionSchema(BaseModel):
+    ticker: str = Field(description="The exact stock ticker symbol, e.g., 'SYS'")
+    quantity: float = Field(description="The number of shares to add")
+    price: float = Field(description="The purchase price per share in PKR")
+
+# 2. Bind the strict schema to the tool
+@tool(args_schema=PortfolioPositionSchema)
+def add_portfolio_position(ticker: str, quantity: float, price: float) -> str:
+    """Manually log a new stock position into the portfolio holdings database."""
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+        
+        # Note: mapping 'price' to your database's 'average_price' column
+        cur.execute(
+            '''INSERT INTO portfolio_holdings (ticker, quantity, average_price) 
+               VALUES (%s, %s, %s)
+               ON CONFLICT (ticker) 
+               DO UPDATE SET 
+                  quantity = portfolio_holdings.quantity + EXCLUDED.quantity,
+                  average_price = ((portfolio_holdings.quantity * portfolio_holdings.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price)) / (portfolio_holdings.quantity + EXCLUDED.quantity)''',
+            (ticker.upper(), quantity, price)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return f"Database updated: Added {quantity} shares of {ticker.upper()} at {price} PKR."
+    except Exception as e:
+        return f"Database Error: {str(e)}"
+
 @tool
 def execute_trade_tool(ticker: str, action: str) -> str:
     """
@@ -309,6 +342,7 @@ tools = [
     retrieve_context_tool,
     save_to_knowledge_base,
     manage_scheduled_task,
+    add_portfolio_position,
     execute_trade_tool
 ]
 
