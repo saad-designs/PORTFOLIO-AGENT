@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage
 from agent import graph as agent_app
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
 import asyncio
+from youtube_scraper import fetch_mentor_transcripts
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -52,6 +53,45 @@ async def daily_market_briefing():
         await channel.send(f"📊 **Automated PSX Market Briefing**\n\n{final_reply}")
     except Exception as e:
         await channel.send(f"⚠️ **Briefing Execution Error:**\n`{str(e)}`")
+
+midnight_time = time(hour=0, minute=0, tzinfo=timezone.utc)
+
+@tasks.loop(time=midnight_time)
+async def midnight_mentor_sweep():
+    try:
+        # The strict list of Pakistani financial mentors you provided
+        mentors = [
+            "Abdul Rehman Najam",
+            "Mashal Khan", 
+            "Jawad Hafeez",
+            "Investkaar",
+            "Sarmaaya Financials"
+        ]
+        
+        print("Starting Unfiltered Midnight Mentor Sweep...")
+        transcripts_data = fetch_mentor_transcripts(mentors)
+        
+        if not transcripts_data:
+            print("No new transcripts could be extracted tonight.")
+            return
+
+        # Loop through successful extractions and send them to your LLM agent
+        for mentor, text in transcripts_data.items():
+            prompt = f"""
+            Analyze the following recent YouTube transcript from {mentor}.
+            Extract the top 3 actionable investment or stock market insights. 
+            Discard any promotional material, sponsor reads, or fluff.
+            
+            Transcript: 
+            {text}
+            """
+            
+            # TODO: Pass 'prompt' to your Gemini agent chain 
+            # and send the resulting summary to your Discord DM
+            print(f"Successfully generated summary for {mentor}")
+
+    except Exception as e:
+        print(f"Midnight Sweep Error: {e}")
 
 class ApprovalView(discord.ui.View):
     def __init__(self, thread_id: str = None):
