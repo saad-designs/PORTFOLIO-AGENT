@@ -21,3 +21,4 @@ curl_cffi
 mplfinance
 psycopg2-binary
 psxdata
+pytz

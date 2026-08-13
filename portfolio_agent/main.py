@@ -53,8 +53,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
+@app.head("/")
 async def health_check():
-    return {"status": "ok", "service": "Portfolio Agent"}
+    return {"status": "alive", "service": "Portfolio Agent Watchdog"}
 
 class WebhookPayload(BaseModel):
     thread_id: str

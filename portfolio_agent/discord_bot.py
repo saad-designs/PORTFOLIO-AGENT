@@ -215,9 +215,27 @@ import psycopg2.extras
 import pandas as pd
 from agent import fetch_quote_with_fallback, clean_float
 
+import pytz
+
 @tasks.loop(minutes=15)
 async def market_watchdog():
     try:
+        # 1. Strict Market-Hours Time Gate
+        tz_pkt = pytz.timezone('Asia/Karachi')
+        now_pkt = datetime.datetime.now(tz_pkt)
+        
+        # Block weekends (5 = Saturday, 6 = Sunday)
+        if now_pkt.weekday() >= 5:
+            return 
+            
+        # Block outside 09:30 AM - 03:30 PM trading hours
+        current_time = now_pkt.time()
+        market_open = datetime.datetime.strptime("09:30", "%H:%M").time()
+        market_close = datetime.datetime.strptime("15:30", "%H:%M").time()
+        
+        if not (market_open <= current_time <= market_close):
+            return 
+
         # 1. Connect to DB and get all ACTIVE alerts
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
