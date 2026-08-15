@@ -336,7 +336,8 @@ async def market_watchdog():
         conn.close()
 
     except Exception as e:
-        print(f"Watchdog Error: {str(e)}")
+        print("🔴 WATCHDOG TRACEBACK:")
+        print(traceback.format_exc())
 
 import yfinance as yf
 from datetime import datetime
@@ -432,7 +433,8 @@ async def dividend_watchdog():
         conn.close()
 
     except Exception as e:
-        print(f"Dividend Watchdog Error: {str(e)}")
+        print("🔴 WATCHDOG TRACEBACK:")
+        print(traceback.format_exc())
 
 @bot.command(name="test_youtube")
 async def test_youtube(ctx, *, mentor_name: str):
