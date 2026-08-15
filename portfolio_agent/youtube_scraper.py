@@ -9,53 +9,53 @@ from youtube_transcript_api import YouTubeTranscriptApi
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY") 
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-def get_channel_id(channel_name: str) -> str:
-    """Dynamically searches for a channel by name and returns its official ID."""
-    # Force the build function to use the dedicated YouTube key
-    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+def get_channel_id(channel_name):
+    print(f"DIAGNOSTIC: Searching for channel ID: {channel_name}")
     try:
-        request = youtube.search().list(
-            part="id",
-            q=channel_name,
-            type="channel",
-            maxResults=1
-        )
-        response = request.execute()
-        if response.get('items'):
-            return response['items'][0]['id']['channelId']
-        return None
-    except Exception as e:
-        print(f"Failed to find channel '{channel_name}': {str(e)}")
-        return None
-
-def get_latest_video_id(youtube, channel_id: str) -> str:
-    """Queries the YouTube API for the most recently uploaded video ID."""
-    try:
-        request = youtube.search().list(
-            part="id",
-            channelId=channel_id,
-            maxResults=1,
-            order="date",
-            type="video"
-        )
+        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+        request = youtube.search().list(part="id", q=channel_name, type="channel", maxResults=1)
         response = request.execute()
         
-        if response.get('items'):
-            return response['items'][0]['id']['videoId']
-        return None
+        if not response.get('items'):
+            print(f"DIAGNOSTIC: Google API returned 0 items for {channel_name}")
+            return None
+            
+        channel_id = response['items'][0]['id']['channelId']
+        print(f"DIAGNOSTIC: Found Channel ID: {channel_id}")
+        return channel_id
+        
     except Exception as e:
-        print(f"Failed to fetch video for channel {channel_id}: {str(e)}")
+        print(f"DIAGNOSTIC CRASH (get_channel_id): {str(e)}")
         return None
 
-def get_video_transcript(video_id: str) -> str:
-    """Extracts the transcript and joins it into a single text block."""
+def get_latest_video_id(channel_id):
+    print(f"DIAGNOSTIC: Searching for latest video on channel: {channel_id}")
     try:
-        # We attempt to fetch English, Urdu, or auto-generated transcripts
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'ur'])
-        full_text = " ".join([fragment['text'] for fragment in transcript_list])
-        return full_text
+        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+        request = youtube.search().list(part="id", channelId=channel_id, order="date", type="video", maxResults=1)
+        response = request.execute()
+        
+        if not response.get('items'):
+            print("DIAGNOSTIC: No videos found for this channel.")
+            return None
+            
+        video_id = response['items'][0]['id']['videoId']
+        print(f"DIAGNOSTIC: Found latest video ID: {video_id}")
+        return video_id
+        
     except Exception as e:
-        print(f"Transcript Error for video {video_id}: {str(e)}")
+        print(f"DIAGNOSTIC CRASH (get_latest_video_id): {str(e)}")
+        return None
+
+def get_transcript(video_id):
+    print(f"DIAGNOSTIC: Attempting to pull transcript for video: {video_id}")
+    try:
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript = " ".join([t['text'] for t in transcript_list])
+        print("DIAGNOSTIC: Transcript pulled successfully!")
+        return transcript
+    except Exception as e:
+        print(f"DIAGNOSTIC CRASH (get_transcript): {str(e)}")
         return None
 
 def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
@@ -120,12 +120,12 @@ def fetch_mentor_transcripts(mentor_names: list) -> dict:
         if not channel_id:
             continue
             
-        video_id = get_latest_video_id(youtube, channel_id)
+        video_id = get_latest_video_id(channel_id)
         if not video_id:
             continue
             
         # First attempt: The fast, cheap text transcript
-        transcript = get_video_transcript(video_id)
+        transcript = get_transcript(video_id)
         
         if transcript:
             transcripts[name] = transcript
