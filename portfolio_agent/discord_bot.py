@@ -456,7 +456,10 @@ async def test_youtube(ctx, *, mentor_name: str):
         await ctx.send(f"✅ **Success!** Extracted {len(raw_text)} characters.\n\n**Transcript Preview:**\n```{preview}```")
 
     except Exception as e:
-        await ctx.send(f"⚠️ **Error:** {str(e)}")
+        import traceback
+        error_trace = traceback.format_exc()
+        # Discord has a 2000 character limit, so we slice the traceback to fit
+        await ctx.send(f"❌ **Failed.** Crash details:\n```python\n{error_trace[:1900]}\n```")
 
 @bot.command(name="debug_youtube")
 async def debug_youtube(ctx):
