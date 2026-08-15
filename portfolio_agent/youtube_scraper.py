@@ -5,11 +5,14 @@ from google import genai
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 
-YOUTUBE_API_KEY = os.getenv("GOOGLE_API_KEY") 
-client = genai.Client(api_key=YOUTUBE_API_KEY)
+# Grab the new GCP key from Render's environment
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY") 
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-def get_channel_id(youtube, channel_name: str) -> str:
+def get_channel_id(channel_name: str) -> str:
     """Dynamically searches for a channel by name and returns its official ID."""
+    # Force the build function to use the dedicated YouTube key
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
     try:
         request = youtube.search().list(
             part="id",
@@ -112,7 +115,7 @@ def fetch_mentor_transcripts(mentor_names: list) -> dict:
     
     for name in mentor_names:
         print(f"Locating channel for: {name}...")
-        channel_id = get_channel_id(youtube, name)
+        channel_id = get_channel_id(name)
         
         if not channel_id:
             continue
