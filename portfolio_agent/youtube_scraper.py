@@ -59,49 +59,48 @@ def get_transcript(video_id):
         return None
 
 def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
-    """
-    Fallback mechanism: Downloads the audio stream and uses Gemini 1.5 Flash 
-    to transcribe and summarize it when YouTube subtitles are disabled.
-    """
     print(f"⚠️ Subtitles disabled for {mentor_name}. Triggering audio extraction fallback...")
     
-    # Force the absolute path to the root directory where Render mounts Secret Files
-    cookie_path = os.path.abspath("cookies.txt")
+    # 1. Target Render's specific Secret File mount path
+    render_secret_path = "/etc/secrets/cookies.txt"
+    local_dev_path = os.path.abspath("cookies.txt")
     
-    # Hard diagnostic check to prove the file exists in the container
-    if not os.path.exists(cookie_path):
-        print(f"🚨 CRITICAL: Cookie file NOT FOUND at {cookie_path}. Render Secret File mount failed.")
+    # 2. Dynamically assign the cookie path based on the environment
+    if os.path.exists(render_secret_path):
+        active_cookie_path = render_secret_path
+        print(f"✅ DIAGNOSTIC: Using Render Secret cookies at {active_cookie_path}")
+    elif os.path.exists(local_dev_path):
+        active_cookie_path = local_dev_path
+        print(f"✅ DIAGNOSTIC: Using Local dev cookies at {active_cookie_path}")
     else:
-        print(f"✅ DIAGNOSTIC: Cookie file successfully found at {cookie_path}. Size: {os.path.getsize(cookie_path)} bytes.")
+        active_cookie_path = None
+        print("🚨 CRITICAL: NO COOKIE FILE FOUND IN /etc/secrets/ OR ROOT.")
 
-    # yt-dlp config: Download ONLY the lowest memory audio format directly. No video.
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': f'{video_id}.%(ext)s',
-        'cookiefile': cookie_path,
-        # quiet and no_warnings REMOVED so yt-dlp prints exact cookie rejection errors
     }
+    
+    # Only inject the cookie parameter if the file physically exists
+    if active_cookie_path:
+        ydl_opts['cookiefile'] = active_cookie_path
     
     audio_filename = None
     uploaded_file = None
     
     try:
-        # 1. Download the audio file to the Render server
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print("DIAGNOSTIC: Attempting audio download with cookies...")
+            print("DIAGNOSTIC: Commencing yt-dlp download...")
             ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
             
-        # Locate the downloaded file (extensions vary by YouTube's backend delivery)
         search_files = glob.glob(f'{video_id}.*')
         if not search_files:
             return None
         audio_filename = search_files[0]
         
-        # 2. Upload to Google's servers
         print(f"Uploading {audio_filename} to Gemini for processing...")
         uploaded_file = client.files.upload(file=audio_filename)
         
-        # 3. Prompt the model to extract the data natively from the audio
         prompt = f"Listen to this audio from {mentor_name}. Transcribe the core financial and stock market insights into a detailed text summary. Ignore fluff and promotional content."
         
         response = client.models.generate_content(model="gemini-1.5-flash", contents=[prompt, uploaded_file])
@@ -113,11 +112,10 @@ def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
         return None
         
     finally:
-        # 4. CRITICAL: Prevent server disk space exhaustion by deleting the files
         if uploaded_file:
             try:
                 client.files.delete(name=uploaded_file.name)
-            except Exception as e:
+            except Exception:
                 pass
         if audio_filename and os.path.exists(audio_filename):
             os.remove(audio_filename)
