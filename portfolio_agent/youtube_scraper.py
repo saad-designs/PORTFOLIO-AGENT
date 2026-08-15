@@ -69,6 +69,7 @@ def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': f'{video_id}.%(ext)s',
+        'cookiefile': 'cookies.txt',  # THIS USES YOUR SESSION TO BYPASS THE BOT WALL
         'quiet': True,
         'no_warnings': True
     }
@@ -79,6 +80,7 @@ def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
     try:
         # 1. Download the audio file to the Render server
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print("DIAGNOSTIC: Attempting audio download with cookies...")
             ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
             
         # Locate the downloaded file (extensions vary by YouTube's backend delivery)
