@@ -103,8 +103,15 @@ class ApprovalView(discord.ui.View):
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         t_id = self.thread_id or (interaction.message.embeds[0].footer.text if interaction.message.embeds else "unknown")
-        api_base_url = os.getenv("API_URL", "http://127.0.0.1:8000")
-        webhook_url = f"{api_base_url}/webhook/discord"
+        # Retrieve the base URL from the environment
+        base_url = os.getenv("RENDER_EXTERNAL_URL", "https://portfolio-agent-cn9g.onrender.com").strip().rstrip("/")
+        
+        # Force-sanitize the string to remove markdown artifacts
+        if "](" in base_url:
+            base_url = base_url.split("](")[-1].rstrip(")")
+        
+        # Construct the final webhook endpoint
+        webhook_url = f"{base_url}/webhook/discord"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(webhook_url, json={"thread_id": t_id, "action": "Approved"}) as resp:
@@ -117,8 +124,15 @@ class ApprovalView(discord.ui.View):
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         t_id = self.thread_id or (interaction.message.embeds[0].footer.text if interaction.message.embeds else "unknown")
-        api_base_url = os.getenv("API_URL", "http://127.0.0.1:8000")
-        webhook_url = f"{api_base_url}/webhook/discord"
+        # Retrieve the base URL from the environment
+        base_url = os.getenv("RENDER_EXTERNAL_URL", "https://portfolio-agent-cn9g.onrender.com").strip().rstrip("/")
+        
+        # Force-sanitize the string to remove markdown artifacts
+        if "](" in base_url:
+            base_url = base_url.split("](")[-1].rstrip(")")
+        
+        # Construct the final webhook endpoint
+        webhook_url = f"{base_url}/webhook/discord"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(webhook_url, json={"thread_id": t_id, "action": "Denied"}) as resp:
