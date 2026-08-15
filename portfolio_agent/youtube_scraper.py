@@ -1,12 +1,12 @@
 import os
 import glob
 import yt_dlp
-import google.generativeai as genai
+from google import genai
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 
 YOUTUBE_API_KEY = os.getenv("GOOGLE_API_KEY") 
-genai.configure(api_key=YOUTUBE_API_KEY)
+client = genai.Client(api_key=YOUTUBE_API_KEY)
 
 def get_channel_id(youtube, channel_name: str) -> str:
     """Dynamically searches for a channel by name and returns its official ID."""
@@ -86,13 +86,12 @@ def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
         
         # 2. Upload to Google's servers
         print(f"Uploading {audio_filename} to Gemini for processing...")
-        uploaded_file = genai.upload_file(path=audio_filename)
+        uploaded_file = client.files.upload(file=audio_filename)
         
         # 3. Prompt the model to extract the data natively from the audio
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
         prompt = f"Listen to this audio from {mentor_name}. Transcribe the core financial and stock market insights into a detailed text summary. Ignore fluff and promotional content."
         
-        response = model.generate_content([prompt, uploaded_file])
+        response = client.models.generate_content(model="gemini-1.5-flash", contents=[prompt, uploaded_file])
         
         return response.text
 
@@ -103,7 +102,7 @@ def extract_audio_with_gemini(video_id: str, mentor_name: str) -> str:
     finally:
         # 4. CRITICAL: Prevent server disk space exhaustion by deleting the files
         if uploaded_file:
-            genai.delete_file(uploaded_file.name)
+            client.files.delete(name=uploaded_file.name)
         if audio_filename and os.path.exists(audio_filename):
             os.remove(audio_filename)
 

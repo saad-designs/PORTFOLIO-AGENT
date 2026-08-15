@@ -23,4 +23,4 @@ psxdata
 pytz>=2024.1
 yfinance>=0.2.40
 yt-dlp>=2024.8.6
-google-generativeai>=0.7.0
+google-genai
