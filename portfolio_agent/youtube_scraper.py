@@ -50,7 +50,16 @@ def get_latest_video_id(channel_id):
 def get_transcript(video_id):
     print(f"DIAGNOSTIC: Attempting to pull transcript for video: {video_id}")
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        # Handle syntax for v1.0+ (newest package)
+        if not hasattr(YouTubeTranscriptApi, 'get_transcript'):
+            api = YouTubeTranscriptApi()
+            result = api.fetch(video_id)
+            # The v1.x API may return a Transcript object requiring to_raw_data()
+            transcript_list = result.to_raw_data() if hasattr(result, 'to_raw_data') else result
+        else:
+            # Fallback for v0.6.x (older package)
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+
         transcript = " ".join([t['text'] for t in transcript_list])
         print("DIAGNOSTIC: Transcript pulled successfully!")
         return transcript
