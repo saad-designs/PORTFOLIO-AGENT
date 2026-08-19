@@ -2,3 +2,7 @@
 portfolio_agent/.env
 cookies.txt
 portfolio_agent/cookies.txt
+*.sqlite3
+mentor_db/
+vector_db/
+__pycache__/

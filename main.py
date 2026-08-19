@@ -9,6 +9,11 @@ import agent
 from langgraph.types import Command
 import uuid
 import os
+import sys
+
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 import discord_bot
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -44,6 +49,14 @@ async def lifespan(app: FastAPI):
         name="Daily YouTube Transcript Sweep"
     )
     scheduler.start()
+    
+    # Grab the active event loop
+    loop = asyncio.get_running_loop()
+    
+    from schedulers import initialize_background_schedulers
+    # Initialize background intelligence loops
+    initialize_background_schedulers(loop)
+    print("🚀 Portfolio Agent core running with autonomous background learning.")
     
     yield
     # Shutdown

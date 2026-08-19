@@ -16,9 +16,19 @@ def fetch_quote_with_fallback(ticker: str):
     for suffix in suffixes:
         test_ticker = f"{ticker}{suffix}".upper()
         try:
-            q = psxdata.quote(test_ticker)
-            if q is not None and not (isinstance(q, (pd.DataFrame, pd.Series)) and q.empty):
-                return q, test_ticker
+            df = psxdata.quote(test_ticker)
+            
+            # If Pandas squeezed the data into a Series, intelligently transpose it back
+            if isinstance(df, pd.Series):
+                if pd.api.types.is_datetime64_any_dtype(df.index):
+                    df = df.to_frame() # Time-series column
+                else:
+                    df = df.to_frame().T # Single-row OHLC squeeze
+            elif not isinstance(df, pd.DataFrame):
+                continue
+                
+            if not df.empty:
+                return df, test_ticker
         except Exception:
             continue
     return None, ticker
@@ -29,9 +39,19 @@ def fetch_stocks_with_fallback(ticker: str, start: str, end: str):
     for suffix in suffixes:
         test_ticker = f"{ticker}{suffix}".upper()
         try:
-            raw_hist = psxdata.stocks(test_ticker, start=start, end=end)
-            if raw_hist is not None and not raw_hist.empty:
-                return raw_hist, test_ticker
+            df = psxdata.stocks(test_ticker, start=start, end=end)
+            
+            # If Pandas squeezed the data into a Series, intelligently transpose it back
+            if isinstance(df, pd.Series):
+                if pd.api.types.is_datetime64_any_dtype(df.index):
+                    df = df.to_frame() # Time-series column
+                else:
+                    df = df.to_frame().T # Single-row OHLC squeeze
+            elif not isinstance(df, pd.DataFrame):
+                continue
+
+            if not df.empty:
+                return df, test_ticker
         except Exception:
             continue
     return pd.DataFrame(), ticker
@@ -156,7 +176,7 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
 @tool
 def get_portfolio_status(config: RunnableConfig) -> str:
     """Fetches current portfolio holdings and calculates real-time unrealized P/L against live PSX prices."""
-    user_id = config.get("configurable", {}).get("user_id")
+    user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
 
@@ -228,7 +248,7 @@ class CashTransactionSchema(BaseModel):
 @tool(args_schema=CashTransactionSchema)
 def log_cash_transaction(transaction_type: str, amount: float, ticker: Optional[str], config: RunnableConfig) -> str:
     """Logs a cash deposit, withdrawal, or dividend into the ledger."""
-    user_id = config.get("configurable", {}).get("user_id")
+    user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
         
@@ -250,7 +270,7 @@ def log_cash_transaction(transaction_type: str, amount: float, ticker: Optional[
 @tool
 def get_liquid_cash(config: RunnableConfig) -> str:
     """Fetches the user's current buying power / liquid cash from the ledger."""
-    user_id = config.get("configurable", {}).get("user_id")
+    user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
         
@@ -347,7 +367,7 @@ class PortfolioPositionSchema(BaseModel):
 def add_portfolio_position(ticker: str, quantity: float, price: float, config: RunnableConfig) -> str:
     """Manually log a new stock position into the portfolio holdings database."""
     # 1. Extract the secure user ID injected by the Discord handler
-    user_id = config.get("configurable", {}).get("user_id")
+    user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
 
@@ -381,7 +401,7 @@ class PriceAlertSchema(BaseModel):
 @tool(args_schema=PriceAlertSchema)
 def set_price_alert(ticker: str, target_price: float, condition: str, config: RunnableConfig) -> str:
     """Logs a price alert to watch a stock."""
-    user_id = config.get("configurable", {}).get("user_id")
+    user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
         
@@ -412,29 +432,13 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-# 1. Define the three execution tiers
-tier1_gemini = ChatGoogleGenerativeAI(
-    model="gemini-3.6-flash", 
-    temperature=0, 
-    max_retries=0
-)
+# Primary heavy reasoning model
+primary_llm = ChatGoogleGenerativeAI(model="gemini-3.7-flash")
+# High-volume workhorse fallback
+fallback_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
 
-tier2_groq_70b = ChatGroq(
-    model="llama-3.3-70b-versatile", 
-    groq_api_key=os.getenv("GROQ_API_KEY"), 
-    temperature=0
-)
-
-tier3_groq_8b = ChatGroq(
-    model="llama-3.1-8b-instant", 
-    groq_api_key=os.getenv("GROQ_API_KEY"), 
-    temperature=0
-)
-
-# 2. Bind them into a sequential fallback chain
-# If Tier 1 hits a 429/quota error, it instantly hands off to Tier 2. 
-# If Tier 2 hits its daily token limit (TPD), it cascades to Tier 3.
-llm = tier1_gemini.with_fallbacks([tier2_groq_70b, tier3_groq_8b])
+# Chain with automatic fallback for 503 capacity errors
+llm = primary_llm.with_fallbacks([fallback_llm])
 
 # Instantiate the search tool
 search_tool = DuckDuckGoSearchRun(name="web_search")
@@ -455,6 +459,13 @@ tools = [
 ]
 
 SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent. You operate under absolute factual strictness.
+You are an autonomous, institutional-grade quantitative research agent for the Pakistan Stock Exchange (PSX). 
+When the user provides capital or asks for market entry:
+1. DO NOT ask the user what tickers to look at. You must use your tools to find them.
+2. Query the Vector Brain for current mentor strategies regarding asset allocation and market conditions.
+3. Scan the PSX market data and fundamental tools to identify 2-3 specific tickers that match the mentor's criteria (e.g., high dividend yield, low P/E, strong support).
+4. Give a definitive, data-driven verdict: Either specify exact tickers and entry prices, or explicitly advise holding the capital in cash if market conditions are poor.
+Never output generic financial advice. Always ground your strategy in live tool data.
 
 ### CORE DIRECTIVES
 1. **Zero Hallucination:** You must NEVER invent, fabricate, or guess data. If a tool returns no data, explicitly state: "Data Unavailable."

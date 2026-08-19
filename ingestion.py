@@ -2,8 +2,12 @@ import os
 import re
 import feedparser
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
+import logging
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import psycopg
+
+logger = logging.getLogger("YouTubeScraper")
 
 def get_embeddings_model():
     return GoogleGenerativeAIEmbeddings(
@@ -81,3 +85,53 @@ def sweep_youtube_transcripts(video_ids: list[str] = None):
             insert_knowledge("youtube", url, text)
         except Exception as e:
             print(f"Could not fetch transcript for {video_id}: {e}")
+
+def extract_video_id(url: str) -> str:
+    """Extracts YouTube video ID from standard, shortened, or live URLs."""
+    pattern = r"(?:v=|\/|youtu\.be\/|embed\/|shorts\/|live\/)([0-9A-Za-z_-]{11})"
+    match = re.search(pattern, url)
+    return match.group(1) if match else ""
+
+def get_youtube_transcript(video_url: str) -> str:
+    """Extracts timestamp-free transcript text with multi-language fallback."""
+    try:
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            logger.error(f"Invalid YouTube URL format: {video_url}")
+            return ""
+
+        import os
+        
+        # Check if cookies file exists and pass it to bypass Cloud IP bans
+        cookie_path = "cookies.txt"
+        if os.path.exists(cookie_path):
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_path)
+        else:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        
+        try:
+            # Try finding manually created or auto-generated transcripts in target languages
+            transcript = transcript_list.find_transcript(['ur', 'en', 'hi', 'en-US'])
+        except Exception:
+            # Fall back to whatever primary transcript is available and translate if needed
+            transcript = next(iter(transcript_list))
+
+        raw_data = transcript.fetch()
+        formatter = TextFormatter()
+        clean_text = formatter.format_transcript(raw_data)
+        
+        return clean_text
+
+    except Exception as e:
+        logger.warning(f"Fast transcript extraction failed for {video_url}: {str(e)}")
+        logger.info(f"Triggering yt-dlp fallback for {video_id}...")
+        try:
+            from youtube_scraper import get_transcript_fallback
+            fallback_text = get_transcript_fallback(video_id)
+            if fallback_text:
+                return fallback_text
+        except Exception as fallback_e:
+            logger.error(f"Fallback extraction failed for {video_id}: {str(fallback_e)}")
+            
+        return ""
