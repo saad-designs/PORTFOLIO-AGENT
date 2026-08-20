@@ -45,7 +45,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Ensure DISCORD_CHANNEL_ID is loaded from the environment
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+raw_channel_id = os.getenv("ADMIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID", "0")
+CHANNEL_ID = int(raw_channel_id) if raw_channel_id else 0
 
 async def log_error_to_discord(error_msg: str):
     log_channel_id = os.getenv("LOG_CHANNEL_ID")
@@ -255,7 +256,11 @@ class ApprovalView(discord.ui.View):
             await interaction.followup.send(f"Error resuming agent: {e}", ephemeral=True)
 
 async def send_alert(thread_id: str, message: str):
-    channel_id = int(os.getenv("DISCORD_CHANNEL_ID"))
+    raw_channel_id = os.getenv("ADMIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID")
+    if not raw_channel_id:
+        print("⚠️ Warning: Neither ADMIN_CHANNEL_ID nor DISCORD_CHANNEL_ID is set.")
+        return
+    channel_id = int(raw_channel_id)
     
     try:
         channel = await bot.fetch_channel(channel_id)
@@ -1164,7 +1169,11 @@ async def check_price_targets():
     await bot.wait_until_ready()
     
     # Grab the channel ID from your .env file
-    channel_id = int(os.getenv("DISCORD_CHANNEL_ID")) 
+    raw_channel_id = os.getenv("ADMIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID")
+    if not raw_channel_id:
+        print("⚠️ Warning: Neither ADMIN_CHANNEL_ID nor DISCORD_CHANNEL_ID is set.")
+        return
+    channel_id = int(raw_channel_id)
     channel = bot.get_channel(channel_id)
     
     if not channel:
