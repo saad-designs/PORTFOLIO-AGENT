@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_db
+from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_db, evaluate_trade_trigger
 import traceback
 from discord_bot import bot, get_last_run, update_last_run
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -11,6 +11,32 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", 0))
 
 logger = logging.getLogger("PortfolioAgentSchedulers")
+
+import json
+
+STATE_DATE_FILE = "scheduler_date_state.json"
+
+def get_last_run_date(task_name):
+    if os.path.exists(STATE_DATE_FILE):
+        with open(STATE_DATE_FILE, "r") as f:
+            try:
+                data = json.load(f)
+                return data.get(task_name, "")
+            except:
+                pass
+    return ""
+
+def set_last_run_date(task_name, date_str):
+    data = {}
+    if os.path.exists(STATE_DATE_FILE):
+        with open(STATE_DATE_FILE, "r") as f:
+            try:
+                data = json.load(f)
+            except:
+                pass
+    data[task_name] = date_str
+    with open(STATE_DATE_FILE, "w") as f:
+        json.dump(data, f)
 
 # In-memory cooldown dictionary to prevent repetitive Discord spam
 alert_cooldowns = {}
@@ -81,6 +107,7 @@ async def run_email_sweep():
     logger.info(f"📧 [{datetime.now().strftime('%H:%M')}] Initializing Email Sweep...")
     try:
         # Placeholder for incoming portfolio notes or correspondence parsing
+        set_last_run_date("email_sweep", datetime.now().strftime("%Y-%m-%d"))
         logger.info(f"✅ [{datetime.now().strftime('%H:%M')}] Email Sweep successfully processed incoming notes.")
     except Exception as e:
         error_msg = f"❌ [Email Sweep Error]: {str(e)}"
@@ -138,12 +165,14 @@ async def run_intraday_price_loop():
         from portfolio_manager import check_profit_and_rebalance_triggers
         alerts = await asyncio.to_thread(check_profit_and_rebalance_triggers)
         
+        logger.info(f"🔄 Intraday Loop: Found {len(alerts) if alerts else 0} profit/rebalance triggers.")
+        
         if not alerts:
             return
             
         alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
         if not alert_channel:
-            return
+            logger.warning(f"⚠️ No valid Discord alert_channel found (ID: {ADMIN_CHANNEL_ID}). Alerts will only print to console.")
             
         now_ts = datetime.now().timestamp()
         
@@ -154,6 +183,7 @@ async def run_intraday_price_loop():
             
             last_alert_time = alert_cooldowns.get(cooldown_key, 0)
             if now_ts - last_alert_time < 4 * 3600: # 4 hours cooldown
+                logger.info(f"⏭️ Skipping alert for {ticker} due to 4-hour cooldown.")
                 continue
                 
             alert_cooldowns[cooldown_key] = now_ts
@@ -165,9 +195,16 @@ async def run_intraday_price_loop():
             msg += f"**Gain:** {alert['gain_pct']:.2f}%\n"
             msg += f"**Action:** Sell **{alert['shares_to_sell']}** shares\n"
             msg += f"**Expected Cash Gen:** Rs. {alert['cash_generated']:,.2f}\n"
-            msg += f"**Est. New Balance:** Rs. {alert['new_cash_balance']:,.2f}\n"
+            msg += f"**Est. New Balance:** Rs. {alert['new_cash_balance']:,.2f}\n\n"
             
-            await alert_channel.send(msg)
+            # Hybrid Evaluation Gate
+            ai_verdict = await evaluate_trade_trigger(alert)
+            msg += f"🧠 **AI Contextual Verdict:**\n{ai_verdict}\n"
+            
+            if alert_channel:
+                await alert_channel.send(msg)
+            else:
+                print(f"=== PORTFOLIO ALERT (Console Fallback) ===\n{msg}")
             
     except Exception as e:
         error_msg = f"❌ [Intraday Loop Error]: {str(e)}"
@@ -238,6 +275,7 @@ async def run_daily_closing_briefing(bot_instance=None):
             embed.add_field(name="🔻 Top Loser", value=f"{l_ticker} ({l_change:.2f}%)", inline=True)
             
         await alert_channel.send(embed=embed)
+        set_last_run_date("daily_closing_briefing", datetime.now().strftime("%Y-%m-%d"))
         logger.info("✅ Daily Closing Summary sent.")
     except Exception as e:
         error_msg = f"❌ [Daily Closing Summary Error]: {str(e)}"
@@ -254,6 +292,25 @@ async def start_scheduled_sweeps():
     """
     logger.info("🚀 Master background scheduled sweeps started (Intraday Loop, 00:00 YouTube, 12/16:00 Email, 18:00 Business).")
     
+    # Catch-up sweeps on startup
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    
+    # Check Daily Closing Briefing Catch-up
+    last_briefing_date = get_last_run_date("daily_closing_briefing")
+    is_weekday = now.weekday() < 5
+    if is_weekday and last_briefing_date != today_str:
+        if (now.weekday() <= 3 and now.hour >= 16) or (now.weekday() == 4 and now.hour >= 17):
+            logger.info("⚡ Catch-up: Firing missed run_daily_closing_briefing.")
+            await run_daily_closing_briefing()
+            
+    # Check Email Sweep Catch-up (past 08:30 PKT)
+    last_email_date = get_last_run_date("email_sweep")
+    if last_email_date != today_str:
+        if now.hour > 8 or (now.hour == 8 and now.minute >= 30):
+            logger.info("⚡ Catch-up: Firing missed run_email_sweep.")
+            await run_email_sweep()
+            
     while True:
         now = datetime.now()
         current_date = now.date()

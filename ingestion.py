@@ -4,6 +4,7 @@ import feedparser
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 import logging
+from bs4 import BeautifulSoup
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import psycopg
 
@@ -135,3 +136,30 @@ def get_youtube_transcript(video_url: str) -> str:
             logger.error(f"Fallback extraction failed for {video_id}: {str(fallback_e)}")
             
         return ""
+
+def extract_email_body(msg) -> str:
+    """Extracts email body, prioritizing HTML payloads in multipart MIME emails."""
+    plain_text = ""
+    html_text = ""
+    
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            
+            if content_type == "text/plain":
+                plain_text = payload.decode(errors="ignore")
+            elif content_type == "text/html":
+                soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
+                html_text = soup.get_text(separator="\n", strip=True)
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            plain_text = payload.decode(errors="ignore")
+            
+    # Prefer HTML text if plain text is just a short redirect wrapper (< 200 chars)
+    if len(plain_text.strip()) < 200 and html_text:
+        return html_text
+    return plain_text if plain_text else html_text

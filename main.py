@@ -1,5 +1,20 @@
+# --- GLOBAL PSYCOPG2 FORCE INJECTION ---
+import sys
+try:
+    import psycopg2
+    import psycopg2.extras
+    # Force it into sys.modules globally so any file can access it
+    sys.modules['psycopg2'] = psycopg2
+    sys.modules['psycopg2.extras'] = psycopg2.extras
+except ImportError as e:
+    print(f"FATAL: psycopg2-binary is missing: {e}")
+    sys.exit(1)
+# ---------------------------------------
 from dotenv import load_dotenv
 load_dotenv()
+
+import psycopg2
+import psycopg2.extras
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI

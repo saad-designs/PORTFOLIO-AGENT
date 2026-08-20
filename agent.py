@@ -1,16 +1,23 @@
+import psycopg2
+import psycopg2.extras
 import psxdata
 import pandas as pd
 from datetime import datetime, timedelta
 import mplfinance as mpf
 import uuid
 import os
+import psycopg
 import psycopg2
+import psycopg2.extras
+import asyncio
 from psycopg2.extras import RealDictCursor
 import matplotlib
 matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
 import matplotlib.pyplot as plt
+from cachetools import cached, TTLCache
 
 # Helper: Fetch Quote with Corporate Action Fallback
+@cached(cache=TTLCache(maxsize=100, ttl=900))
 def fetch_quote_with_fallback(ticker: str):
     suffixes = ["", "XD", "XB", "XR"]
     for suffix in suffixes:
@@ -34,6 +41,7 @@ def fetch_quote_with_fallback(ticker: str):
     return None, ticker
 
 # Helper: Fetch Stocks with Corporate Action Fallback
+@cached(cache=TTLCache(maxsize=100, ttl=900))
 def fetch_stocks_with_fallback(ticker: str, start: str, end: str):
     suffixes = ["", "XD", "XB", "XR"]
     for suffix in suffixes:
@@ -108,6 +116,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 import psycopg
+import asyncio
 from scheduler_config import scheduler
 
 # KMI-30 Shariah Compliant Tickers
@@ -117,45 +126,48 @@ SHARIAH_COMPLIANT = ["SYS", "LUCK", "MARI", "FCCL", "OGDCL"]
 @tool
 def get_stock_quote(ticker: str) -> str:
     """Fetches real-time price and volume for a given PSX stock ticker."""
+
     try:
         q, resolved_ticker = fetch_quote_with_fallback(ticker)
         if q is None:
             return f"Data Unavailable. Could not fetch live data for {ticker}."
-        
+    
         data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
-        
+    
         raw_price = data.get('price', data.get('current', data.get('close', 0)))
         raw_volume = data.get('volume', data.get('vol', 'N/A'))
-        
+    
         price = clean_float(raw_price)
         volume_val = clean_float(raw_volume, default=None)
         volume_str = f"{int(volume_val):,}" if volume_val is not None else "N/A"
-        
+    
         return (f"Live PSX Data for {resolved_ticker}:\n"
                 f"- Current Price: Rs. {price:.2f}\n"
                 f"- Volume: {volume_str}")
     except Exception as e:
         return f"System Error: Could not fetch stock data. Details: {str(e)}"
 
+
 # 2. Refactored Charting Tool
 @tool
 def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
     """Generates a technical price chart for a given ticker. Valid periods: '1mo', '3mo', '6mo', '1y'."""
+
     try:
         end_date = datetime.today()
         if period == '1mo': start_date = end_date - timedelta(days=30)
         elif period == '6mo': start_date = end_date - timedelta(days=180)
         elif period == '1y': start_date = end_date - timedelta(days=365)
         else: start_date = end_date - timedelta(days=90)
-        
+    
         raw_hist, resolved_ticker = fetch_stocks_with_fallback(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
         hist = sanitize_psx_df(raw_hist)
-        
+    
         if hist.empty:
             return f"Data Unavailable. Could not fetch historical data for {ticker}."
-            
-        filepath = f"/tmp/{ticker}_chart_{uuid.uuid4().hex[:6]}.png"
         
+        filepath = f"/tmp/{ticker}_chart_{uuid.uuid4().hex[:6]}.png"
+    
         mpf.plot(
             hist, 
             type='candle',
@@ -167,29 +179,33 @@ def generate_stock_chart(ticker: str, period: str = "3mo") -> str:
             ylabel_lower='Volume',
             savefig=filepath
         )
-        
+    
         return f"Chart generated. [FILE: {filepath}]"
     except Exception as e:
         return f"System Error: Chart generation failed. {str(e)}"
+
 
 # 3. Refactored Portfolio Tracker
 @tool
 def get_portfolio_status(config: RunnableConfig) -> str:
     """Fetches current portfolio holdings and calculates real-time unrealized P/L against live PSX prices."""
+
     user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
 
     try:
+        import psycopg2
+        import psycopg2.extras
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute('SELECT ticker, quantity, average_price FROM portfolio_holdings WHERE discord_user_id = %s', (user_id,))
         holdings = cur.fetchall()
-        
+    
         cur.execute('SELECT SUM(amount) AS total_cash FROM public.cash_ledger WHERE discord_user_id = %s', (user_id,))
         cash_res = cur.fetchone()
         liquid_cash = float(cash_res['total_cash']) if cash_res and cash_res.get('total_cash') is not None else 0.0
-        
+    
         cur.close()
         conn.close()
 
@@ -204,7 +220,7 @@ def get_portfolio_status(config: RunnableConfig) -> str:
             ticker = row['ticker'].upper()
             qty = clean_float(row['quantity'])
             avg_price = clean_float(row['average_price'])
-            
+        
             invested = qty * avg_price
             total_invested += invested
 
@@ -212,11 +228,11 @@ def get_portfolio_status(config: RunnableConfig) -> str:
             if q is None:
                 report.append(f"- **{ticker}**: {qty} shares @ Rs. {avg_price:.2f} (Live data unavailable)")
                 continue
-                
+            
             data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
             raw_price = data.get('price', data.get('current', data.get('close', 0)))
             live_price = clean_float(raw_price)
-            
+        
             current_value = qty * live_price
             total_current_value += current_value
             pnl = current_value - invested
@@ -226,7 +242,7 @@ def get_portfolio_status(config: RunnableConfig) -> str:
 
         total_pnl = total_current_value - total_invested
         total_pnl_percent = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
-        
+    
         true_total_value = total_current_value + liquid_cash
 
         report.append("\n**Summary:**")
@@ -238,7 +254,9 @@ def get_portfolio_status(config: RunnableConfig) -> str:
 
         return "\n".join(report)
     except Exception as e:
-        return f"System Error: Could not calculate portfolio status. Details: {str(e)}"
+        import traceback
+        return f"System Error: Could not calculate portfolio status. Details: {str(e)}\n{traceback.format_exc()}"
+
 
 class CashTransactionSchema(BaseModel):
     transaction_type: str = Field(description="Must be 'DEPOSIT', 'WITHDRAWAL', or 'DIVIDEND'")
@@ -248,11 +266,14 @@ class CashTransactionSchema(BaseModel):
 @tool(args_schema=CashTransactionSchema)
 def log_cash_transaction(transaction_type: str, amount: float, ticker: Optional[str], config: RunnableConfig) -> str:
     """Logs a cash deposit, withdrawal, or dividend into the ledger."""
+
     user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
-        
+    
     try:
+        import psycopg2
+        import psycopg2.extras
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor()
         cur.execute(
@@ -265,16 +286,21 @@ def log_cash_transaction(transaction_type: str, amount: float, ticker: Optional[
         conn.close()
         return f"Ledger updated: {transaction_type.upper()} of {amount} PKR recorded for user {user_id}."
     except Exception as e:
-        return f"Database Error: {str(e)}"
+        import traceback
+        return f"Database Error: {str(e)}\n{traceback.format_exc()}"
+
 
 @tool
 def get_liquid_cash(config: RunnableConfig) -> str:
     """Fetches the user's current buying power / liquid cash from the ledger."""
+
     user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
-        
+    
     try:
+        import psycopg2
+        import psycopg2.extras
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor()
         cur.execute('SELECT SUM(amount) FROM public.cash_ledger WHERE discord_user_id = %s', (user_id,))
@@ -284,11 +310,14 @@ def get_liquid_cash(config: RunnableConfig) -> str:
         conn.close()
         return f"Total Liquid Cash / Buying Power for user {user_id}: Rs. {liquid_cash:.2f}"
     except Exception as e:
-        return f"Database Error: {str(e)}"
+        import traceback
+        return f"Database Error: {str(e)}\n{traceback.format_exc()}"
+
 
 @tool
 def retrieve_context_tool(query: str) -> str:
     """Generate vector embedding and run Cosine Distance vector search against agent_knowledge."""
+
     if not query or not str(query).strip():
         return "No context available (empty query provided)."
     
@@ -306,7 +335,7 @@ def retrieve_context_tool(query: str) -> str:
                 ORDER BY embedding <=> %s::halfvec 
                 LIMIT 3;
             """, (str(query_embedding),)).fetchall()
-            
+        
             context_pieces = []
             for row in res:
                 content, source_type, source_url = row
@@ -315,9 +344,11 @@ def retrieve_context_tool(query: str) -> str:
     except Exception as e:
         return f"Error retrieving context: {e}"
 
+
 @tool
 def save_to_knowledge_base(content: str, category: str = "user_memory") -> str:
     """Saves new facts, notes, or research findings into the agent's long-term vector memory."""
+
     try:
         embeddings = GoogleGenerativeAIEmbeddings(
             model="models/gemini-embedding-001", 
@@ -333,6 +364,7 @@ def save_to_knowledge_base(content: str, category: str = "user_memory") -> str:
         return f"Successfully remembered: '{content[:50]}...'"
     except Exception as e:
         return f"Database Error: Could not save memory. Details: {str(e)}"
+
 
 @tool
 def manage_scheduled_task(action: str, task_name: str = None, schedule_cron: str = None) -> str:
@@ -366,15 +398,18 @@ class PortfolioPositionSchema(BaseModel):
 @tool(args_schema=PortfolioPositionSchema)
 def add_portfolio_position(ticker: str, quantity: float, price: float, config: RunnableConfig) -> str:
     """Manually log a new stock position into the portfolio holdings database."""
+
     # 1. Extract the secure user ID injected by the Discord handler
     user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
 
     try:
+        import psycopg2
+        import psycopg2.extras
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor()
-        
+    
         # 2. Update SQL to enforce the composite primary key
         cur.execute(
             '''INSERT INTO portfolio_holdings (discord_user_id, ticker, quantity, average_price) 
@@ -388,10 +423,12 @@ def add_portfolio_position(ticker: str, quantity: float, price: float, config: R
         conn.commit()
         cur.close()
         conn.close()
-        
+    
         return f"Database updated: Added {quantity} shares of {ticker.upper()} at {price} PKR for user {user_id}."
     except Exception as e:
-        return f"Database Error: {str(e)}"
+        import traceback
+        return f"Database Error: {str(e)}\n{traceback.format_exc()}"
+
 
 class PriceAlertSchema(BaseModel):
     ticker: str = Field(description="The exact stock ticker symbol, e.g., 'SYS'")
@@ -401,11 +438,14 @@ class PriceAlertSchema(BaseModel):
 @tool(args_schema=PriceAlertSchema)
 def set_price_alert(ticker: str, target_price: float, condition: str, config: RunnableConfig) -> str:
     """Logs a price alert to watch a stock."""
+
     user_id = config.get("configurable", {}).get("discord_user_id")
     if not user_id:
         return "System Error: Missing Discord User ID."
-        
+    
     try:
+        import psycopg2
+        import psycopg2.extras
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor()
         cur.execute(
@@ -418,7 +458,9 @@ def set_price_alert(ticker: str, target_price: float, condition: str, config: Ru
         conn.close()
         return f"Alert set: Will notify when {ticker.upper()} goes {condition.upper()} {target_price} PKR."
     except Exception as e:
-        return f"Database Error: {str(e)}"
+        import traceback
+        return f"Database Error: {str(e)}\n{traceback.format_exc()}"
+
 
 @tool
 def execute_trade_tool(ticker: str, action: str) -> str:
@@ -458,14 +500,21 @@ tools = [
     set_price_alert
 ]
 
-SYSTEM_PROMPT = """You are an elite, autonomous financial, web, and research AI agent. You operate under absolute factual strictness.
-You are an autonomous, institutional-grade quantitative research agent for the Pakistan Stock Exchange (PSX). 
-When the user provides capital or asks for market entry:
-1. DO NOT ask the user what tickers to look at. You must use your tools to find them.
-2. Query the Vector Brain for current mentor strategies regarding asset allocation and market conditions.
-3. Scan the PSX market data and fundamental tools to identify 2-3 specific tickers that match the mentor's criteria (e.g., high dividend yield, low P/E, strong support).
-4. Give a definitive, data-driven verdict: Either specify exact tickers and entry prices, or explicitly advise holding the capital in cash if market conditions are poor.
-Never output generic financial advice. Always ground your strategy in live tool data.
+SYSTEM_PROMPT = """You are a sharp, seasoned, and straightforward human investment partner focused on the Pakistan Stock Exchange (PSX).
+
+### CONVERSATIONAL RULES & TONE
+1. Speak naturally like a real human trading partner sitting at the same desk.
+2. DO NOT format your responses like a rigid corporate PDF or automated calculator.
+3. NEVER use generic corporate headings like "Target Asset Allocation", "Rationale", "Definitive Verdict", or "Execution Plan".
+4. Speak in clean, conversational paragraphs. Integrate data, tickers, and prices naturally into your sentences.
+5. Be direct, candid, and brutally honest about risks, valuations, and entry timing.
+
+### STRICT MATHEMATICAL CONSTRAINTS
+1. HARD BUDGET LIMIT: You must never suggest or finalize an allocation where the total cost exceeds the user's available dry powder/cash.
+2. ALWAYS perform the exact math before replying:
+   Total Required = Sum of (Shares * Price) for all proposed buys.
+   Verify that Total Required <= Available Capital.
+3. If user capital is Rs. 10,000, the sum of all purchases must be strictly less than or equal to Rs. 10,000.
 
 ### CORE DIRECTIVES
 1. **Zero Hallucination:** You must NEVER invent, fabricate, or guess data. If a tool returns no data, explicitly state: "Data Unavailable."
@@ -484,12 +533,12 @@ Never output generic financial advice. Always ground your strategy in live tool 
 - If a tool returns a file path like `[FILE: /tmp/...]`, include that exact string unchanged. Never convert local file paths into Markdown image syntax."""
 
 def get_compiled_graph():
-    """Connect to a Supabase PostgreSQL instance using psycopg[binary]. Configure pgvector and langgraph-checkpoint-postgres."""
+    """Connect to a Supabase PostgreSQL instance for knowledge and use SQLite for checkpointing."""
     db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
     try:
-        conn = psycopg.connect(db_url, autocommit=True)
+        pg_conn = psycopg.connect(db_url, autocommit=True)
         
-        conn.execute("""
+        pg_conn.execute("""
         CREATE EXTENSION IF NOT EXISTS vector;
 
         CREATE TABLE IF NOT EXISTS agent_knowledge (
@@ -501,12 +550,19 @@ def get_compiled_graph():
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         """)
-        
-        checkpointer = PostgresSaver(conn)
-        checkpointer.setup()
-        return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
     except Exception as e:
-        print(f"Warning: Could not connect to Postgres ({e}). Compiling without checkpointer.")
+        print(f"Warning: Could not connect to Postgres for knowledge base ({e}).")
+
+    try:
+        import sqlite3
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        conn = sqlite3.connect("checkpoints.db", check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        memory = SqliteSaver(conn)
+        return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT, checkpointer=memory)
+    except Exception as e:
+        print(f"Warning: Could not configure SqliteSaver ({e}). Compiling without checkpointer.")
         return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 graph = get_compiled_graph()

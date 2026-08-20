@@ -1,6 +1,16 @@
+import psycopg2
+import psycopg2.extras
 import os
 import requests
-import psycopg2
+# --- SAFE PSYCOPG2 MODULE-LEVEL IMPORT ---
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    psycopg2 = None
+    PSYCOPG2_AVAILABLE = False
+# -----------------------------------------
 import functools
 import datetime
 import pandas as pd
@@ -11,10 +21,22 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from langchain.tools import tool
 from typing import List, Dict
+from cachetools import cached, TTLCache
 
 load_dotenv()
 DATABASE_URL = os.getenv("SUPABASE_DB_URL")
 
+def get_db_connection(db_url=None):
+    if not PSYCOPG2_AVAILABLE or psycopg2 is None:
+        raise RuntimeError(
+            "CRITICAL: 'psycopg2-binary' is missing from Python 3.12. "
+            "Run 'py -3.12 -m pip install psycopg2-binary' in your terminal."
+        )
+    
+    conn_str = db_url if db_url else DATABASE_URL
+    return psycopg2.connect(conn_str)
+
+@cached(cache=TTLCache(maxsize=100, ttl=900))
 def get_live_price(ticker: str) -> float:
     """Scrapes the live current price from the PSX Data Portal."""
     try:
@@ -35,6 +57,35 @@ def get_live_price(ticker: str) -> float:
         print(f"Error fetching live price for {ticker}: {e}")
         return 0.0
 
+@cached(cache=TTLCache(maxsize=100, ttl=900))
+def get_live_price_and_change(ticker: str) -> tuple[float, float]:
+    """Scrapes the live current price and daily percentage change from the PSX Data Portal."""
+    try:
+        url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
+        headers = {'User-Agent': 'Mozilla/5.0'} 
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        price = 0.0
+        change_pct = 0.0
+        
+        price_div = soup.find('div', class_='quote__close')
+        if price_div:
+            price_text = price_div.text.replace('Rs.', '').replace(',', '').strip()
+            price = float(price_text)
+            
+        change_div = soup.find('div', class_='quote__change')
+        if change_div:
+            import re
+            match = re.search(r'\(([-+]?[0-9]*\.?[0-9]+)%\)', change_div.text)
+            if match:
+                change_pct = float(match.group(1))
+                
+        return price, change_pct
+    except Exception as e:
+        print(f"Error fetching live price and change for {ticker}: {e}")
+        return 0.0, 0.0
+
 def log_trade(ticker: str, action: str, quantity: float, price: float, fees: float = 0.0) -> str:
     ticker = ticker.upper()
     action = action.upper()
@@ -43,7 +94,7 @@ def log_trade(ticker: str, action: str, quantity: float, price: float, fees: flo
         return "🚨 Error: Action must be 'BUY' or 'SELL'."
         
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -81,12 +132,13 @@ def log_trade(ticker: str, action: str, quantity: float, price: float, fees: flo
         return f"✅ **{action} LOGGED:** {quantity} shares of {ticker} at Rs. {price} (Fees: Rs. {fees})."
         
     except Exception as e:
-        return f"🚨 Database Error: {e}"
+        import traceback
+        return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
 
 def set_target(ticker: str, target_price: float, stop_loss: float = 0.0) -> str:
     ticker = ticker.upper()
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         # Upsert target logic
@@ -106,11 +158,12 @@ def set_target(ticker: str, target_price: float, stop_loss: float = 0.0) -> str:
         
         return f"🎯 **TARGET SET:** {ticker} | Target: Rs. {target_price} | Stop Loss: Rs. {stop_loss}"
     except Exception as e:
-        return f"🚨 Database Error: {e}"
+        import traceback
+        return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
 
 def get_portfolio_summary() -> str:
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         # We join the portfolio table with targets to show everything at once
@@ -173,11 +226,12 @@ def get_portfolio_summary() -> str:
         return summary
 
     except Exception as e:
-        return f"🚨 Database Error: {e}"
+        import traceback
+        return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
 
 def get_watchlist_summary() -> str:
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT ticker, target_price FROM watchlist_targets")
@@ -206,7 +260,276 @@ def get_watchlist_summary() -> str:
         return summary.strip()
 
     except Exception as e:
-        return f"🚨 Database Error: {e}"
+        import traceback
+        return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
+
+def check_profit_and_rebalance_triggers() -> list[dict]:
+    """
+    Evaluates the portfolio against quantitative rules and returns actionable alerts.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get total cash (single-tenant assumption for global cash pool)
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        cash_res = cursor.fetchone()
+        cash_balance = float(cash_res[0]) if cash_res else 0.0
+        
+        # Get portfolio holdings
+        cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
+        holdings = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if not holdings:
+            return []
+            
+        # Calculate total portfolio value
+        positions = []
+        equity_value = 0.0
+        
+        for row in holdings:
+            ticker = row[0]
+            shares = float(row[1])
+            avg_price = float(row[2])
+            current_price = get_live_price(ticker)
+            
+            if current_price == 0.0:
+                current_price = avg_price # fallback
+                
+            pos_value = shares * current_price
+            equity_value += pos_value
+            
+            positions.append({
+                "ticker": ticker,
+                "shares": shares,
+                "avg_price": avg_price,
+                "current_price": current_price,
+                "position_value": pos_value
+            })
+            
+        total_value = equity_value + cash_balance
+        if total_value <= 0:
+            return []
+            
+        alerts = []
+        
+        # Identify best candidate for cash buffer trim (e.g., largest gain)
+        best_trim_candidate = None
+        max_gain_pct = -100.0
+        
+        for pos in positions:
+            ticker = pos["ticker"]
+            shares = pos["shares"]
+            avg_price = pos["avg_price"]
+            current_price = pos["current_price"]
+            pos_value = pos["position_value"]
+            
+            gain_pct = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0.0
+            
+            if gain_pct > max_gain_pct:
+                max_gain_pct = gain_pct
+                best_trim_candidate = pos
+                
+            # Tier 1 Profit Trigger
+            if current_price >= avg_price * 1.15:
+                shares_to_sell = max(1, round(shares * 0.30))
+                cash_gen = shares_to_sell * current_price
+                alerts.append({
+                    "type": "tier_1_profit",
+                    "ticker": ticker,
+                    "current_price": current_price,
+                    "gain_pct": gain_pct,
+                    "shares_to_sell": shares_to_sell,
+                    "cash_generated": cash_gen,
+                    "new_cash_balance": cash_balance + cash_gen
+                })
+                
+            # Concentration Trigger
+            if pos_value / total_value >= 0.40:
+                # Target max 35% exposure
+                target_value = total_value * 0.35
+                excess_value = pos_value - target_value
+                shares_to_sell = max(1, round(excess_value / current_price))
+                cash_gen = shares_to_sell * current_price
+                alerts.append({
+                    "type": "concentration_risk",
+                    "ticker": ticker,
+                    "current_price": current_price,
+                    "gain_pct": gain_pct,
+                    "shares_to_sell": shares_to_sell,
+                    "cash_generated": cash_gen,
+                    "new_cash_balance": cash_balance + cash_gen
+                })
+                
+        # Cash Buffer Trigger
+        if cash_balance < total_value * 0.05 and best_trim_candidate:
+            target_cash = total_value * 0.10
+            cash_needed = target_cash - cash_balance
+            trim_ticker = best_trim_candidate["ticker"]
+            trim_price = best_trim_candidate["current_price"]
+            trim_shares = max(1, round(cash_needed / trim_price))
+            
+            # Ensure we don't sell more than we own
+            if trim_shares > best_trim_candidate["shares"]:
+                trim_shares = int(best_trim_candidate["shares"])
+                
+            if trim_shares > 0:
+                cash_gen = trim_shares * trim_price
+                alerts.append({
+                    "type": "low_cash_buffer",
+                    "ticker": trim_ticker,
+                    "current_price": trim_price,
+                    "gain_pct": max_gain_pct,
+                    "shares_to_sell": trim_shares,
+                    "cash_generated": cash_gen,
+                    "new_cash_balance": cash_balance + cash_gen
+                })
+            
+        return alerts
+        
+    except Exception as e:
+        import traceback
+        print(f"Error checking profit/rebalance triggers: {e}")
+        traceback.print_exc()
+        return []
+
+def generate_daily_closing_summary() -> dict:
+    """Generates the daily closing summary and liquidity report."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        cash_res = cursor.fetchone()
+        liquid_cash = float(cash_res[0]) if cash_res else 0.0
+        
+        cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
+        holdings = cursor.fetchall()
+        
+        cursor.execute("SELECT daily_pnl, daily_pnl_pct FROM portfolio_daily_snapshots WHERE snapshot_date = CURRENT_DATE")
+        pnl_res = cursor.fetchone()
+        daily_pnl = float(pnl_res[0]) if pnl_res else 0.0
+        daily_pnl_pct = float(pnl_res[1]) if pnl_res else 0.0
+        
+        cursor.close()
+        conn.close()
+        
+        equity_value = 0.0
+        top_gainer = {"ticker": None, "change": -999.9}
+        top_loser = {"ticker": None, "change": 999.9}
+        
+        if not holdings:
+            return {
+                "total_portfolio_value": liquid_cash,
+                "liquid_cash": liquid_cash,
+                "equity_allocation_pct": 0.0,
+                "top_gainer": ("N/A", 0.0),
+                "top_loser": ("N/A", 0.0),
+                "daily_pnl": 0.0,
+                "daily_pnl_pct": 0.0
+            }
+            
+        for row in holdings:
+            ticker = row[0]
+            shares = float(row[1])
+            
+            current_price, change_pct = get_live_price_and_change(ticker)
+            if current_price == 0.0:
+                current_price = float(row[2])
+                change_pct = 0.0
+                
+            equity_value += shares * current_price
+            
+            if change_pct > top_gainer["change"]:
+                top_gainer = {"ticker": ticker, "change": change_pct}
+                
+            if change_pct < top_loser["change"]:
+                top_loser = {"ticker": ticker, "change": change_pct}
+                
+        total_value = equity_value + liquid_cash
+        allocation_pct = (equity_value / total_value) * 100 if total_value > 0 else 0.0
+        
+        return {
+            "total_portfolio_value": total_value,
+            "liquid_cash": liquid_cash,
+            "equity_allocation_pct": allocation_pct,
+            "top_gainer": (top_gainer["ticker"], top_gainer["change"]),
+            "top_loser": (top_loser["ticker"], top_loser["change"]),
+            "daily_pnl": daily_pnl,
+            "daily_pnl_pct": daily_pnl_pct
+        }
+    except Exception as e:
+        import traceback
+        print(f"Error generating daily summary: {e}")
+        traceback.print_exc()
+        return {}
+
+def record_daily_snapshot():
+    """
+    Records the daily portfolio snapshot into the database, calculating daily PnL.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Fetch current cash
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        cash_res = cursor.fetchone()
+        cash_balance = float(cash_res[0]) if cash_res else 0.0
+        
+        # 2. Fetch current holdings and calculate equity value
+        cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
+        holdings = cursor.fetchall()
+        
+        equity_value = 0.0
+        for row in holdings:
+            ticker = row[0]
+            shares = float(row[1])
+            current_price = get_live_price(ticker)
+            if current_price == 0.0:
+                current_price = float(row[2]) # fallback
+            equity_value += shares * current_price
+            
+        total_portfolio_value = equity_value + cash_balance
+        
+        # 3. Query the previous trading day's total_portfolio_value
+        cursor.execute("""
+            SELECT total_portfolio_value 
+            FROM portfolio_daily_snapshots 
+            WHERE snapshot_date < CURRENT_DATE 
+            ORDER BY snapshot_date DESC LIMIT 1
+        """)
+        prev_res = cursor.fetchone()
+        prev_value = float(prev_res[0]) if prev_res else total_portfolio_value
+        
+        # 4. Calculate PnL
+        daily_pnl = total_portfolio_value - prev_value
+        daily_pnl_pct = (daily_pnl / prev_value) * 100 if prev_value > 0 else 0.0
+        
+        # 5. Insert or update the snapshot
+        cursor.execute("""
+            INSERT INTO portfolio_daily_snapshots 
+                (snapshot_date, equity_value, cash_balance, total_portfolio_value, daily_pnl, daily_pnl_pct)
+            VALUES (CURRENT_DATE, %s, %s, %s, %s, %s)
+            ON CONFLICT (snapshot_date) DO UPDATE SET
+                equity_value = EXCLUDED.equity_value,
+                cash_balance = EXCLUDED.cash_balance,
+                total_portfolio_value = EXCLUDED.total_portfolio_value,
+                daily_pnl = EXCLUDED.daily_pnl,
+                daily_pnl_pct = EXCLUDED.daily_pnl_pct,
+                created_at = NOW();
+        """, (equity_value, cash_balance, total_portfolio_value, daily_pnl, daily_pnl_pct))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        import traceback
+        print(f"Error recording daily snapshot: {e}")
+        traceback.print_exc()
 
 def scan_shariah_market() -> str:
     """Scans predefined Shariah-compliant heavyweights for buying opportunities based on historical fair-value zones."""
@@ -263,8 +586,7 @@ def sync_portfolio_tool(holdings_json: str) -> str:
     try:
         holdings = json.loads(holdings_json)
         db_url = os.getenv("DATABASE_URL")
-        
-        conn = psycopg2.connect(db_url)
+        conn = get_db_connection(db_url)
         cursor = conn.cursor()
         
         # Purge old records completely
@@ -288,8 +610,10 @@ def sync_portfolio_tool(holdings_json: str) -> str:
         conn.close()
         return "Database synchronization successful: Old records purged, clean portfolio rows inserted."
     except Exception as e:
-        return f"Database sync failed: {str(e)}"
+        import traceback
+        return f"Database sync failed: {str(e)}\n{traceback.format_exc()}"
 
+@cached(cache=TTLCache(maxsize=100, ttl=900))
 def get_fundamentals(ticker: str) -> dict:
     """
     Fetches fundamentals from yfinance and cleans missing values safely.
@@ -357,7 +681,7 @@ def fetch_supabase_equity_curve() -> pd.DataFrame:
     """
     try:
         # 1. Fetch transactions from Supabase
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT ticker, action, quantity, transaction_date FROM transactions ORDER BY transaction_date ASC")

@@ -123,3 +123,47 @@ def query_mentor_brain_tool(query: str) -> str:
         
     except Exception as e:
         return f"Tool Execution Error: query_mentor_brain_tool failed. Details: {str(e)}"
+
+import asyncio
+
+async def evaluate_trade_trigger(trigger_dict: dict) -> str:
+    """Evaluates a quantitative trade trigger against current market context."""
+    try:
+        ticker = trigger_dict.get('ticker')
+        
+        @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
+        def _similarity_search():
+            return vector_db.similarity_search(ticker, k=5)
+            
+        results = await asyncio.to_thread(_similarity_search)
+        
+        if not results:
+            context = f"No recent news or context found for {ticker}."
+            print(f"🧠 [Hybrid Gate] RAG Vector Search: No context found for {ticker}.")
+        else:
+            context = "\n\n".join([doc.page_content for doc in results])
+            print(f"🧠 [Hybrid Gate] RAG Vector Search successful for {ticker}. Retrieved {len(results)} chunks.")
+            
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-3.5-flash-lite",
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        )
+        
+        prompt = f"A quantitative portfolio trigger has fired: {trigger_dict}. Here is the latest market context for {ticker}: {context}. Analyze this context and provide a brutally objective 2-sentence verdict on whether to execute the algorithmic trim, or override it and hold due to market conditions."
+        
+        @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
+        def _invoke_llm():
+            return llm.invoke(prompt)
+            
+        response = await asyncio.to_thread(_invoke_llm)
+        content = response.content
+        if isinstance(content, list):
+            text_answer = "".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in content])
+        else:
+            text_answer = str(content)
+            
+        print(f"🧠 [Hybrid Gate] LLM Verdict for {ticker}: {text_answer}")
+        return text_answer
+        
+    except Exception as e:
+        return f"Error evaluating trade trigger: {str(e)}"
