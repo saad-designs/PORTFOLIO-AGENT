@@ -1,12 +1,12 @@
 import os
 import re
 from langchain.tools import tool
-from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from youtube_transcript_api import YouTubeTranscriptApi
 from dotenv import load_dotenv
 from tenacity import retry, wait_exponential, stop_after_attempt
+from pydantic import BaseModel, Field
 import sqlite3
 
 load_dotenv()
@@ -17,21 +17,17 @@ embeddings = GoogleGenerativeAIEmbeddings(
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# Persistent ChromaDB Storage
-vector_db = Chroma(
-    persist_directory="./vector_db",
-    embedding_function=embeddings
-)
+from langchain_postgres import PGVector
+from utils import normalize_ticker
 
-# Enable SQLite WAL mode to prevent database locking across background sweeps
-db_path = os.path.join("./vector_db", "chroma.sqlite3")
-if os.path.exists(db_path):
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.close()
-    except Exception as e:
-        print(f"Warning: Failed to enable SQLite WAL mode on ChromaDB - {str(e)}")
+# Persistent Supabase pgvector Storage
+db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+vector_db = PGVector(
+    embeddings=embeddings,
+    collection_name="financial_knowledge",
+    connection=db_url,
+    use_jsonb=True,
+)
 
 @tool
 def ingest_knowledge_tool(input_text_or_url: str) -> str:
@@ -126,14 +122,39 @@ def query_mentor_brain_tool(query: str) -> str:
 
 import asyncio
 
+class TradeEvaluationSchema(BaseModel):
+    ticker: str = Field(description="The normalized ticker symbol (e.g., 'MEBL')")
+    action: str = Field(description="Must be 'HOLD', 'SELL', or 'TRIM'")
+    trim_percentage: float = Field(description="The percentage of the position to trim (0-100)")
+    risk_score_1_to_10: int = Field(description="A subjective risk score from 1 (lowest) to 10 (highest)")
+    confidence: float = Field(description="Model's confidence in this decision (0.0 to 1.0)")
+    rationale: str = Field(description="Brutally objective 1-2 sentence verdict on the trade action")
+
 async def evaluate_trade_trigger(trigger_dict: dict) -> str:
     """Evaluates a quantitative trade trigger against current market context."""
     try:
-        ticker = trigger_dict.get('ticker')
+        raw_ticker = trigger_dict.get('ticker')
+        ticker = normalize_ticker(raw_ticker)
         
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _similarity_search():
-            return vector_db.similarity_search(ticker, k=5)
+            import time
+            from langchain_core.documents import Document
+            
+            # Temporal Filter: Get documents within last 72 hours
+            seventy_two_hours_ago = int(time.time()) - (72 * 3600)
+            # PGVector allows metadata filtering
+            # We assume metadata timestamp is stored as 'timestamp'
+            filter_dict = {"timestamp": {"$gte": seventy_two_hours_ago}}
+            
+            # If the underlying store supports it, we pass it.
+            # PGVector supports some filtering, but it might depend on the implementation.
+            # Alternatively, we could just do a standard search and manually filter if pgvector doesn't support this syntax.
+            try:
+                return vector_db.similarity_search(ticker, k=5, filter=filter_dict)
+            except Exception as e:
+                print(f"Filter failed, falling back to basic search: {e}")
+                return vector_db.similarity_search(ticker, k=5)
             
         results = await asyncio.to_thread(_similarity_search)
         
@@ -148,22 +169,18 @@ async def evaluate_trade_trigger(trigger_dict: dict) -> str:
             model="gemini-3.5-flash-lite",
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
+        structured_llm = llm.with_structured_output(TradeEvaluationSchema)
         
         prompt = f"A quantitative portfolio trigger has fired: {trigger_dict}. Here is the latest market context for {ticker}: {context}. Analyze this context and provide a brutally objective 2-sentence verdict on whether to execute the algorithmic trim, or override it and hold due to market conditions."
         
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _invoke_llm():
-            return llm.invoke(prompt)
+            return structured_llm.invoke(prompt)
             
         response = await asyncio.to_thread(_invoke_llm)
-        content = response.content
-        if isinstance(content, list):
-            text_answer = "".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in content])
-        else:
-            text_answer = str(content)
-            
-        print(f"🧠 [Hybrid Gate] LLM Verdict for {ticker}: {text_answer}")
-        return text_answer
+        
+        print(f"🧠 [Hybrid Gate] LLM Verdict for {ticker}: {response.model_dump_json()}")
+        return response.model_dump_json()
         
     except Exception as e:
-        return f"Error evaluating trade trigger: {str(e)}"
+        return f'{{"error": "Error evaluating trade trigger: {str(e)}"}}'

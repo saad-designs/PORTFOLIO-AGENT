@@ -532,37 +532,32 @@ SYSTEM_PROMPT = """You are a sharp, seasoned, and straightforward human investme
 - **Error Transparency:** If a tool returns an error or failure string, relay the EXACT error details provided by the tool. Do not abstract it behind a generic "system error" message.
 - If a tool returns a file path like `[FILE: /tmp/...]`, include that exact string unchanged. Never convert local file paths into Markdown image syntax."""
 
-def get_compiled_graph():
-    """Connect to a Supabase PostgreSQL instance for knowledge and use SQLite for checkpointing."""
-    db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
-    try:
-        pg_conn = psycopg.connect(db_url, autocommit=True)
-        
-        pg_conn.execute("""
-        CREATE EXTENSION IF NOT EXISTS vector;
+_agent_app = None
+_checkpointer = None
 
-        CREATE TABLE IF NOT EXISTS agent_knowledge (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            source_type TEXT NOT NULL,
-            source_url TEXT,
-            content TEXT NOT NULL,
-            embedding halfvec(768),
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-    except Exception as e:
-        print(f"Warning: Could not connect to Postgres for knowledge base ({e}).")
-
-    try:
-        import sqlite3
-        from langgraph.checkpoint.sqlite import SqliteSaver
-
-        conn = sqlite3.connect("checkpoints.db", check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        memory = SqliteSaver(conn)
-        return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT, checkpointer=memory)
-    except Exception as e:
-        print(f"Warning: Could not configure SqliteSaver ({e}). Compiling without checkpointer.")
-        return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
-
-graph = get_compiled_graph()
+async def get_agent():
+    global _agent_app, _checkpointer
+    if _agent_app is None:
+        db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+        if db_url:
+            # Revert to standard postgresql:// format for psycopg_pool
+            if db_url.startswith("postgres://"):
+                db_url = db_url.replace("postgres://", "postgresql://", 1)
+            elif db_url.startswith("postgresql+psycopg://"):
+                 db_url = db_url.replace("postgresql+psycopg://", "postgresql://", 1)
+            
+            # Initialize inside active async loop
+            try:
+                from psycopg_pool import AsyncConnectionPool
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                pool = AsyncConnectionPool(conninfo=db_url, max_size=5)
+                await pool.open()
+                _checkpointer = AsyncPostgresSaver(pool)
+                await _checkpointer.setup()
+                _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT, checkpointer=_checkpointer)
+            except Exception as e:
+                print(f"Warning: Could not configure AsyncPostgresSaver ({e}). Compiling without checkpointer.")
+                _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
+        else:
+            _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
+    return _agent_app

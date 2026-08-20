@@ -21,7 +21,7 @@ from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate
-from agent import graph as agent_app
+from agent import get_agent
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
 import asyncio
 from youtube_scraper import fetch_mentor_transcripts, get_channel_id, get_latest_video_id, get_transcript
@@ -180,6 +180,7 @@ async def midnight_mentor_sweep():
             config = {"configurable": {"thread_id": f"midnight_sweep_{mentor}"}}
             
             try:
+                agent_app = await get_agent()
                 response = await asyncio.to_thread(agent_app.invoke, inputs, config)
                 raw_content = response["messages"][-1].content
                 
@@ -325,6 +326,7 @@ class TradeConfirmationView(discord.ui.View):
         
         # Resume the graph WITHOUT a ToolMessage injection
         # This forces the graph to enter the ToolNode and execute the real Supabase backend logic
+        agent_app = await get_agent()
         await asyncio.to_thread(agent_app.invoke, None, self.config)
         
         snapshot = await asyncio.to_thread(agent_app.get_state, self.config)
@@ -350,6 +352,7 @@ class TradeConfirmationView(discord.ui.View):
         tool_call_id = self.pending_tool_calls[0]['id']
         tool_message = ToolMessage(content="Trade Cancelled by User. Do not proceed.", tool_call_id=tool_call_id)
         
+        agent_app = await get_agent()
         await asyncio.to_thread(agent_app.update_state, self.config, {"messages": [tool_message]}, as_node="tools")
         await asyncio.to_thread(agent_app.invoke, None, self.config)
         
@@ -532,6 +535,7 @@ async def on_message(message):
             config = {"configurable": {"thread_id": session_id, "discord_user_id": str(message.author.id)}}
             inputs = {"messages": [HumanMessage(content=content)]}
             
+            agent_app = await get_agent()
             response = await asyncio.to_thread(agent_app.invoke, inputs, config)
             
             # Loop to handle tool interruptions and auto-resume for safe tools

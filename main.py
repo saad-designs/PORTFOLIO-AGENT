@@ -1,3 +1,10 @@
+import sys
+import asyncio
+
+# Force SelectorEventLoop on Windows to support psycopg async pools
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 # --- GLOBAL PSYCOPG2 FORCE INJECTION ---
 import sys
 try:
@@ -38,7 +45,7 @@ from scheduler_config import scheduler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    app.state.graph = agent.get_compiled_graph()
+    app.state.graph = await agent.get_agent()
     
     # Retrieve token
     token = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
@@ -99,7 +106,7 @@ class WebhookPayload(BaseModel):
 @app.post("/webhook/discord")
 async def discord_webhook(payload: WebhookPayload):
     config = {"configurable": {"thread_id": payload.thread_id}}
-    app.state.graph.invoke(Command(resume=payload.action), config=config)
+    await app.state.graph.ainvoke(Command(resume=payload.action), config=config)
     return {"status": "success", "action": payload.action}
 
 @app.post("/trigger")
@@ -108,7 +115,7 @@ async def trigger_agent():
     config = {"configurable": {"thread_id": thread_id}}
     initial_state = {"tickers": ["SYS", "HBL", "LUCK"]}
     
-    app.state.graph.invoke(initial_state, config=config)
+    await app.state.graph.ainvoke(initial_state, config=config)
     
     # Trigger the bot to send the interactive ExecutionView card
     await discord_bot.send_alert(thread_id, "Buy signal detected for SYS at optimal execution price. KMI-30 Compliant.")
@@ -117,5 +124,19 @@ async def trigger_agent():
 
 if __name__ == "__main__":
     import uvicorn
+    import asyncio
+    import os
+    import sys
+
+    # Force SelectorEventLoop on Windows
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    
+    # Build the Uvicorn config, but DO NOT use uvicorn.run()
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    
+    # We manually create the event loop and serve the app inside it
+    asyncio.run(server.serve())

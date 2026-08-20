@@ -177,7 +177,8 @@ async def run_intraday_price_loop():
         now_ts = datetime.now().timestamp()
         
         for alert in alerts:
-            ticker = alert["ticker"]
+            from utils import normalize_ticker
+            ticker = normalize_ticker(alert["ticker"])
             alert_type = alert["type"]
             cooldown_key = f"{ticker}_{alert_type}"
             
