@@ -279,6 +279,13 @@ async def force_ingest(ctx):
     except Exception as e:
         await ctx.send(f"⚠️ Ingestion pipeline failed: {str(e)}")
 
+@bot.command(name="briefing")
+async def force_briefing(ctx):
+    import schedulers
+    # Assuming schedulers.py imports the bot instance and sends to ADMIN_CHANNEL_ID internally
+    await schedulers.run_daily_closing_briefing(bot_instance=bot)
+    await ctx.send("Manual briefing triggered.", delete_after=3)
+
 @bot.command(name="force_run")
 @commands.is_owner()
 async def force_run_tasks(ctx):
@@ -432,30 +439,7 @@ def fetch_ktrade_emails() -> str:
                     if isinstance(subject, bytes):
                         subject = subject.decode(encoding if encoding else "utf-8")
                         
-                    body = ""
-                    # Traverse the email payload and strip HTML using bs4
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            content_type = part.get_content_type()
-                            payload = part.get_payload(decode=True)
-                            if not payload:
-                                continue
-                            
-                            decoded_payload = payload.decode(errors="ignore")
-                            if content_type == "text/plain":
-                                body += decoded_payload
-                            elif content_type == "text/html":
-                                soup = BeautifulSoup(decoded_payload, "html.parser")
-                                body += soup.get_text(separator="\n", strip=True)
-                    else:
-                        payload = msg.get_payload(decode=True)
-                        if payload:
-                            decoded_payload = payload.decode(errors="ignore")
-                            if msg.get_content_type() == "text/html":
-                                body = BeautifulSoup(decoded_payload, "html.parser").get_text(separator="\n", strip=True)
-                            else:
-                                body = decoded_payload
-                            
+                    body = clean_email_body(msg)
                     extracted_reports.append(f"Subject: {subject}\nBody: {body}\n---")
                     
         mail.logout()
@@ -941,25 +925,38 @@ RESEARCH_KEYWORDS = [
 ]
 
 def clean_email_body(msg) -> str:
-    """Extracts and strips HTML to plain text for LLM ingestion."""
-    text_content = ""
+    """Extracts and strips HTML to plain text for LLM ingestion, prioritizing HTML payloads."""
+    plain_text = ""
+    html_text = ""
+    
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
-            if content_type == "text/plain":
-                text_content += part.get_payload(decode=True).decode(errors="ignore") + "\n"
-            elif content_type == "text/html":
-                html = part.get_payload(decode=True).decode(errors="ignore")
-                soup = BeautifulSoup(html, "html.parser")
-                text_content += soup.get_text(separator="\n") + "\n"
-    else:
-        payload = msg.get_payload(decode=True).decode(errors="ignore")
-        if msg.get_content_type() == "text/html":
-            text_content = BeautifulSoup(payload, "html.parser").get_text(separator="\n")
-        else:
-            text_content = payload
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
             
-    return "\n".join([line.strip() for line in text_content.splitlines() if line.strip()])
+            if content_type == "text/plain":
+                plain_text += payload.decode(errors="ignore") + "\n"
+            elif content_type == "text/html":
+                soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
+                html_text += soup.get_text(separator="\n", strip=True) + "\n"
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            if msg.get_content_type() == "text/html":
+                soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
+                html_text = soup.get_text(separator="\n", strip=True)
+            else:
+                plain_text = payload.decode(errors="ignore")
+            
+    # Prefer HTML text if plain text is just a short redirect wrapper (< 200 chars)
+    if len(plain_text.strip()) < 200 and html_text.strip():
+        final_text = html_text
+    else:
+        final_text = plain_text if plain_text.strip() else html_text
+        
+    return "\n".join([line.strip() for line in final_text.splitlines() if line.strip()])
 
 async def run_email_sweep():
     print("📧 [Email Sweep] Checking inbox...")

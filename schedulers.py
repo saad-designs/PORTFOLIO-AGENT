@@ -12,6 +12,9 @@ ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", 0))
 
 logger = logging.getLogger("PortfolioAgentSchedulers")
 
+# In-memory cooldown dictionary to prevent repetitive Discord spam
+alert_cooldowns = {}
+
 async def run_youtube_sweep():
     """
     12:00 AM: YouTube Knowledge Sweep
@@ -126,11 +129,130 @@ async def run_business_portfolio_sweep():
             discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (Business)**\n```python\n{tb_str[-1900:]}\n```"
             await alert_channel.send(discord_msg)
 
+async def run_intraday_price_loop():
+    """
+    Periodic 10-minute loop during market hours to evaluate profit and rebalancing triggers.
+    """
+    logger.info(f"🔄 [{datetime.now().strftime('%H:%M')}] Initializing Intraday Price & Alert Loop...")
+    try:
+        from portfolio_manager import check_profit_and_rebalance_triggers
+        alerts = await asyncio.to_thread(check_profit_and_rebalance_triggers)
+        
+        if not alerts:
+            return
+            
+        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
+        if not alert_channel:
+            return
+            
+        now_ts = datetime.now().timestamp()
+        
+        for alert in alerts:
+            ticker = alert["ticker"]
+            alert_type = alert["type"]
+            cooldown_key = f"{ticker}_{alert_type}"
+            
+            last_alert_time = alert_cooldowns.get(cooldown_key, 0)
+            if now_ts - last_alert_time < 4 * 3600: # 4 hours cooldown
+                continue
+                
+            alert_cooldowns[cooldown_key] = now_ts
+            
+            # Format actionable alert message
+            msg = f"🚨 **PORTFOLIO ALERT ({alert_type.replace('_', ' ').title()})**\n"
+            msg += f"**Ticker:** {ticker}\n"
+            msg += f"**Current Price:** Rs. {alert['current_price']:.2f}\n"
+            msg += f"**Gain:** {alert['gain_pct']:.2f}%\n"
+            msg += f"**Action:** Sell **{alert['shares_to_sell']}** shares\n"
+            msg += f"**Expected Cash Gen:** Rs. {alert['cash_generated']:,.2f}\n"
+            msg += f"**Est. New Balance:** Rs. {alert['new_cash_balance']:,.2f}\n"
+            
+            await alert_channel.send(msg)
+            
+    except Exception as e:
+        error_msg = f"❌ [Intraday Loop Error]: {str(e)}"
+        logger.error(error_msg)
+        
+        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
+        if alert_channel:
+            tb_str = traceback.format_exc()
+            discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (Intraday)**\n```python\n{tb_str[-1900:]}\n```"
+            await alert_channel.send(discord_msg)
+
+async def run_daily_closing_briefing(bot_instance=None):
+    """
+    Executes at 16:00 PKT Mon-Thu, and 17:00 PKT on Fridays.
+    Constructs a dark-themed Discord embed summarizing liquidity and performance.
+    """
+    logger.info(f"📊 [{datetime.now().strftime('%H:%M')}] Initializing Daily Closing Summary...")
+    try:
+        from portfolio_manager import generate_daily_closing_summary, record_daily_snapshot
+        import discord
+        
+        # Snapshot the data first
+        await asyncio.to_thread(record_daily_snapshot)
+        
+        # Fetch the finalized metrics
+        summary = await asyncio.to_thread(generate_daily_closing_summary)
+        
+        if not summary:
+            return
+            
+        active_bot = bot_instance or bot
+        
+        alert_channel = active_bot.get_channel(ADMIN_CHANNEL_ID)
+        if not alert_channel:
+            try:
+                alert_channel = await active_bot.fetch_channel(ADMIN_CHANNEL_ID)
+            except Exception:
+                pass
+                
+        if not alert_channel:
+            logger.error(f"Could not find or fetch ADMIN_CHANNEL_ID: {ADMIN_CHANNEL_ID}")
+            return
+            
+        embed = discord.Embed(
+            title="📊 Daily Closing Summary & Liquidity Report",
+            color=0x2B2D31,
+            description="Market closed. Here is your portfolio snapshot:"
+        )
+        
+        embed.add_field(name="Total Portfolio Value", value=f"Rs. {summary['total_portfolio_value']:,.2f}", inline=False)
+        embed.add_field(name="Liquid Cash", value=f"Rs. {summary['liquid_cash']:,.2f}", inline=True)
+        embed.add_field(name="Equity Allocation %", value=f"{summary['equity_allocation_pct']:.1f}%", inline=True)
+        
+        # Daily PnL
+        pnl = summary.get("daily_pnl", 0.0)
+        pnl_pct = summary.get("daily_pnl_pct", 0.0)
+        sign = "+" if pnl >= 0 else ""
+        embed.add_field(name="Daily PnL", value=f"{sign}Rs. {pnl:,.2f} ({sign}{pnl_pct:.2f}%)", inline=False)
+        
+        # Top Gainer
+        g_ticker, g_change = summary['top_gainer']
+        if g_ticker and g_ticker != "N/A":
+            embed.add_field(name="🏆 Top Gainer", value=f"{g_ticker} (+{g_change:.2f}%)", inline=True)
+            
+        # Top Loser
+        l_ticker, l_change = summary['top_loser']
+        if l_ticker and l_ticker != "N/A":
+            embed.add_field(name="🔻 Top Loser", value=f"{l_ticker} ({l_change:.2f}%)", inline=True)
+            
+        await alert_channel.send(embed=embed)
+        logger.info("✅ Daily Closing Summary sent.")
+    except Exception as e:
+        error_msg = f"❌ [Daily Closing Summary Error]: {str(e)}"
+        logger.error(error_msg)
+        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
+        if alert_channel:
+            import traceback
+            tb_str = traceback.format_exc()
+            await alert_channel.send(f"⚠️ **CRITICAL SWEEP FAILURE (Daily Summary)**\n```python\n{tb_str[-1900:]}\n```")
+
 async def start_scheduled_sweeps():
     """
     Async background scheduler loop grouping tasks into distinct temporal buckets.
     """
-    logger.info("🚀 Master background scheduled sweeps started (00:00 YouTube, 12/16:00 Email, 18:00 Business).")
+    logger.info("🚀 Master background scheduled sweeps started (Intraday Loop, 00:00 YouTube, 12/16:00 Email, 18:00 Business).")
     
     while True:
         now = datetime.now()
@@ -161,6 +283,24 @@ async def start_scheduled_sweeps():
         if should_run("business", 18):
             await run_business_portfolio_sweep()
             update_last_run("business")
+            
+        # 4. Intraday Price & Alert Loop (Every 10 minutes, weekdays 09:15 - 16:30)
+        if current_date.weekday() < 5: # Monday = 0, Friday = 4
+            if (now.hour > 9 or (now.hour == 9 and now.minute >= 15)) and (now.hour < 16 or (now.hour == 16 and now.minute <= 30)):
+                last_intraday_ts = get_last_run("intraday_loop")
+                if now.timestamp() - last_intraday_ts >= 600: # 600 seconds = 10 minutes
+                    await run_intraday_price_loop()
+                    update_last_run("intraday_loop")
+                    
+        # 5. Daily Closing Summary
+        # Monday - Thursday (0-3) at 16:00
+        # Friday (4) at 17:00
+        if current_date.weekday() <= 3 and should_run("daily_summary_mt", 16):
+            await run_daily_closing_briefing()
+            update_last_run("daily_summary_mt")
+        elif current_date.weekday() == 4 and should_run("daily_summary_f", 17):
+            await run_daily_closing_briefing()
+            update_last_run("daily_summary_f")
             
         # Check every 60 seconds to prevent tight CPU looping
         await asyncio.sleep(60)
