@@ -40,13 +40,23 @@ from google.api_core.exceptions import ResourceExhausted
 
 from portfolio_manager import log_trade, get_portfolio_summary, set_target, get_live_price, get_watchlist_summary, scan_shariah_market, sync_portfolio_tool
 
+import psycopg2.pool
+DB_POOL = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=20,
+    dsn=os.getenv("SUPABASE_DB_URL")
+)
+
 intents = discord.Intents.default()
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Ensure DISCORD_CHANNEL_ID is loaded from the environment
 raw_channel_id = os.getenv("ADMIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID", "0")
 CHANNEL_ID = int(raw_channel_id) if raw_channel_id else 0
+PROSPECT_CHANNEL_ID = int(os.getenv("PROSPECT_CHANNEL_ID", "0")) or CHANNEL_ID
+RESEARCH_CHANNEL_ID = int(os.getenv("RESEARCH_CHANNEL_ID", "0")) or CHANNEL_ID
 
 async def log_error_to_discord(error_msg: str):
     log_channel_id = os.getenv("LOG_CHANNEL_ID")
@@ -126,14 +136,36 @@ async def update_psx_tickers():
                         else:
                             DYNAMIC_PSX_TICKER_MAPPING = str(data)
                             count = 1
+                            
+                        if count < 200:
+                            raise ValueError(f"PSX API payload abnormally small ({count} items), assuming cache poisoning risk.")
+                            
                         print(f"✅ Loaded {count} active PSX tickers into memory.")
+                        # Save to cache
+                        try:
+                            with open('psx_tickers_cache.json', 'w') as f:
+                                f.write(DYNAMIC_PSX_TICKER_MAPPING)
+                        except Exception as cache_err:
+                            print(f"⚠️ Failed to write ticker cache: {cache_err}")
                     except Exception as e:
                         print(f"⚠️ Failed to parse ticker JSON: {e}")
+                        raise
                 else:
                     print(f"⚠️ Failed to fetch tickers, HTTP {response.status}")
+                    raise Exception(f"HTTP {response.status}")
     except Exception as e:
         print(f"🚨 Ticker Fetch Error: {repr(e)}")
         traceback.print_exc()
+        # Fallback to cache
+        try:
+            if os.path.exists('psx_tickers_cache.json'):
+                with open('psx_tickers_cache.json', 'r') as f:
+                    DYNAMIC_PSX_TICKER_MAPPING = f.read()
+                print("✅ Loaded PSX tickers from local cache fallback.")
+            else:
+                print("⚠️ No local PSX ticker cache available.")
+        except Exception as cache_err:
+            print(f"⚠️ Failed to load ticker cache: {cache_err}")
 # Set run times in UTC to align with 09:45 AM and 03:45 PM PKT
 
 
@@ -152,18 +184,56 @@ async def midnight_mentor_sweep():
         ]
         
         print("Starting Unfiltered Midnight Mentor Sweep...")
-        transcripts_data = fetch_mentor_transcripts(mentors)
+        # Offload yt-dlp / transcript fetch
+        transcripts_data = await asyncio.to_thread(fetch_mentor_transcripts, mentors)
         
-        if not transcripts_data:
-            print("No new transcripts could be extracted tonight.")
-            return
+        if not transcripts_data or len(transcripts_data) < len(mentors):
+            alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
+            if alert_channel:
+                missing = set(mentors) - set(transcripts_data.keys())
+                msg = f"⚠️ **CRITICAL ALERT:** Midnight Sweep experienced a partial or complete failure. YT-DLP might be IP blocked. Failed to process: {', '.join(missing)}."
+                await alert_channel.send(msg)
+                
+            if not transcripts_data:
+                print("No new transcripts could be extracted tonight.")
+                return
+
+        # 1. Fetch current portfolio
+        def get_portfolio_weights():
+            conn = DB_POOL.getconn()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0")
+                holdings = cur.fetchall()
+                
+                h_str = []
+                for row in holdings:
+                    ticker, qty = row[0], float(row[1])
+                    h_str.append(f"{ticker} ({qty} shares)")
+                
+                res = "Current Holdings: " + ", ".join(h_str) if h_str else "No active holdings."
+                cur.close()
+                return res
+            except Exception as e:
+                print("Error fetching holdings for sweep:", e)
+                return "Could not fetch holdings due to DB error."
+            finally:
+                DB_POOL.putconn(conn)
+                
+        # Offload DB call
+        holdings_str = await asyncio.to_thread(get_portfolio_weights)
 
         # Loop through successful extractions and send them to your LLM agent
         for mentor, text in transcripts_data.items():
             prompt = f"""
-            Analyze the following recent YouTube transcript from {mentor}.
-            Extract the top 3 actionable investment or stock market insights. 
-            Discard any promotional material, sponsor reads, or fluff.
+            You are the Chief Investment Strategist of this portfolio. You do not just summarize information; you analyze it against our existing assets.
+            
+            CURRENT PORTFOLIO HOLDINGS: {holdings_str}
+            
+            Analyze the following transcript from a market mentor ({mentor}). 
+            1. Extract the core macro and strategic insights.
+            2. CRITICAL SYSTEM INTEGRATION: Explicitly state how these insights impact our CURRENT PORTFOLIO HOLDINGS. If they mention a sector we own, highlight it. If their macro view threatens our positions, flag the risk.
+            3. Keep the tone human, candid, and direct. No robotic jargon.
             
             Also, extract any specific Pakistani stock/ticker mentions along with suggested buy targets and/or stop losses. 
             Format the targets strictly as Discord commands at the very end of your response, one per line:
@@ -181,7 +251,7 @@ async def midnight_mentor_sweep():
             
             try:
                 agent_app = await get_agent()
-                response = await asyncio.to_thread(agent_app.invoke, inputs, config)
+                response = await agent_app.ainvoke(inputs, config)
                 raw_content = response["messages"][-1].content
                 
                 if isinstance(raw_content, list):
@@ -192,7 +262,7 @@ async def midnight_mentor_sweep():
                 else:
                     final_reply = str(raw_content)
                 
-                channel = bot.get_channel(CHANNEL_ID)
+                channel = bot.get_channel(RESEARCH_CHANNEL_ID)
                 if channel:
                     # Discord 2000 char limit slicing for safety
                     chunk_size = 1900
@@ -327,9 +397,9 @@ class TradeConfirmationView(discord.ui.View):
         # Resume the graph WITHOUT a ToolMessage injection
         # This forces the graph to enter the ToolNode and execute the real Supabase backend logic
         agent_app = await get_agent()
-        await asyncio.to_thread(agent_app.invoke, None, self.config)
+        await agent_app.ainvoke(None, self.config)
         
-        snapshot = await asyncio.to_thread(agent_app.get_state, self.config)
+        snapshot = await agent_app.aget_state(self.config)
         last_msg = snapshot.values["messages"][-1]
         if isinstance(last_msg, AIMessage):
             final_text = str(last_msg.content)
@@ -353,10 +423,10 @@ class TradeConfirmationView(discord.ui.View):
         tool_message = ToolMessage(content="Trade Cancelled by User. Do not proceed.", tool_call_id=tool_call_id)
         
         agent_app = await get_agent()
-        await asyncio.to_thread(agent_app.update_state, self.config, {"messages": [tool_message]}, as_node="tools")
-        await asyncio.to_thread(agent_app.invoke, None, self.config)
+        await agent_app.aupdate_state(self.config, {"messages": [tool_message]}, as_node="tools")
+        await agent_app.ainvoke(None, self.config)
         
-        snapshot = await asyncio.to_thread(agent_app.get_state, self.config)
+        snapshot = await agent_app.aget_state(self.config)
         last_msg = snapshot.values["messages"][-1]
         if isinstance(last_msg, AIMessage):
             final_text = str(last_msg.content)
@@ -510,6 +580,28 @@ async def on_message(message):
 
     current_author_id.set(message.author.id)
 
+    # --- Phase 4 Conversational Ledger Parsing ---
+    if message.channel.id == CHANNEL_ID and not message.content.startswith("!"):
+        from trade_parser import extract_trade_intent
+        from valuation_engine import execute_buy_fifo, execute_sell_fifo
+        
+        trade_intent = extract_trade_intent(message.content)
+        if trade_intent:
+            user_id = str(message.author.id)
+            try:
+                if trade_intent.action == "BUY":
+                    result = execute_buy_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
+                elif trade_intent.action == "SELL":
+                    result = execute_sell_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
+                else:
+                    result = {"status": "error", "message": "Unknown trade action."}
+                    
+                await message.channel.send(result.get("message", "Trade executed."))
+            except Exception as e:
+                await message.channel.send(f"🚨 Execution Error: {str(e)}")
+            return # Stop execution so it doesn't trigger the main agent
+    # ---------------------------------------------
+
     # Trigger the agent to think, execute tools, and generate a response
     async with message.channel.typing():
         try:
@@ -536,11 +628,11 @@ async def on_message(message):
             inputs = {"messages": [HumanMessage(content=content)]}
             
             agent_app = await get_agent()
-            response = await asyncio.to_thread(agent_app.invoke, inputs, config)
+            response = await agent_app.ainvoke(inputs, config)
             
             # Loop to handle tool interruptions and auto-resume for safe tools
             while True:
-                snapshot = await asyncio.to_thread(agent_app.get_state, config)
+                snapshot = await agent_app.aget_state(config)
                 
                 if snapshot.next and "tools" in snapshot.next:
                     ai_message = snapshot.values["messages"][-1]
@@ -568,12 +660,12 @@ async def on_message(message):
                         return
                     else:
                         # Auto-resume safe tools like web_search
-                        response = await asyncio.to_thread(agent_app.invoke, None, config)
+                        response = await agent_app.ainvoke(None, config)
                 else:
                     break
             
             # Extract final response
-            snapshot = await asyncio.to_thread(agent_app.get_state, config)
+            snapshot = await agent_app.aget_state(config)
             last_msg = snapshot.values["messages"][-1]
             if isinstance(last_msg, AIMessage):
                 raw_output = last_msg.content
@@ -627,7 +719,7 @@ async def market_watchdog():
         if now_pkt.weekday() >= 5:
             return 
             
-        # Block outside 09:30 AM - 03:30 PM trading hours
+        # 1. Block outside 09:30 AM - 03:30 PM trading hours
         current_time = now_pkt.time()
         market_open = datetime.strptime("09:30", "%H:%M").time()
         market_close = datetime.strptime("15:30", "%H:%M").time()
@@ -635,49 +727,57 @@ async def market_watchdog():
         if not (market_open <= current_time <= market_close):
             return 
 
-        # 1. Connect to DB and get all ACTIVE alerts
-        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT alert_id, discord_user_id, ticker, target_price, condition FROM price_alerts WHERE is_active = TRUE")
-        alerts = cur.fetchall()
-
-        if not alerts:
-            cur.close()
-            conn.close()
-            return # Do nothing if no alerts are set
-
-        # 2. Iterate and Check Prices
-        for alert in alerts:
-            # Re-use your fetch_quote_with_fallback function here to get the live price
-            q, resolved_ticker = fetch_quote_with_fallback(alert['ticker'])
-            if q is None:
-                continue
+        def fetch_market_alerts_sync():
+            import psycopg2.extras
+            import pandas as pd
+            from agent import fetch_quote_with_fallback, clean_float
+            conn = DB_POOL.getconn()
+            try:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                cur.execute("SELECT alert_id, discord_user_id, ticker, target_price, condition FROM price_alerts WHERE is_active = TRUE")
+                alerts = cur.fetchall()
                 
-            data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
-            raw_price = data.get('price', data.get('current', data.get('close', 0)))
-            live_price = clean_float(raw_price)
-            
-            if not live_price:
-                continue
-                
-            trigger = False
-            if alert['condition'] == 'ABOVE' and live_price >= alert['target_price']:
-                trigger = True
-            elif alert['condition'] == 'BELOW' and live_price <= alert['target_price']:
-                trigger = True
+                if not alerts:
+                    cur.close()
+                    return []
+                    
+                triggered_alerts = []
+                for alert in alerts:
+                    q, resolved_ticker = fetch_quote_with_fallback(alert['ticker'])
+                    if q is None:
+                        continue
+                        
+                    data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
+                    raw_price = data.get('price', data.get('current', data.get('close', 0)))
+                    live_price = clean_float(raw_price)
+                    
+                    if not live_price:
+                        continue
+                        
+                    trigger = False
+                    if alert['condition'] == 'ABOVE' and live_price >= alert['target_price']:
+                        trigger = True
+                    elif alert['condition'] == 'BELOW' and live_price <= alert['target_price']:
+                        trigger = True
 
-            # 3. Fire the Alert & Deactivate it
-            if trigger:
-                user = await bot.fetch_user(int(alert['discord_user_id']))
-                if user:
-                    await user.send(f"🚨 **MARKET ALERT:** {alert['ticker']} has crossed your target of {alert['target_price']} PKR. Current price: **{live_price} PKR**.")
-                
-                # Mark alert as inactive so it doesn't spam the user every 15 minutes
-                cur.execute("UPDATE price_alerts SET is_active = FALSE WHERE alert_id = %s", (alert['alert_id'],))
+                    if trigger:
+                        triggered_alerts.append((alert, live_price))
+                        cur.execute("UPDATE price_alerts SET is_active = FALSE WHERE alert_id = %s", (alert['alert_id'],))
+                        
                 conn.commit()
+                cur.close()
+                return triggered_alerts
+            finally:
+                DB_POOL.putconn(conn)
 
-        cur.close()
-        conn.close()
+        # Offload blocking database and API calls to a thread
+        triggered_alerts = await asyncio.to_thread(fetch_market_alerts_sync)
+
+        # 2. Fire the Alerts back in the async loop
+        for alert, live_price in triggered_alerts:
+            user = await bot.fetch_user(int(alert['discord_user_id']))
+            if user:
+                await user.send(f"🚨 **MARKET ALERT:** {alert['ticker']} has crossed your target of {alert['target_price']} PKR. Current price: **{live_price} PKR**.")
 
     except Exception as e:
         print("🔴 CRITICAL WATCHDOG TRACEBACK:")
@@ -733,48 +833,66 @@ dividend_time = time(hour=16, minute=30, tzinfo=tz_pkt)
 @tasks.loop(time=dividend_time)
 async def dividend_watchdog():
     try:
-        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        
-        cur.execute("SELECT discord_user_id, ticker, quantity FROM portfolio_holdings WHERE quantity > 0")
-        holdings = cur.fetchall()
-
-        if not holdings:
-            return
-
-        unique_tickers = set(h['ticker'] for h in holdings)
-        
-        # Get today's date formatted to match PSX portal (e.g., '13 Aug 2026')
+        tz_pkt = pytz.timezone('Asia/Karachi')
         today_str = datetime.now(tz_pkt).strftime('%d %b %Y')
-        
-        for ticker in unique_tickers:
-            dividend_per_share, ex_date = get_dividend_data(ticker)
-            
-            # The brutal gate check: Does it pay out, and is TODAY the actual ex-date?
-            if not dividend_per_share or ex_date != today_str:
-                continue
 
-            # Calculate and Distribute Cash
-            for holding in holdings:
-                if holding['ticker'] == ticker:
-                    user_id = holding['discord_user_id']
-                    quantity = holding['quantity']
-                    payout = float(quantity) * float(dividend_per_share)
+        def fetch_and_distribute_dividends_sync(t_str):
+            import psycopg2.extras
+            conn = DB_POOL.getconn()
+            try:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                
+                cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0")
+                holdings = cur.fetchall()
+                
+                if not holdings:
+                    cur.close()
+                    return []
                     
-                    # Inject into Cash Ledger
-                    cur.execute(
-                        '''INSERT INTO cash_ledger (discord_user_id, transaction_type, amount, ticker)
-                           VALUES (%s, 'DIVIDEND', %s, %s)''',
-                        (user_id, payout, ticker)
-                    )
+                unique_tickers = set(h['ticker'] for h in holdings)
+                messages = []
+                
+                for ticker in unique_tickers:
+                    dividend_per_share, ex_date = get_dividend_data(ticker)
                     
-                    user = await bot.fetch_user(int(user_id))
-                    if user:
-                        await user.send(f"💰 **DIVIDEND DEPOSIT:** {ticker} went Ex-Dividend today at {dividend_per_share} PKR per share. Based on your {quantity} shares, **{payout:.2f} PKR** has been deposited into your cash ledger.")
+                    # The brutal gate check: Does it pay out, and is TODAY the actual ex-date?
+                    if not dividend_per_share or ex_date != t_str:
+                        continue
 
-        conn.commit()
-        cur.close()
-        conn.close()
+                    # Calculate and Distribute Cash
+                    for holding in holdings:
+                        if holding['ticker'] == ticker:
+                            quantity = holding['shares']
+                            payout = float(quantity) * float(dividend_per_share)
+                            
+                            # Inject into Cash Ledger
+                            cur.execute(
+                                '''INSERT INTO cash_ledger (transaction_type, amount, ticker)
+                                   VALUES ('DIVIDEND', %s, %s)''',
+                                (payout, ticker)
+                            )
+                            
+                            messages.append((ticker, dividend_per_share, quantity, payout))
+
+                conn.commit()
+                cur.close()
+                return messages
+            finally:
+                DB_POOL.putconn(conn)
+
+        # Offload blocking database and API calls to a thread
+        messages_to_send = await asyncio.to_thread(fetch_and_distribute_dividends_sync, today_str)
+
+        channel = bot.get_channel(PROSPECT_CHANNEL_ID)
+        if channel:
+            for ticker, dividend_per_share, quantity, payout in messages_to_send:
+                msg = f"💰 **DIVIDEND DEPOSIT:** {ticker} went Ex-Dividend today at {dividend_per_share} PKR per share. Based on our {quantity} shares, **{payout:.2f} PKR** has been deposited into the cash ledger."
+                if len(msg) > 1950:
+                    for chunk in [msg[i:i+1950] for i in range(0, len(msg), 1950)]:
+                        await channel.send(chunk)
+                else:
+                    await channel.send(msg)
+
         update_last_run("dividend_watchdog")
 
     except Exception as e:
@@ -825,7 +943,7 @@ async def debug_youtube(ctx):
         await ctx.send(f"❌ **API Crash Details:**\n```python\n{str(e)}\n```")
 
 # Configuration: We use the existing CHANNEL_ID from your .env
-BRIEFING_CHANNEL_ID = CHANNEL_ID
+BRIEFING_CHANNEL_ID = PROSPECT_CHANNEL_ID
 
 # Create a timezone object for PKT (UTC+5)
 pkt = timezone(timedelta(hours=5))
@@ -860,8 +978,8 @@ async def run_business_portfolio_sweep():
     STEP 2: GENERATE THE BRIEFING
     After the data is saved, format your final output EXACTLY like the structure below. Keep it compact, insightful, and brutally logical.
 
-    # PSX Morning Mentor Sweep — {datetime.now().strftime('%A, %B %d, %Y')}
-    Good morning. Here is your scheduled market intelligence sweep.
+    # Institutional Business Sweep — {datetime.now().strftime('%A, %B %d, %Y')}
+    Good evening. Here is your scheduled market intelligence sweep.
 
     ## 1. The 24-Hour Reality Check
     [Provide a concise update on new videos, strategic shifts, or macro news. If none, state that the analysis remains anchored to previous data.]
@@ -877,8 +995,9 @@ async def run_business_portfolio_sweep():
         print("⚙️ Executing isolated daily briefing and knowledge ingestion...")
         
         # 3. Invoke the agent with the isolated state
+        agent_app = await get_agent()
         inputs = {"messages": [HumanMessage(content=prompt)]}
-        response = await asyncio.to_thread(agent_app.invoke, inputs, config)
+        response = await agent_app.ainvoke(inputs, config)
         
         # --- NEW PARSING LOGIC ---
         messages = response.get("messages", [])
@@ -899,9 +1018,14 @@ async def run_business_portfolio_sweep():
             clean_message = "⚠️ Market sweep completed, but no report content was generated."
 
         # 4. Push the formatted brief to your specific Discord channel
-        channel = bot.get_channel(CHANNEL_ID) 
+        channel = bot.get_channel(PROSPECT_CHANNEL_ID) 
         if channel:
-            await channel.send(f"🏢 **Institutional Business Sweep (6:00 PM)**\n\n{clean_message}")
+            msg = f"🏢 **Institutional Business Sweep (6:00 PM)**\n\n{clean_message}"
+            if len(msg) > 1950:
+                for chunk in [msg[i:i+1950] for i in range(0, len(msg), 1950)]:
+                    await channel.send(chunk)
+            else:
+                await channel.send(msg)
             
         # 5. Update the catch-up tracker so the bot knows it completed today's sweep
         update_last_run("run_business_portfolio_sweep")
@@ -935,37 +1059,30 @@ RESEARCH_KEYWORDS = [
 
 def clean_email_body(msg) -> str:
     """Extracts and strips HTML to plain text for LLM ingestion, prioritizing HTML payloads."""
-    plain_text = ""
-    html_text = ""
+    body = ""
     
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            payload = part.get_payload(decode=True)
-            if not payload:
-                continue
+    # Walk through the email parts recursively
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        disposition = str(part.get("Content-Disposition"))
+
+        # Skip attachments
+        if "attachment" in disposition:
+            continue
+
+        # Prioritize HTML: institutional newsletters store the actual data here
+        if content_type == "text/html":
+            raw_html = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore')
+            soup = BeautifulSoup(raw_html, 'html.parser')
+            # Extract text and preserve paragraph spacing
+            body = soup.get_text(separator='\n\n', strip=True)
+            break  # Exit loop once the rich HTML is found and parsed
             
-            if content_type == "text/plain":
-                plain_text += payload.decode(errors="ignore") + "\n"
-            elif content_type == "text/html":
-                soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
-                html_text += soup.get_text(separator="\n", strip=True) + "\n"
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            if msg.get_content_type() == "text/html":
-                soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
-                html_text = soup.get_text(separator="\n", strip=True)
-            else:
-                plain_text = payload.decode(errors="ignore")
-            
-    # Prefer HTML text if plain text is just a short redirect wrapper (< 200 chars)
-    if len(plain_text.strip()) < 200 and html_text.strip():
-        final_text = html_text
-    else:
-        final_text = plain_text if plain_text.strip() else html_text
-        
-    return "\n".join([line.strip() for line in final_text.splitlines() if line.strip()])
+        # Fallback to plain text ONLY if HTML hasn't been found yet
+        elif content_type == "text/plain" and not body:
+            body = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore')
+
+    return body
 
 async def run_email_sweep():
     print("📧 [Email Sweep] Checking inbox...")
@@ -1047,7 +1164,8 @@ async def run_email_sweep():
             inputs = {"messages": [HumanMessage(content=prompt)]}
             unique_id = f"email_{uuid.uuid4().hex}"
             config = {"configurable": {"session_id": unique_id, "thread_id": unique_id}}
-            response = await asyncio.to_thread(agent_app.invoke, inputs, config)
+            agent_app = await get_agent()
+            response = await agent_app.ainvoke(inputs, config)
             
             raw_output = response["messages"][-1].content
             if isinstance(raw_output, list):
@@ -1061,7 +1179,7 @@ async def run_email_sweep():
         
         print("📧 [Email Sweep] Summarization complete. Sending to Discord.")
         
-        channel = bot.get_channel(CHANNEL_ID)
+        channel = bot.get_channel(RESEARCH_CHANNEL_ID)
         header = "📬 **Institutional Email Briefing**\n\n"
         full_content = header + "\n\n---\n\n".join(final_messages)
         
@@ -1116,7 +1234,8 @@ async def start_scheduled_sweeps():
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})", flush=True)
+    print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})")
+    await bot.tree.sync()
     
     await update_psx_tickers()
     
@@ -1173,11 +1292,7 @@ async def check_price_targets():
     await bot.wait_until_ready()
     
     # Grab the channel ID from your .env file
-    raw_channel_id = os.getenv("ADMIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID")
-    if not raw_channel_id:
-        print("⚠️ Warning: Neither ADMIN_CHANNEL_ID nor DISCORD_CHANNEL_ID is set.")
-        return
-    channel_id = int(raw_channel_id)
+    channel_id = PROSPECT_CHANNEL_ID
     channel = bot.get_channel(channel_id)
     
     if not channel:
@@ -1236,3 +1351,112 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
     run_bot()
+
+
+from discord import app_commands
+
+class PnlPaginationView(discord.ui.View):
+    def __init__(self, user_id: str, data: list, macro_stats: dict):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.data = data
+        self.macro_stats = macro_stats
+        self.current_page = 0
+        self.max_page = max(0, (len(data) - 1) // 5)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_btn.disabled = self.current_page == 0
+        self.next_btn.disabled = self.current_page == self.max_page
+
+    def generate_embed(self) -> discord.Embed:
+        gross = self.macro_stats['gross']
+        cgt = self.macro_stats['cgt']
+        net = self.macro_stats['net']
+        
+        embed = discord.Embed(
+            title="📊 Realized PnL & Tax Ledger",
+            color=0x1E1E24,
+            description=f"**Gross Realized PnL:** Rs.{gross:,.2f}\n**Total CGT Deducted:** Rs.{cgt:,.2f}\n**Net Realized Gain:** Rs.{net:,.2f}"
+        )
+        
+        start_idx = self.current_page * 5
+        end_idx = start_idx + 5
+        page_data = self.data[start_idx:end_idx]
+        
+        for row in page_data:
+            ticker = row['ticker']
+            qty = float(row['sell_quantity'])
+            price = float(row['sell_price'])
+            net_pnl = float(row['net_realized_pnl'])
+            date = row['sell_date'].strftime('%Y-%m-%d')
+            
+            pnl_sign = "+" if net_pnl >= 0 else ""
+            embed.add_field(
+                name=f"{ticker} | {date}",
+                value=f"Sold {qty:,.0f} @ Rs.{price:,.2f}\nNet PnL: {pnl_sign}Rs.{net_pnl:,.2f}",
+                inline=False
+            )
+            
+        embed.set_footer(text=f"Page {self.current_page + 1} of {self.max_page + 1}")
+        return embed
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="prev_btn")
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            return await interaction.response.send_message("You cannot control this pagination.", ephemeral=True)
+            
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.generate_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, custom_id="next_btn")
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            return await interaction.response.send_message("You cannot control this pagination.", ephemeral=True)
+            
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.generate_embed(), view=self)
+
+@bot.tree.command(name="realized_pnl", description="View your realized PnL and CGT tax deductions.")
+async def realized_pnl(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    
+    conn = DB_POOL.getconn()
+    try:
+        import psycopg2.extras
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(gross_realized_pnl), 0) as gross,
+                       COALESCE(SUM(cgt_deducted), 0) as cgt,
+                       COALESCE(SUM(net_realized_pnl), 0) as net
+                FROM realized_cgt_ledger
+                WHERE discord_user_id = %s
+            """, (user_id,))
+            macro_row = cur.fetchone()
+            macro_stats = {
+                'gross': float(macro_row['gross']),
+                'cgt': float(macro_row['cgt']),
+                'net': float(macro_row['net'])
+            }
+            
+            cur.execute("""
+                SELECT ticker, sell_date, sell_quantity, sell_price, net_realized_pnl
+                FROM realized_cgt_ledger
+                WHERE discord_user_id = %s
+                ORDER BY sell_date DESC
+            """, (user_id,))
+            
+            data = cur.fetchall()
+            
+            if not data:
+                return await interaction.response.send_message("You have no realized trades in your ledger yet.", ephemeral=True)
+                
+            view = PnlPaginationView(user_id, data, macro_stats)
+            await interaction.response.send_message(embed=view.generate_embed(), view=view)
+            
+    except Exception as e:
+        await interaction.response.send_message(f"🚨 Error generating report: {e}", ephemeral=True)
+    finally:
+        DB_POOL.putconn(conn)

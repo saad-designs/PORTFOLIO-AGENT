@@ -149,16 +149,20 @@ def fetch_mentor_transcripts(mentor_names: list) -> dict:
     
     for name in mentor_names:
         print(f"\n--- Processing Mentor: {name} ---")
-        channel_id = get_channel_id(name)
-        if not channel_id:
+        try:
+            channel_id = get_channel_id(name)
+            if not channel_id:
+                continue
+                
+            video_id = get_latest_video_id(channel_id)
+            if not video_id:
+                continue
+                
+            transcript = get_transcript(video_id)
+            if transcript:
+                transcripts[name] = transcript
+        except Exception as e:
+            print(f"⚠️ Unhandled error extracting transcript for {name}: {e}. Skipping mentor.")
             continue
-            
-        video_id = get_latest_video_id(channel_id)
-        if not video_id:
-            continue
-            
-        transcript = get_transcript(video_id)
-        if transcript:
-            transcripts[name] = transcript
             
     return transcripts

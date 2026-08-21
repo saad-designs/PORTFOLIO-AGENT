@@ -1,4 +1,7 @@
 import sys
+# Force UTF-8 stdout before ANY import that may print emojis (Windows cp1252 fix)
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 import asyncio
 
 # Force SelectorEventLoop on Windows to support psycopg async pools
@@ -31,10 +34,6 @@ import agent
 from langgraph.types import Command
 import uuid
 import os
-import sys
-
-if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
 
 import discord_bot
 import asyncio

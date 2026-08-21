@@ -139,27 +139,27 @@ def get_youtube_transcript(video_url: str) -> str:
 
 def extract_email_body(msg) -> str:
     """Extracts email body, prioritizing HTML payloads in multipart MIME emails."""
-    plain_text = ""
-    html_text = ""
+    body = ""
     
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            payload = part.get_payload(decode=True)
-            if not payload:
-                continue
+    # Walk through the email parts recursively
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        disposition = str(part.get("Content-Disposition"))
+
+        # Skip attachments
+        if "attachment" in disposition:
+            continue
+
+        # Prioritize HTML: institutional newsletters store the actual data here
+        if content_type == "text/html":
+            raw_html = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore')
+            soup = BeautifulSoup(raw_html, 'html.parser')
+            # Extract text and preserve paragraph spacing
+            body = soup.get_text(separator='\n\n', strip=True)
+            break  # Exit loop once the rich HTML is found and parsed
             
-            if content_type == "text/plain":
-                plain_text = payload.decode(errors="ignore")
-            elif content_type == "text/html":
-                soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
-                html_text = soup.get_text(separator="\n", strip=True)
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            plain_text = payload.decode(errors="ignore")
-            
-    # Prefer HTML text if plain text is just a short redirect wrapper (< 200 chars)
-    if len(plain_text.strip()) < 200 and html_text:
-        return html_text
-    return plain_text if plain_text else html_text
+        # Fallback to plain text ONLY if HTML hasn't been found yet
+        elif content_type == "text/plain" and not body:
+            body = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore')
+
+    return body

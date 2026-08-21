@@ -6,7 +6,24 @@ from vector_brain import vector_db
 from tenacity import retry, wait_exponential, stop_after_attempt
 import logging
 import re
+import asyncio
 
+async def fetch_business_news() -> str:
+    targets = ['https://www.dawn.com/feeds/home', 'https://www.brecorder.com/feeds/latest-news']
+    headlines = []
+    
+    for url in targets:
+        try:
+            feed = await asyncio.to_thread(feedparser.parse, url)
+            headlines.append(f"=== Source: {url} ===")
+            for entry in feed.entries[:10]:
+                title = entry.get('title', 'No Title')
+                published = entry.get('published', 'No Date')
+                headlines.append(f"[{published}] {title}")
+        except Exception as e:
+            headlines.append(f"Error fetching {url}: {e}")
+            
+    return "\n".join(headlines)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("NewsScraper")
 

@@ -51,10 +51,23 @@ def create_tables():
             target_price DECIMAL,
             stop_loss DECIMAL,
             notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_recalculated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """)
         print("✅ Created/Verified 'watchlist_targets' table.")
+
+        # 4. Create Sector Valuations Table (Macro Guardrails)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sector_valuations (
+            id SERIAL PRIMARY KEY,
+            sector_name VARCHAR(50) UNIQUE NOT NULL,
+            historical_fair_pe DECIMAL NOT NULL,
+            current_trailing_pe DECIMAL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        print("✅ Created/Verified 'sector_valuations' table.")
 
         # Commit changes and close the connection
         conn.commit()

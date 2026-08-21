@@ -485,6 +485,95 @@ llm = primary_llm.with_fallbacks([fallback_llm])
 # Instantiate the search tool
 search_tool = DuckDuckGoSearchRun(name="web_search")
 
+class AddToWatchlistSchema(BaseModel):
+    ticker: str = Field(description="The PSX ticker symbol to add to the coverage universe, e.g., 'ENGRO'")
+    target_price: float = Field(description="Analyst-calculated fundamental target price in PKR")
+    stop_loss: float = Field(description="Analyst-defined stop-loss level in PKR")
+    historical_fair_pe: float = Field(description="Long-term historical fair P/E multiple for this specific company, derived from fundamental research")
+    notes: Optional[str] = Field(None, description="Optional analyst thesis or rationale for adding this ticker")
+
+@tool(args_schema=AddToWatchlistSchema)
+def add_to_watchlist_tool(
+    ticker: str,
+    target_price: float,
+    stop_loss: float,
+    historical_fair_pe: float,
+    notes: Optional[str] = None,
+) -> str:
+    """
+    Adds a newly researched, prospective stock to the watchlist_targets coverage universe.
+    Only invoke this tool after you have fundamentally evaluated the company and derived a
+    strict DCF or earnings-based target price and a historically grounded fair P/E multiple.
+    The daily 18:00 sweep will automatically track its live TTM P/E from the PSX portal.
+    """
+    ticker = ticker.upper().strip()
+
+    try:
+        import psycopg2
+        import psycopg2.extras
+        from datetime import date
+        from portfolio_manager import _scrape_psx_pe
+
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+
+        # Immediately attempt a live PE scrape to confirm the ticker is valid on the PSX portal.
+        # This acts as a sanity gate — if the ticker doesn't exist, the scraper returns None
+        # and we warn the analyst, but still commit the row so the sweep can retry later.
+        live_pe = _scrape_psx_pe(ticker)
+        live_pe_note = (
+            f" Live TTM P/E scraped immediately: {live_pe:.2f}x."
+            if live_pe is not None
+            else " Warning: Could not scrape live P/E right now — the daily sweep will retry at 18:00."
+        )
+
+        cur.execute(
+            """
+            INSERT INTO watchlist_targets
+                (ticker, target_price, stop_loss, historical_fair_pe, current_trailing_pe, notes, last_recalculated_date)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ticker) DO UPDATE SET
+                target_price          = EXCLUDED.target_price,
+                stop_loss             = EXCLUDED.stop_loss,
+                historical_fair_pe    = EXCLUDED.historical_fair_pe,
+                current_trailing_pe   = COALESCE(EXCLUDED.current_trailing_pe, watchlist_targets.current_trailing_pe),
+                notes                 = COALESCE(EXCLUDED.notes, watchlist_targets.notes),
+                last_recalculated_date = EXCLUDED.last_recalculated_date;
+            """,
+            (
+                ticker,
+                target_price,
+                stop_loss,
+                historical_fair_pe,
+                live_pe,
+                notes,
+                date.today(),
+            ),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        trigger_threshold = historical_fair_pe * 1.2
+        return (
+            f"✅ **{ticker}** added to the coverage universe.\n"
+            f"  Target: Rs. {target_price:.2f} | Stop-Loss: Rs. {stop_loss:.2f}\n"
+            f"  Historical Fair P/E: {historical_fair_pe:.1f}x | Overvaluation trigger: {trigger_threshold:.1f}x\n"
+            f"  {live_pe_note.strip()}"
+        )
+    except Exception as e:
+        import traceback
+        return f"Database Error adding {ticker} to watchlist: {str(e)}\n{traceback.format_exc()}"
+
+
+@tool
+async def manual_email_sweep_tool() -> str:
+    """Use this tool to manually trigger an immediate sweep of the email inbox for institutional research reports and newsletters."""
+    from schedulers import run_email_sweep
+    await run_email_sweep()
+    return "The institutional email sweep has been successfully executed and ingested."
+
+
 tools = [
     get_stock_quote,
     generate_stock_chart,
@@ -497,8 +586,11 @@ tools = [
     execute_trade_tool,
     log_cash_transaction,
     get_liquid_cash,
-    set_price_alert
+    set_price_alert,
+    manual_email_sweep_tool,
+    add_to_watchlist_tool,
 ]
+
 
 SYSTEM_PROMPT = """You are a sharp, seasoned, and straightforward human investment partner focused on the Pakistan Stock Exchange (PSX).
 
@@ -530,7 +622,17 @@ SYSTEM_PROMPT = """You are a sharp, seasoned, and straightforward human investme
 - Draw on past conversation history ONLY to extract relevant points needed for the immediate answer. 
 - State the important information, make your necessary points, and stop. No fluff, no filler text.
 - **Error Transparency:** If a tool returns an error or failure string, relay the EXACT error details provided by the tool. Do not abstract it behind a generic "system error" message.
-- If a tool returns a file path like `[FILE: /tmp/...]`, include that exact string unchanged. Never convert local file paths into Markdown image syntax."""
+- If a tool returns a file path like `[FILE: /tmp/...]`, include that exact string unchanged. Never convert local file paths into Markdown image syntax.
+
+### PROACTIVE COVERAGE EXPANSION
+When you conduct market research — whether browsing news, analysing a sector, or answering a fundamentals question — you must actively look for strong prospects that are not yet in our monitored universe. If you identify a company that meets ALL of the following criteria:
+  1. It is listed on the PSX and ideally KMI-30 / Shariah compliant.
+  2. You can derive a credible fundamental target price (DCF, earnings yield, or peer P/E basis).
+  3. You can define a clear stop-loss level based on structural support or a margin-of-safety floor.
+  4. You can state a historically grounded fair P/E for that specific company (not a generic sector average).
+
+Then you MUST call `add_to_watchlist_tool` immediately — do not just mention it in text. Populate all four parameters from your own analysis. The tool will scrape the live TTM P/E from the PSX portal and commit the entry to the database. The 18:00 daily sweep will then track it automatically from that point forward."""
+
 
 _agent_app = None
 _checkpointer = None
@@ -550,7 +652,7 @@ async def get_agent():
             try:
                 from psycopg_pool import AsyncConnectionPool
                 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-                pool = AsyncConnectionPool(conninfo=db_url, max_size=5)
+                pool = AsyncConnectionPool(conninfo=db_url, max_size=5, open=False)
                 await pool.open()
                 _checkpointer = AsyncPostgresSaver(pool)
                 await _checkpointer.setup()
@@ -561,3 +663,108 @@ async def get_agent():
         else:
             _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
     return _agent_app
+
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, END, START
+from vector_brain import TradeEvaluationSchema
+
+class TradeEvaluationState(TypedDict):
+    ticker: str
+    trigger_type: str
+    quantitative_data: dict
+    rag_context: str
+    analyst_thesis: str
+    risk_critique: str
+    iteration_count: int
+    final_evaluation: dict
+
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+
+def analyst_node(state: TradeEvaluationState):
+    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    structured_llm = llm.with_structured_output(TradeEvaluationSchema)
+    
+    if state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep':
+        prompt = f"""
+        You are an elite, no-nonsense Chief Investment Strategist managing our specific portfolio. I will provide you with our CURRENT HOLDINGS. You must explicitly tie the macro news to OUR assets. If petrol goes up, how does it affect OUR specific stocks? Speak naturally and directly (e.g., 'Since we are holding SYS, this tech catalyst is great for us...'). Make the sweep feel like a cohesive, holistic portfolio management system, not a disconnected news dump.
+        
+        Write your macro briefings in a sharp, natural, conversational, and direct tone—the way a senior fund manager briefs the trading desk. 
+        - Speak in clear, human language. Cut out robotic jargon like 'quantitative metrics are unavailable', 'addressing risk critique', or 'calibrated confidence'.
+        - Break down exactly what is happening in the Pakistani economy (inflation, IMF, fuel prices, circular debt, interest rates) and what it practically means for equity portfolios.
+        - Deliver clear, candid verdicts: Should we hold cash, watch for dips in specific sectors, or stay on the sidelines? Be decisive and articulate.
+        
+        Market Context: {state.get('rag_context', '')}
+        """
+    else:
+        prompt = f"""
+        You are an expert quantitative analyst.
+        Ticker: {state['ticker']}
+        Trigger: {state['trigger_type']}
+        Quantitative Data: {state['quantitative_data']}
+        Market Context: {state['rag_context']}
+        
+        You will receive a live feed of today's Pakistani financial news. Synthesize these headlines to identify active macroeconomic headwinds, tailwinds, and sector-specific catalysts. Only recommend a WATCHLIST CANDIDATE if the mathematical target price from the database aligns with a positive fundamental news catalyst.
+        
+        Previous Risk Manager Critique: {state.get('risk_critique', 'None')}
+        
+        Formulate a trade thesis. Address the risk manager's critique if it exists.
+        Provide a brutally objective verdict.
+
+        COVERAGE EXPANSION DIRECTIVE: If your analysis reveals that this ticker, or any closely related company in the same sector, represents a strong fundamental prospect that is NOT currently in our active portfolio, explicitly state in your thesis: the calculated target price, your stop-loss level, and your historically grounded fair P/E for that company. Flag it clearly as a WATCHLIST CANDIDATE so the orchestration layer can route it to add_to_watchlist_tool.
+        """
+    
+    @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
+    def _invoke_analyst():
+        return structured_llm.invoke(prompt)
+        
+    result = _invoke_analyst()
+    return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
+
+def risk_manager_node(state: TradeEvaluationState):
+    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    
+    prompt = f"""
+    You are a strict compliance officer and risk manager.
+    Ticker: {state['ticker']}
+    Analyst Thesis: {state['analyst_thesis']}
+    Quantitative Data: {state['quantitative_data']}
+    
+    Review the thesis against hard risk rules (e.g., concentration limits, profit target validity).
+    CRITICAL RULE: You must explicitly REJECT any Analyst thesis that attempts to take profits on a fundamentally sound company trading below its fair value, regardless of the portfolio percentage gain. We do not trim based on static arbitrary percentage gains.
+    If the thesis is overly risky, violates rules, or confidence is below 0.8, output a critical critique.
+    If it passes all checks, output exactly 'APPROVED'.
+    """
+    
+    @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
+    def _invoke_risk_manager():
+        return llm.invoke(prompt)
+        
+    critique = _invoke_risk_manager().content
+    iteration = state.get('iteration_count', 0) + 1
+    return {"risk_critique": critique, "iteration_count": iteration}
+
+def should_continue(state: TradeEvaluationState):
+    critique = state.get("risk_critique", "")
+    iteration = state.get("iteration_count", 0)
+    
+    if isinstance(critique, list):
+        critique_text = " ".join([str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in critique])
+    else:
+        critique_text = str(critique)
+        
+    if "APPROVED" in critique_text.upper() or iteration >= 2:
+        return END
+    return "analyst_node"
+
+def get_evaluation_graph():
+    workflow = StateGraph(TradeEvaluationState)
+    
+    workflow.add_node("analyst_node", analyst_node)
+    workflow.add_node("risk_manager_node", risk_manager_node)
+    
+    workflow.add_edge(START, "analyst_node")
+    workflow.add_edge("analyst_node", "risk_manager_node")
+    workflow.add_conditional_edges("risk_manager_node", should_continue, {"analyst_node": "analyst_node", END: END})
+    
+    return workflow.compile()
+

@@ -15,7 +15,7 @@ import functools
 import datetime
 import pandas as pd
 import numpy as np
-import yfinance as yf
+# yfinance removed: replaced by direct PSX portal scraper (update_ticker_valuations)
 import concurrent.futures
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -279,6 +279,20 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
         # Get portfolio holdings
         cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
         holdings = cursor.fetchall()
+        
+        # Get watchlist targets and sector data
+        # Ticker-by-ticker valuation data — reads the new columns added to watchlist_targets
+        cursor.execute("SELECT ticker, target_price, last_recalculated_date, historical_fair_pe, current_trailing_pe FROM watchlist_targets")
+        watchlist_data = {
+            row[0]: {
+                "target_price": float(row[1]) if row[1] else None,
+                "last_recalculated_date": row[2],
+                "historical_fair_pe": float(row[3]) if row[3] else None,
+                "current_trailing_pe": float(row[4]) if row[4] else None,
+            }
+            for row in cursor.fetchall()
+        }
+        
         cursor.close()
         conn.close()
         
@@ -332,20 +346,54 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
                 max_gain_pct = gain_pct
                 best_trim_candidate = pos
                 
-            # Tier 1 Profit Trigger
-            if current_price >= avg_price * 1.15:
+            # Fundamental Target Valuation Trigger (Replaces static 15% gain)
+            w_data = watchlist_data.get(ticker, {})
+            target_price = w_data.get("target_price")
+            last_recalculated = w_data.get("last_recalculated_date")
+            sector_name = w_data.get("sector_name")
+            
+            if target_price and current_price >= target_price:
+                import datetime
+                # 90-day Data Rot Check
+                if last_recalculated and (datetime.datetime.now() - last_recalculated).days > 90:
+                    alerts.append({
+                        "type": "stale_target_warning",
+                        "ticker": ticker,
+                        "current_price": current_price,
+                        "target_price": target_price,
+                        "message": f"Target price of {target_price} is over 90 days old. Fundamental re-evaluation required."
+                    })
+                else:
+                    shares_to_sell = max(1, round(shares * 0.30))
+                    cash_gen = shares_to_sell * current_price
+                    alerts.append({
+                        "type": "target_valuation_reached",
+                        "ticker": ticker,
+                        "current_price": current_price,
+                        "target_price": target_price,
+                        "gain_pct": gain_pct,
+                        "shares_to_sell": shares_to_sell,
+                        "cash_generated": cash_gen,
+                        "new_cash_balance": cash_balance + cash_gen
+                    })
+                    
+            # Macro Overvaluation Trigger (ticker-by-ticker, no sector proxy)
+            hist_pe = w_data.get("historical_fair_pe")
+            curr_pe = w_data.get("current_trailing_pe")
+
+            if hist_pe and curr_pe and curr_pe > (hist_pe * 1.2):
                 shares_to_sell = max(1, round(shares * 0.30))
                 cash_gen = shares_to_sell * current_price
                 alerts.append({
-                    "type": "tier_1_profit",
+                    "type": "macro_overvaluation",
                     "ticker": ticker,
                     "current_price": current_price,
-                    "gain_pct": gain_pct,
+                    "current_trailing_pe": curr_pe,
+                    "historical_fair_pe": hist_pe,
                     "shares_to_sell": shares_to_sell,
                     "cash_generated": cash_gen,
                     "new_cash_balance": cash_balance + cash_gen
                 })
-                
             # Concentration Trigger
             if pos_value / total_value >= 0.40:
                 # Target max 35% exposure
@@ -614,65 +662,134 @@ def sync_portfolio_tool(holdings_json: str) -> str:
         return f"Database sync failed: {str(e)}\n{traceback.format_exc()}"
 
 @cached(cache=TTLCache(maxsize=100, ttl=900))
-def get_fundamentals(ticker: str) -> dict:
+def get_agent_trade_recommendation(ticker: str) -> dict:
+    """This function is obsolete and stubbed. Agent logic lives in agent.py graph."""
+    return {}
+
+
+def _scrape_psx_pe(ticker: str) -> float | None:
     """
-    Fetches fundamentals from yfinance and cleans missing values safely.
-    Replaces all NaN or empty float values with None to preserve math operations,
-    allowing downstream string formatters to handle 'N/A' presentation.
+    Scrapes the live TTM P/E ratio for a single ticker directly from the PSX Data Portal.
+    The page is server-rendered (Nuxt SSR), so BeautifulSoup reads the static HTML payload.
+    Target element: <div class="stats_label">P/E Ratio (TTM) **</div>
+                    <div class="stats_value">11.21</div>
+
+    FRAGILITY NOTE: This scraper targets CSS class names (stats_label / stats_value).
+    A PSX frontend update that renames these classes will cause silent NoneType failures.
+    Monitor ingestion logs for the [PSX Scraper STRUCTURAL FAILURE] warning below.
     """
     try:
-        yf_ticker = f"{ticker}.KA" if not ticker.endswith(".KA") else ticker
-        stock = yf.Ticker(yf_ticker)
-        info = stock.info
-        if not info:
-            return {}
-            
-        cleaned_info = {}
-        for k, v in info.items():
-            if pd.isna(v):
-                cleaned_info[k] = np.nan
+        url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Sanity check: verify the DOM still has the expected structure at all.
+        # If stats_label divs are absent entirely, the PSX UI has changed.
+        all_labels = soup.find_all("div", class_="stats_label")
+        if not all_labels:
+            print(
+                f"[PSX Scraper STRUCTURAL FAILURE] {ticker}: No 'stats_label' divs found. "
+                "The PSX portal DOM structure has likely changed. "
+                "Re-inspect dps.psx.com.pk/company/{ticker} and update _scrape_psx_pe()."
+            )
+            return None
+
+        # Locate the stats_label containing "P/E Ratio (TTM)" and grab its sibling value
+        for label_div in all_labels:
+            if "P/E Ratio (TTM)" in label_div.get_text():
+                value_div = label_div.find_next_sibling("div", class_="stats_value")
+                if value_div:
+                    text = value_div.get_text(strip=True).replace(",", "")
+                    try:
+                        pe = float(text)
+                        if pe > 0:
+                            return pe
+                    except ValueError:
+                        print(f"[PSX Scraper] {ticker}: Could not parse P/E value '{text}' as float.")
+                        return None
+                else:
+                    # Label found but sibling value div missing — partial DOM change
+                    print(
+                        f"[PSX Scraper STRUCTURAL FAILURE] {ticker}: 'P/E Ratio (TTM)' label found "
+                        "but sibling 'stats_value' div is missing. Check for DOM structure change."
+                    )
+                    return None
+
+        # Label not found at all — P/E may genuinely not be listed (e.g., negative earnings)
+        print(f"[PSX Scraper] {ticker}: 'P/E Ratio (TTM)' label not present (earnings may be negative or N/A).")
+        return None
+
+    except requests.exceptions.HTTPError as e:
+        print(f"[PSX Scraper] HTTP error fetching {ticker}: {e}")
+        return None
+    except Exception as e:
+        print(f"[PSX Scraper] Failed to fetch P/E for {ticker}: {e}")
+        return None
+
+
+
+def update_ticker_valuations():
+    """
+    Iterates through all active watchlist tickers and scrapes their live TTM P/E
+    directly from the PSX Data Portal, storing results in watchlist_targets.current_trailing_pe.
+    Replaces the flawed yfinance sector-proxy approach (update_sector_valuations).
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT ticker FROM watchlist_targets")
+        tickers = [row[0] for row in cursor.fetchall()]
+
+        updated = 0
+        for ticker in tickers:
+            pe = _scrape_psx_pe(ticker)
+            if pe is not None:
+                cursor.execute("""
+                    UPDATE watchlist_targets
+                    SET current_trailing_pe = %s
+                    WHERE ticker = %s
+                """, (pe, ticker))
+                updated += 1
+                print(f"[update_ticker_valuations] {ticker}: TTM P/E = {pe}")
             else:
-                cleaned_info[k] = v
-        return cleaned_info
+                print(f"[update_ticker_valuations] {ticker}: P/E not available on PSX portal")
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"[update_ticker_valuations] Done. Updated {updated}/{len(tickers)} tickers.")
+    except Exception as e:
+        print(f"Error in update_ticker_valuations: {e}")
+
+@cached(cache=TTLCache(maxsize=100, ttl=900))
+def get_fundamentals(ticker: str) -> dict:
+    """
+    Fetches available fundamentals from the PSX Data Portal for a given ticker.
+    Returns a dict with at least 'trailingPE' if available.
+    """
+    try:
+        pe = _scrape_psx_pe(ticker)
+        result = {}
+        if pe is not None:
+            result["trailingPE"] = pe
+        return result
     except Exception as e:
         print(f"Error fetching fundamentals for {ticker}: {e}")
         return {}
 
 @functools.lru_cache(maxsize=32)
 def get_cached_historical_prices(ticker: str, start_date: str):
-    """Fetches and caches historical PSX data from Yahoo Finance to avoid API bans."""
-    try:
-        yf_ticker = f"{ticker}.KA"
-        
-        def _download():
-            return yf.download(yf_ticker, start=start_date, progress=False)
-            
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(_download)
-        try:
-            data = future.result(timeout=5)
-        except concurrent.futures.TimeoutError:
-            print(f"yfinance download timed out for {ticker}")
-            return pd.Series(dtype=float)
-        finally:
-            executor.shutdown(wait=False)
-
-        if isinstance(data, (float, int, np.float64)):
-            return pd.Series(dtype=float)
-
-        if data.empty:
-            return pd.Series(dtype=float)
-        
-        # Handle multi-level columns in yfinance >= 0.2.40
-        if isinstance(data.columns, pd.MultiIndex):
-            close_col = data['Close'].iloc[:, 0]
-        else:
-            close_col = data['Close']
-            
-        return close_col.squeeze()
-    except Exception as e:
-        print(f"Error fetching historical for {ticker}: {e}")
-        return pd.Series(dtype=float)
+    """
+    Fetches and caches historical PSX price data.
+    NOTE: yfinance is no longer used. This function returns an empty Series
+    as a stub. Historical price fetching should be implemented via PSX /timeseries
+    endpoints or manual data seeding if needed.
+    """
+    print(f"[get_cached_historical_prices] yfinance removed. No historical data for {ticker}.")
+    return pd.Series(dtype=float)
 
 def fetch_supabase_equity_curve() -> pd.DataFrame:
     """

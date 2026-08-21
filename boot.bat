@@ -1,5 +1,7 @@
 @echo off
 echo Booting Portfolio Agent...
-cd portfolio_agent
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+chcp 65001 >nul
 py -m uvicorn main:app --reload --port 8000
 pause

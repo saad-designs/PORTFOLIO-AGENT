@@ -94,6 +94,7 @@ def query_mentor_brain_tool(query: str) -> str:
         
         prompt = f"""
         You are a highly analytical, conversational trading assistant. You speak like a real human mentor.
+        You are a long-term value investor. You hold compounding businesses indefinitely. You NEVER trim or sell a stock simply because it is in profit. You only recommend a TRIM or SELL if the asset has exceeded its fundamental target price, if the core business thesis is broken, or to clear extreme concentration risk.
         Analyze the Mentor Advice Context provided below (note that transcripts may be in Roman Hindi, Urdu, or English). 
         Synthesize the available insights to answer the user's question. Formulate your answer conversationally—reason with the user and break down complex concepts naturally instead of outputting massive blocks of text.
         Do not hallucinate facts outside the context, but interpret the economic/market commentary provided.
@@ -123,6 +124,9 @@ def query_mentor_brain_tool(query: str) -> str:
 import asyncio
 
 class TradeEvaluationSchema(BaseModel):
+    step_by_step_analysis: str = Field(description="Step-by-step internal monologue breaking down the logic")
+    quantitative_assessment: str = Field(description="Evaluation of momentum, RSI, and quantitative metrics")
+    risk_critique_response: str = Field(description="Defense of the trade thesis against core risk parameters")
     ticker: str = Field(description="The normalized ticker symbol (e.g., 'MEBL')")
     action: str = Field(description="Must be 'HOLD', 'SELL', or 'TRIM'")
     trim_percentage: float = Field(description="The percentage of the position to trim (0-100)")
@@ -130,48 +134,62 @@ class TradeEvaluationSchema(BaseModel):
     confidence: float = Field(description="Model's confidence in this decision (0.0 to 1.0)")
     rationale: str = Field(description="Brutally objective 1-2 sentence verdict on the trade action")
 
+async def get_market_context(ticker: str) -> str:
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
+    def _similarity_search():
+        import time
+        from langchain_core.documents import Document
+        
+        # Temporal Filter: Get documents within last 72 hours
+        seventy_two_hours_ago = int(time.time()) - (72 * 3600)
+        filter_dict = {"timestamp": {"$gte": seventy_two_hours_ago}}
+        
+        try:
+            return vector_db.similarity_search(ticker, k=5, filter=filter_dict)
+        except Exception as e:
+            print(f"Filter failed, falling back to basic search: {e}")
+            return vector_db.similarity_search(ticker, k=5)
+            
+    results = await asyncio.to_thread(_similarity_search)
+    
+    if not results or len(results) < 2:
+        print(f"🧠 [Hybrid Gate] RAG Vector Search: Scant context found for {ticker}. Triggering live web search.")
+        try:
+            from langchain_community.tools.tavily_search import TavilySearchResults
+            search_tool = TavilySearchResults(max_results=3)
+            query = f"{ticker} PSX Pakistan stock market news"
+            live_snippets = await asyncio.to_thread(search_tool.invoke, {"query": query})
+            context = f"Live Web Search Snippets:\n{live_snippets}\n"
+            if results:
+                 context += "\nArchived Vector Context:\n" + "\n\n".join([doc.page_content for doc in results])
+        except Exception as e:
+            print(f"⚠️ Tavily search unavailable ({e}). Proceeding with quantitative data only.")
+            if results:
+                 context = "\nArchived Vector Context:\n" + "\n\n".join([doc.page_content for doc in results])
+            else:
+                 context = "No archived context or live web search data available. Rely only on quantitative metrics provided."
+    else:
+        context = "\n\n".join([doc.page_content for doc in results])
+        print(f"🧠 [Hybrid Gate] RAG Vector Search successful for {ticker}. Retrieved {len(results)} chunks.")
+    return context
+
 async def evaluate_trade_trigger(trigger_dict: dict) -> str:
     """Evaluates a quantitative trade trigger against current market context."""
     try:
         raw_ticker = trigger_dict.get('ticker')
         ticker = normalize_ticker(raw_ticker)
         
-        @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
-        def _similarity_search():
-            import time
-            from langchain_core.documents import Document
-            
-            # Temporal Filter: Get documents within last 72 hours
-            seventy_two_hours_ago = int(time.time()) - (72 * 3600)
-            # PGVector allows metadata filtering
-            # We assume metadata timestamp is stored as 'timestamp'
-            filter_dict = {"timestamp": {"$gte": seventy_two_hours_ago}}
-            
-            # If the underlying store supports it, we pass it.
-            # PGVector supports some filtering, but it might depend on the implementation.
-            # Alternatively, we could just do a standard search and manually filter if pgvector doesn't support this syntax.
-            try:
-                return vector_db.similarity_search(ticker, k=5, filter=filter_dict)
-            except Exception as e:
-                print(f"Filter failed, falling back to basic search: {e}")
-                return vector_db.similarity_search(ticker, k=5)
-            
-        results = await asyncio.to_thread(_similarity_search)
+        context = await get_market_context(ticker)
         
-        if not results:
-            context = f"No recent news or context found for {ticker}."
-            print(f"🧠 [Hybrid Gate] RAG Vector Search: No context found for {ticker}.")
-        else:
-            context = "\n\n".join([doc.page_content for doc in results])
-            print(f"🧠 [Hybrid Gate] RAG Vector Search successful for {ticker}. Retrieved {len(results)} chunks.")
-            
         llm = ChatGoogleGenerativeAI(
             model="gemini-3.5-flash-lite",
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
         structured_llm = llm.with_structured_output(TradeEvaluationSchema)
         
-        prompt = f"A quantitative portfolio trigger has fired: {trigger_dict}. Here is the latest market context for {ticker}: {context}. Analyze this context and provide a brutally objective 2-sentence verdict on whether to execute the algorithmic trim, or override it and hold due to market conditions."
+        prompt = f"""You are a long-term value investor. You hold compounding businesses indefinitely. You NEVER trim or sell a stock simply because it is in profit. You only recommend a TRIM or SELL if the asset has exceeded its fundamental target price, if the core business thesis is broken, or to clear extreme concentration risk.
+        A quantitative portfolio trigger has fired: {trigger_dict}. Here is the latest market context for {ticker}: {context}. 
+        Analyze this context, evaluate the quantitative metrics, defend against risks, and provide a brutally objective verdict on whether to execute the algorithmic trim, or override it and hold due to market conditions."""
         
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _invoke_llm():
