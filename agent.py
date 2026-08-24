@@ -199,7 +199,7 @@ def get_portfolio_status(config: RunnableConfig) -> str:
         import psycopg2.extras
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT ticker, quantity, average_price FROM portfolio_holdings WHERE discord_user_id = %s', (user_id,))
+        cur.execute('SELECT ticker, shares, avg_buy_price FROM portfolio_holdings WHERE discord_user_id = %s', (user_id,))
         holdings = cur.fetchall()
     
         cur.execute('SELECT SUM(amount) AS total_cash FROM public.cash_ledger WHERE discord_user_id = %s', (user_id,))
@@ -218,8 +218,8 @@ def get_portfolio_status(config: RunnableConfig) -> str:
 
         for row in holdings:
             ticker = row['ticker'].upper()
-            qty = clean_float(row['quantity'])
-            avg_price = clean_float(row['average_price'])
+            qty = clean_float(row['shares'])
+            avg_price = clean_float(row['avg_buy_price'])
         
             invested = qty * avg_price
             total_invested += invested
@@ -388,16 +388,19 @@ def manage_scheduled_task(action: str, task_name: str = None, schedule_cron: str
     # Placeholder logic for dynamic job management
     return f"Task '{task_name}' successfully updated with action '{action}'."
 
-# 1. Force strict parameter validation
-class PortfolioPositionSchema(BaseModel):
+# 1. Force strict parameter validation for adding
+class AddPortfolioPositionSchema(BaseModel):
     ticker: str = Field(description="The exact stock ticker symbol, e.g., 'SYS'")
-    quantity: float = Field(description="The number of shares to add")
+    quantity: float = Field(description="The number of shares to add (must be positive)")
     price: float = Field(description="The purchase price per share in PKR")
 
 # 2. Bind the strict schema to the tool
-@tool(args_schema=PortfolioPositionSchema)
+@tool(args_schema=AddPortfolioPositionSchema)
 def add_portfolio_position(ticker: str, quantity: float, price: float, config: RunnableConfig) -> str:
     """Manually log a new stock position into the portfolio holdings database."""
+    
+    if quantity <= 0:
+        return "Error: quantity to add must be greater than 0. Use remove_portfolio_position to reduce shares."
 
     # 1. Extract the secure user ID injected by the Discord handler
     user_id = config.get("configurable", {}).get("discord_user_id")
@@ -412,12 +415,12 @@ def add_portfolio_position(ticker: str, quantity: float, price: float, config: R
     
         # 2. Update SQL to enforce the composite primary key
         cur.execute(
-            '''INSERT INTO portfolio_holdings (discord_user_id, ticker, quantity, average_price) 
+            '''INSERT INTO portfolio_holdings (discord_user_id, ticker, shares, avg_buy_price) 
                VALUES (%s, %s, %s, %s)
                ON CONFLICT (discord_user_id, ticker) 
                DO UPDATE SET 
-                  quantity = portfolio_holdings.quantity + EXCLUDED.quantity,
-                  average_price = ((portfolio_holdings.quantity * portfolio_holdings.average_price) + (EXCLUDED.quantity * EXCLUDED.average_price)) / (portfolio_holdings.quantity + EXCLUDED.quantity)''',
+                  shares = portfolio_holdings.shares + EXCLUDED.shares,
+                  avg_buy_price = ((portfolio_holdings.shares * portfolio_holdings.avg_buy_price) + (EXCLUDED.shares * EXCLUDED.avg_buy_price)) / (portfolio_holdings.shares + EXCLUDED.shares)''',
             (user_id, ticker.upper(), quantity, price)
         )
         conn.commit()
@@ -425,6 +428,90 @@ def add_portfolio_position(ticker: str, quantity: float, price: float, config: R
         conn.close()
     
         return f"Database updated: Added {quantity} shares of {ticker.upper()} at {price} PKR for user {user_id}."
+    except Exception as e:
+        import traceback
+        return f"Database Error: {str(e)}\n{traceback.format_exc()}"
+
+class RemovePortfolioPositionSchema(BaseModel):
+    ticker: str = Field(description="The exact stock ticker symbol, e.g., 'SYS'")
+    quantity: float = Field(description="The number of shares to remove (must be positive)")
+
+@tool(args_schema=RemovePortfolioPositionSchema)
+def remove_portfolio_position(ticker: str, quantity: float, config: RunnableConfig) -> str:
+    """Removes a specific quantity of shares from an existing position."""
+    if quantity <= 0:
+        return "Error: quantity to remove must be greater than 0."
+        
+    user_id = config.get("configurable", {}).get("discord_user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+
+    try:
+        import psycopg2
+        import psycopg2.extras
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # 1. Fetch current shares
+        cur.execute('SELECT shares FROM portfolio_holdings WHERE discord_user_id = %s AND ticker = %s', (user_id, ticker.upper()))
+        record = cur.fetchone()
+        
+        if not record:
+            cur.close()
+            conn.close()
+            return f"Error: No holdings found for {ticker.upper()} to remove."
+            
+        current_shares = float(record['shares'])
+        new_shares = current_shares - quantity
+        
+        # 2. Prevent negative quantities
+        if new_shares < 0:
+            cur.close()
+            conn.close()
+            return f"Error: Cannot reduce {ticker.upper()} below 0 shares (current: {current_shares})."
+            
+        # 3. If balance reaches 0, delete the row cleanly
+        if new_shares == 0:
+            cur.execute('DELETE FROM portfolio_holdings WHERE discord_user_id = %s AND ticker = %s', (user_id, ticker.upper()))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return f"Successfully cleared entire position for {ticker.upper()}."
+            
+        # 4. Otherwise, update the valid positive balance
+        cur.execute('UPDATE portfolio_holdings SET shares = %s WHERE discord_user_id = %s AND ticker = %s', (new_shares, user_id, ticker.upper()))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Updated {ticker.upper()}: now holding {new_shares} shares (removed {quantity})."
+    except Exception as e:
+        import traceback
+        return f"Database Error: {str(e)}\n{traceback.format_exc()}"
+
+class ClearPortfolioPositionSchema(BaseModel):
+    ticker: str = Field(description="The exact stock ticker symbol to completely remove, e.g., 'SYS'")
+
+@tool(args_schema=ClearPortfolioPositionSchema)
+def clear_portfolio_position(ticker: str, config: RunnableConfig) -> str:
+    """Completely deletes a stock holding record from the portfolio database, regardless of share count."""
+    user_id = config.get("configurable", {}).get("discord_user_id")
+    if not user_id:
+        return "System Error: Missing Discord User ID."
+
+    try:
+        import psycopg2
+        import psycopg2.extras
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+        cur.execute('DELETE FROM portfolio_holdings WHERE discord_user_id = %s AND ticker = %s', (user_id, ticker.upper()))
+        rows_deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if rows_deleted > 0:
+            return f"Successfully cleared all data for {ticker.upper()} from portfolio."
+        else:
+            return f"No holding data was found for {ticker.upper()} to clear."
     except Exception as e:
         import traceback
         return f"Database Error: {str(e)}\n{traceback.format_exc()}"
@@ -583,6 +670,8 @@ tools = [
     save_to_knowledge_base,
     manage_scheduled_task,
     add_portfolio_position,
+    remove_portfolio_position,
+    clear_portfolio_position,
     execute_trade_tool,
     log_cash_transaction,
     get_liquid_cash,
@@ -608,13 +697,18 @@ SYSTEM_PROMPT = """You are a sharp, seasoned, and straightforward human investme
    Verify that Total Required <= Available Capital.
 3. If user capital is Rs. 10,000, the sum of all purchases must be strictly less than or equal to Rs. 10,000.
 
+IMMUTABLE FINANCIAL RULES:
+- You must NEVER calculate, guess, or modify financial figures.
+- Use ONLY the exact numbers provided in the EXACT_FINANCIAL_GROUND_TRUTH payload for Net Worth, Invested Capital, Cash, and PnL.
+- Any discrepancy or made-up figure is a critical compliance violation.
+
 ### CORE DIRECTIVES
 1. **Zero Hallucination:** You must NEVER invent, fabricate, or guess data. If a tool returns no data, explicitly state: "Data Unavailable."
 2. **Strict Data Parsing:** Maintain absolute structural integrity when extracting data.
 3. **Live Research:** Proactively use `web_search` for current market data.
 4. **Tool Routing:** 
    - For executing or simulating live broker trades, strictly use `execute_trade_tool`.
-   - For manually logging, tracking, or updating portfolio holdings, strictly use `add_portfolio_position`.
+   - For manually modifying portfolio holdings: use `add_portfolio_position` to log new shares, `remove_portfolio_position` to log partial sells, and `clear_portfolio_position` to completely wipe a holding. Do not pass negative numbers to add_portfolio_position.
 
 ### OUTPUT FORMATTING (STRICT)
 - Speak naturally and logically, like a real human expert. 
@@ -630,6 +724,10 @@ When you conduct market research — whether browsing news, analysing a sector, 
   2. You can derive a credible fundamental target price (DCF, earnings yield, or peer P/E basis).
   3. You can define a clear stop-loss level based on structural support or a margin-of-safety floor.
   4. You can state a historically grounded fair P/E for that specific company (not a generic sector average).
+
+
+CRITICAL EXECUTION RULE:
+If you need to analyze multiple stocks, compare data, or fetch multiple pieces of information, YOU MUST CALL ALL RELEVANT TOOLS IN PARALLEL ON THE FIRST TURN. Do not execute individual queries sequentially.
 
 Then you MUST call `add_to_watchlist_tool` immediately — do not just mention it in text. Populate all four parameters from your own analysis. The tool will scrape the live TTM P/E from the PSX portal and commit the entry to the database. The 18:00 daily sweep will then track it automatically from that point forward."""
 
@@ -650,15 +748,11 @@ async def get_agent():
             
             # Initialize inside active async loop
             try:
-                from psycopg_pool import AsyncConnectionPool
-                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-                pool = AsyncConnectionPool(conninfo=db_url, max_size=5, open=False)
-                await pool.open()
-                _checkpointer = AsyncPostgresSaver(pool)
-                await _checkpointer.setup()
+                from langgraph.checkpoint.memory import MemorySaver
+                _checkpointer = MemorySaver()
                 _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT, checkpointer=_checkpointer)
             except Exception as e:
-                print(f"Warning: Could not configure AsyncPostgresSaver ({e}). Compiling without checkpointer.")
+                print(f"Warning: Could not configure MemorySaver ({e}). Compiling without checkpointer.")
                 _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
         else:
             _agent_app = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
@@ -682,20 +776,31 @@ from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 def analyst_node(state: TradeEvaluationState):
     llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
-    structured_llm = llm.with_structured_output(TradeEvaluationSchema)
     
-    if state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep':
+    is_macro = state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep'
+    
+    if is_macro:
         prompt = f"""
-        You are an elite, no-nonsense Chief Investment Strategist managing our specific portfolio. I will provide you with our CURRENT HOLDINGS. You must explicitly tie the macro news to OUR assets. If petrol goes up, how does it affect OUR specific stocks? Speak naturally and directly (e.g., 'Since we are holding SYS, this tech catalyst is great for us...'). Make the sweep feel like a cohesive, holistic portfolio management system, not a disconnected news dump.
-        
-        Write your macro briefings in a sharp, natural, conversational, and direct tone—the way a senior fund manager briefs the trading desk. 
-        - Speak in clear, human language. Cut out robotic jargon like 'quantitative metrics are unavailable', 'addressing risk critique', or 'calibrated confidence'.
-        - Break down exactly what is happening in the Pakistani economy (inflation, IMF, fuel prices, circular debt, interest rates) and what it practically means for equity portfolios.
-        - Deliver clear, candid verdicts: Should we hold cash, watch for dips in specific sectors, or stay on the sidelines? Be decisive and articulate.
+        You are an elite, candid Chief Investment Strategist for the Pakistan Stock Exchange (PSX). Write your briefings like a senior fund manager dropping a sharp, conversational market note to your desk partner.
+        - Tone: Direct, articulate, insightful, and natural. Speak like a real human floor manager.
+        - Context: Evaluate the latest macro headlines directly against our current portfolio state (whether we are in cash or holding specific stocks).
+        - Structure:
+          • Opening: A sharp 1-2 sentence read on overall sentiment and where the market stands.
+          • Key Themes & Catalysts: 2-3 clean, punchy points breaking down the real economic story (inflation, fuel prices, IMF, political developments, or sectoral moves) and what they mean practically.
+          • Desk Verdict: A clear, conversational bottom line on what we are doing with our capital today.
+        - Strictly prohibit robotic template phrasing like 'Reviewing the current news feed', 'Market Stance: HOLD', or 'Evaluating the current market environment'.
         
         Market Context: {state.get('rag_context', '')}
         """
+        
+        @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
+        def _invoke_macro_analyst():
+            return llm.invoke(prompt)
+            
+        result = _invoke_macro_analyst()
+        return {"analyst_thesis": result.content, "final_evaluation": {}}
     else:
+        structured_llm = llm.with_structured_output(TradeEvaluationSchema)
         prompt = f"""
         You are an expert quantitative analyst.
         Ticker: {state['ticker']}
@@ -712,13 +817,13 @@ def analyst_node(state: TradeEvaluationState):
 
         COVERAGE EXPANSION DIRECTIVE: If your analysis reveals that this ticker, or any closely related company in the same sector, represents a strong fundamental prospect that is NOT currently in our active portfolio, explicitly state in your thesis: the calculated target price, your stop-loss level, and your historically grounded fair P/E for that company. Flag it clearly as a WATCHLIST CANDIDATE so the orchestration layer can route it to add_to_watchlist_tool.
         """
-    
-    @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
-    def _invoke_analyst():
-        return structured_llm.invoke(prompt)
         
-    result = _invoke_analyst()
-    return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
+        @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
+        def _invoke_analyst():
+            return structured_llm.invoke(prompt)
+            
+        result = _invoke_analyst()
+        return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
 
 def risk_manager_node(state: TradeEvaluationState):
     llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
@@ -763,7 +868,10 @@ def get_evaluation_graph():
     workflow.add_node("risk_manager_node", risk_manager_node)
     
     workflow.add_edge(START, "analyst_node")
-    workflow.add_edge("analyst_node", "risk_manager_node")
+    workflow.add_conditional_edges(
+        "analyst_node",
+        lambda state: END if state.get("ticker") == "MACRO_SWEEP" or state.get("trigger_type") == "macro_news_sweep" else "risk_manager_node"
+    )
     workflow.add_conditional_edges("risk_manager_node", should_continue, {"analyst_node": "analyst_node", END: END})
     
     return workflow.compile()

@@ -77,7 +77,7 @@ def query_mentor_brain_tool(query: str) -> str:
     try:
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _similarity_search():
-            return vector_db.similarity_search(query, k=5)
+            return vector_db.similarity_search(query, k=6)
             
         results = _similarity_search()
         
@@ -145,10 +145,10 @@ async def get_market_context(ticker: str) -> str:
         filter_dict = {"timestamp": {"$gte": seventy_two_hours_ago}}
         
         try:
-            return vector_db.similarity_search(ticker, k=5, filter=filter_dict)
+            return vector_db.similarity_search(ticker, k=6, filter=filter_dict)
         except Exception as e:
             print(f"Filter failed, falling back to basic search: {e}")
-            return vector_db.similarity_search(ticker, k=5)
+            return vector_db.similarity_search(ticker, k=6)
             
     results = await asyncio.to_thread(_similarity_search)
     

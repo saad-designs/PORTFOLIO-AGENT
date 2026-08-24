@@ -6,6 +6,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, time, timezone, timedelta
 from zoneinfo import ZoneInfo
 import os
+import ast
 import uuid
 import re
 import requests
@@ -38,6 +39,101 @@ from langchain_core.messages import ToolMessage, AIMessage
 current_author_id = contextvars.ContextVar('current_author_id', default=None)
 from google.api_core.exceptions import ResourceExhausted
 
+import httpx
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+async def extract_and_analyze_email(raw_email_bytes: bytes) -> str:
+    """
+    Extracts text, inline images, PDF attachments, and linked downloads
+    from an email and passes them to Gemini Multimodal.
+    """
+    msg = email.message_from_bytes(raw_email_bytes)
+    
+    email_text = ""
+    multimodal_parts = []
+    
+    # 1. Traverse all MIME parts
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        content_disposition = str(part.get("Content-Disposition", ""))
+        payload = part.get_payload(decode=True)
+
+        if not payload:
+            continue
+
+        # Extract plain text / HTML text
+        if content_type == "text/plain":
+            email_text += payload.decode(errors="ignore") + "\n"
+        elif content_type == "text/html":
+            soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
+            email_text += soup.get_text(separator="\n") + "\n"
+            
+            # Find embedded <img> tags or 'Download' links
+            for img in soup.find_all("img"):
+                src = img.get("src")
+                if src and src.startswith("http"):
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0) as http_client:
+                            img_resp = await http_client.get(src)
+                            if img_resp.status_code == 200:
+                                img_mime = img_resp.headers.get("content-type", "image/jpeg").split(";")[0]
+                                multimodal_parts.append(
+                                    types.Part.from_bytes(data=img_resp.content, mime_type=img_mime)
+                                )
+                    except Exception:
+                        pass
+
+            for a in soup.find_all("a", href=True):
+                if "download" in a.text.lower() or a["href"].endswith((".pdf", ".png", ".jpg", ".jpeg")):
+                    try:
+                        async with httpx.AsyncClient(timeout=15.0) as http_client:
+                            link_resp = await http_client.get(a["href"])
+                            if link_resp.status_code == 200:
+                                link_mime = link_resp.headers.get("content-type", "application/pdf").split(";")[0]
+                                multimodal_parts.append(
+                                    types.Part.from_bytes(data=link_resp.content, mime_type=link_mime)
+                                )
+                    except Exception:
+                        pass
+
+        # Extract direct image attachments or inline CIDs
+        elif content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
+            multimodal_parts.append(
+                types.Part.from_bytes(data=payload, mime_type=content_type)
+            )
+
+        # Extract PDF attachments
+        elif content_type == "application/pdf" or "pdf" in content_disposition:
+            multimodal_parts.append(
+                types.Part.from_bytes(data=payload, mime_type="application/pdf")
+            )
+
+    # 2. Construct Multimodal Prompt
+    prompt = f"""
+You are an institutional financial analyst. Extract all relevant market intelligence from this email, including any attached/embedded images, tables, or PDF reports.
+
+Email Body Text:
+{email_text.strip()}
+
+Instructions:
+1. Extract PSX / KSE-100 performance numbers, top gainers, top losers, and volume leaders from tables/charts.
+2. Summarize key macro news, sales desk views, and regulatory updates verbatim without omitting key metrics.
+3. Structure the output into clean, actionable bullet points for Discord.
+"""
+
+    contents = [prompt] + multimodal_parts
+
+    # 3. Call Gemini 2.5 Flash
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contents
+    )
+    
+    return response.text
+
 from portfolio_manager import log_trade, get_portfolio_summary, set_target, get_live_price, get_watchlist_summary, scan_shariah_market, sync_portfolio_tool
 
 import psycopg2.pool
@@ -55,6 +151,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Ensure DISCORD_CHANNEL_ID is loaded from the environment
 raw_channel_id = os.getenv("ADMIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID", "0")
 CHANNEL_ID = int(raw_channel_id) if raw_channel_id else 0
+ADMIN_CHANNEL_ID = CHANNEL_ID
 PROSPECT_CHANNEL_ID = int(os.getenv("PROSPECT_CHANNEL_ID", "0")) or CHANNEL_ID
 RESEARCH_CHANNEL_ID = int(os.getenv("RESEARCH_CHANNEL_ID", "0")) or CHANNEL_ID
 
@@ -68,6 +165,76 @@ async def log_error_to_discord(error_msg: str):
             await channel.send(f"⚠️ **Background Task Error:**\n```\n{error_msg[:1900]}\n```")
     except Exception as e:
         print(f"Failed to send error log to Discord: {e}")
+
+async def send_long_message(channel, raw_message, max_chars: int = 1800):
+    """
+    Parses complex objects into clean text, using Regex as an absolute 
+    failsafe against stringified Google GenAI/LangGraph dictionaries.
+    """
+    # 1. Standard Object Extraction
+    if isinstance(raw_message, list):
+        message_text = "\n\n".join(str(item) for item in raw_message)
+    elif isinstance(raw_message, dict):
+        if "messages" in raw_message and hasattr(raw_message["messages"][-1], "content"):
+            message_text = str(raw_message["messages"][-1].content)
+        elif "text" in raw_message:
+            message_text = str(raw_message["text"])
+        else:
+            message_text = str(raw_message)
+    elif hasattr(raw_message, "content") and not isinstance(raw_message.content, (list, dict)):
+        message_text = str(raw_message.content)
+    elif hasattr(raw_message, "text") and not isinstance(raw_message.text, (list, dict)):
+        message_text = str(raw_message.text)
+    else:
+        message_text = str(raw_message)
+
+    # 2. THE REGEX SLEDGEHAMMER
+    # If the string STILL contains the Gemini dictionary wrapper, rip the text out manually
+    if "{'type':" in message_text and "'text':" in message_text:
+        # Matches everything between 'text': " and ", 'extras':
+        match = re.search(r"'text':\s*([\"'])(.*?)(?<!\\)\1\s*,\s*'extras':", message_text, re.DOTALL)
+        if match:
+            message_text = match.group(2)
+            # Convert literal string '\n' back into actual Discord line breaks
+            message_text = message_text.replace('\\n', '\n')
+
+    if not message_text or not message_text.strip():
+        return
+
+    # 3. ACCURATE LENGTH CHECK
+    if len(message_text) <= max_chars:
+        await channel.send(message_text)
+        return
+
+    # 4. CHUNKING LOGIC
+    chunks = []
+    current_chunk = ""
+    
+    for line in message_text.split("\n"):
+        if len(line) > max_chars:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            while len(line) > max_chars:
+                chunks.append(line[:max_chars])
+                line = line[max_chars:]
+            current_chunk = line + "\n"
+            continue
+
+        if len(current_chunk) + len(line) + 1 > max_chars:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = line + "\n"
+        else:
+            current_chunk += line + "\n"
+            
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    # 5. SAFE DISPATCH
+    for msg_chunk in chunks:
+        if msg_chunk.strip():
+            await channel.send(msg_chunk)
 
 import json
 
@@ -483,7 +650,7 @@ async def log_trade_tool(action: str, ticker: str, quantity: int, price: float, 
         return f"Transaction failed during verification phase: {str(e)}"
 
 @tool
-def fetch_ktrade_emails() -> str:
+async def fetch_ktrade_emails() -> str:
     """Fetches unread corporate briefings and research reports from KTrade via the dedicated email inbox."""
     # Securely load credentials from your .env file
     EMAIL_USER = os.getenv("EMAIL_USER")
@@ -491,8 +658,8 @@ def fetch_ktrade_emails() -> str:
     
     if not EMAIL_USER or not EMAIL_PASS:
         return "Tool Execution Error: Email credentials (EMAIL_USER or EMAIL_PASS) are not set in the .env file."
-        
-    try:
+
+    def do_imap():
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select("inbox")
@@ -503,9 +670,9 @@ def fetch_ktrade_emails() -> str:
         
         if status != "OK" or not messages[0]:
             mail.logout()
-            return "No new unread emails found from KTrade."
+            return []
             
-        extracted_reports = []
+        parts = []
         for num in messages[0].split():
             res, msg_data = mail.fetch(num, "(RFC822)")
             for response_part in msg_data:
@@ -517,10 +684,21 @@ def fetch_ktrade_emails() -> str:
                     if isinstance(subject, bytes):
                         subject = subject.decode(encoding if encoding else "utf-8")
                         
-                    body = clean_email_body(msg)
-                    extracted_reports.append(f"Subject: {subject}\nBody: {body}\n---")
+                    parts.append((subject, response_part[1]))
                     
         mail.logout()
+        return parts
+        
+    try:
+        parts = await asyncio.to_thread(do_imap)
+        if not parts:
+            return "No new unread emails found from KTrade."
+
+        extracted_reports = []
+        for subject, raw_bytes in parts:
+            body = await extract_and_analyze_email(raw_bytes)
+            extracted_reports.append(f"Subject: {subject}\nBody: {body}\n---")
+            
         return "\n\n".join(extracted_reports)
         
     except Exception as e:
@@ -574,36 +752,75 @@ def visual_analyst_tool() -> str:
 
 @bot.event
 async def on_message(message):
-    # Prevent bot from replying to itself
-    if message.author == bot.user:
+    # 🛑 Ignore messages from the bot itself
+    if message.author.bot:
         return
 
-    current_author_id.set(message.author.id)
-
-    # --- Phase 4 Conversational Ledger Parsing ---
-    if message.channel.id == CHANNEL_ID and not message.content.startswith("!"):
-        from trade_parser import extract_trade_intent
-        from valuation_engine import execute_buy_fifo, execute_sell_fifo
+    # 🚀 THE FULL-FLEDGED FORCE TEST TRIGGER
+    if message.content.strip() == "!force_test":
+        await message.channel.send("🚀 **Initiating Full System Sweep Test...**")
         
-        trade_intent = extract_trade_intent(message.content)
-        if trade_intent:
-            user_id = str(message.author.id)
-            try:
-                if trade_intent.action == "BUY":
-                    result = execute_buy_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
-                elif trade_intent.action == "SELL":
-                    result = execute_sell_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
-                else:
-                    result = {"status": "error", "message": "Unknown trade action."}
-                    
-                await message.channel.send(result.get("message", "Trade executed."))
-            except Exception as e:
-                await message.channel.send(f"🚨 Execution Error: {str(e)}")
-            return # Stop execution so it doesn't trigger the main agent
-    # ---------------------------------------------
+        # Import all dependencies at the top before any checks
+        import schedulers
+        import youtube_scraper
+        import portfolio_manager
+        import asyncio
 
-    # Trigger the agent to think, execute tools, and generate a response
+        try:
+            # Step 1: Email Sweep
+            await message.channel.send("📧 **Step 1:** Running Multimodal Email Sweep...")
+            await run_email_sweep() 
+            
+            # Step 2: YouTube Sweep
+            await message.channel.send("🎥 **Step 2:** Running YouTube Ingestion Sweep...")
+            if hasattr(schedulers, "run_youtube_sweep"):
+                await schedulers.run_youtube_sweep()
+            elif hasattr(youtube_scraper, "run_youtube_sweep"):
+                await youtube_scraper.run_youtube_sweep()
+            elif hasattr(youtube_scraper, "scrape_and_process_videos"):
+                await asyncio.to_thread(youtube_scraper.scrape_and_process_videos)
+            
+            # Step 3: Business & Portfolio Sweep
+            await message.channel.send("💼 **Step 3:** Running Business & Portfolio Sweep...")
+            await schedulers.run_business_portfolio_sweep()
+            
+            # Step 4: Daily Snapshot
+            await message.channel.send("📊 **Step 4:** Recording Daily Database Snapshot...")
+            await asyncio.to_thread(portfolio_manager.record_daily_snapshot)
+            
+            await message.channel.send("✅ **All forced sweeps executed successfully!**")
+        except Exception as e:
+            await message.channel.send(f"⚠️ **Test Failed at some point:** `{e}`")
+            
+        return # Stop execution here so it doesn't trigger the LangGraph AI loop
+
+    # INSTANT TYPING: Fire this before ANY database or LangGraph operations
     async with message.channel.typing():
+        current_author_id.set(message.author.id)
+
+        # --- Phase 4 Conversational Ledger Parsing ---
+        if message.channel.id == CHANNEL_ID and not message.content.startswith("!"):
+            from trade_parser import extract_trade_intent
+            from valuation_engine import execute_buy_fifo, execute_sell_fifo
+            
+            trade_intent = extract_trade_intent(message.content)
+            if trade_intent:
+                user_id = str(message.author.id)
+                try:
+                    if trade_intent.action == "BUY":
+                        result = execute_buy_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
+                    elif trade_intent.action == "SELL":
+                        result = execute_sell_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
+                    else:
+                        result = {"status": "error", "message": "Unknown trade action."}
+                        
+                    await message.channel.send(result.get("message", "Trade executed."))
+                except Exception as e:
+                    await message.channel.send(f"🚨 Execution Error: {str(e)}")
+                return # Stop execution so it doesn't trigger the main agent
+        # ---------------------------------------------
+
+        # Trigger the agent to think, execute tools, and generate a response
         try:
             image_data = None
             if message.attachments:
@@ -681,22 +898,7 @@ async def on_message(message):
                 
             # Send the response back seamlessly
             if final_text:
-                chunk_size = 1900
-                in_code_block = False
-                
-                for idx in range(0, len(final_text), chunk_size):
-                    chunk = final_text[idx:idx + chunk_size]
-                    
-                    if in_code_block:
-                        chunk = "```text\n" + chunk
-                        
-                    backtick_count = chunk.count("```")
-                    if backtick_count % 2 != 0:
-                        in_code_block = not in_code_block
-                        if in_code_block:
-                            chunk += "\n```"
-                            
-                    await message.channel.send(chunk)
+                await send_long_message(message.channel, final_text)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1134,8 +1336,7 @@ async def run_email_sweep():
                         
                         if is_valid_sender or is_valid_subject:
                             print(f"📧 [Email Sweep] Processing institutional report: '{subject}' from {sender}")
-                            body_text = clean_email_body(msg)
-                            ingested_reports.append((subject, sender, body_text))
+                            ingested_reports.append((subject, sender, response_part[1]))
                         else:
                             print(f"📧 [Email Sweep] Skipping non-research email: '{subject}'")
                             
@@ -1153,7 +1354,9 @@ async def run_email_sweep():
         print("📧 [Email Sweep] Sending data to LLM for summarization...")
         
         final_messages = []
-        for subject, sender, body_text in ingested_reports:
+        for subject, sender, raw_bytes in ingested_reports:
+            body_text = await extract_and_analyze_email(raw_bytes)
+            
             prompt = (
                 f"Institutional Research Email Received.\n"
                 f"Subject: {subject}\n"

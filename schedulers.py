@@ -1,10 +1,10 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_db, evaluate_trade_trigger
 import traceback
-from discord_bot import bot, get_last_run, update_last_run
+from discord_bot import bot, get_last_run, update_last_run, send_long_message
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Define your admin channel ID here or pull from os.environ
@@ -84,9 +84,17 @@ async def run_youtube_sweep():
                 prompt = f"Summarize this briefly for Discord:\nTitle: {item.title}\nSource: {item.source}\nContent: {item.content}"
                 summary_response = await asyncio.to_thread(llm.invoke, prompt)
                 
+                content_val = summary_response.content
+                if isinstance(content_val, list):
+                    cleaned_summary = "".join(part.get("text", "") for part in content_val if isinstance(part, dict))
+                elif isinstance(content_val, dict):
+                    cleaned_summary = content_val.get("text", str(content_val))
+                else:
+                    cleaned_summary = str(content_val)
+                
                 alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
                 if alert_channel:
-                    discord_msg = f"🧠 **Silent Vector Ingestion Complete**\n**Source:** {item.source}\n**Title:** {item.title}\n**Summary:** {summary_response.content}"
+                    discord_msg = f"🧠 **Silent Vector Ingestion Complete**\n**Source:** {item.source}\n**Title:** {item.title}\n**Summary:** {cleaned_summary}"
                     await alert_channel.send(discord_msg)
             except Exception as e:
                 logger.error(f"Summarization error: {e}")
@@ -149,21 +157,12 @@ async def run_business_portfolio_sweep():
         # Logic to evaluate holdings against target maximums (e.g., 20% single-stock cap)
         
         # 3. Predictive Synthesis via LangGraph Analyst Node
-        import psycopg2
         try:
-            conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
-            cur = conn.cursor()
-            cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0")
-            holdings = cur.fetchall()
-            h_str = []
-            for row in holdings:
-                ticker, qty = row[0], float(row[1])
-                h_str.append(f"{ticker} ({qty} shares)")
-            current_holdings = "Current Holdings: " + ", ".join(h_str) if h_str else "No active holdings."
-            cur.close()
-            conn.close()
+            from valuation_engine import get_deterministic_portfolio_summary
+            portfolio_data = await asyncio.to_thread(get_deterministic_portfolio_summary)
+            current_holdings = "EXACT_FINANCIAL_GROUND_TRUTH:\n" + portfolio_data.get('formatted_text', 'Data Unavailable.')
         except Exception as e:
-            current_holdings = "Current Holdings: Data Unavailable."
+            current_holdings = f"EXACT_FINANCIAL_GROUND_TRUTH:\nData Unavailable. ({e})"
 
         from agent import get_evaluation_graph
         graph = get_evaluation_graph()
@@ -177,21 +176,7 @@ async def run_business_portfolio_sweep():
         }
         
         result = await asyncio.to_thread(graph.invoke, state)
-        raw_json = result.get("analyst_thesis", "{}")
-        
-        try:
-            import json
-            parsed = json.loads(raw_json)
-            action = parsed.get("action", "N/A")
-            risk = parsed.get("risk_score_1_to_10", "N/A")
-            conf = parsed.get("confidence", 0) * 100
-            analysis = parsed.get("step_by_step_analysis", "No analysis provided.")
-            rationale = parsed.get("rationale", "No rationale provided.")
-            
-            ai_verdict = f"🏛️ **PSX MACRO & BUSINESS SWEEP**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📊 **Market Stance:** `{action}` (Risk Score: {risk}/10 | Confidence: {conf:.0f}%)\n\n🔍 **Key Macro Catalysts & Headwinds:**\n• {analysis}\n\n💡 **Strategic Outlook:**\n{rationale}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        except Exception as e:
-            logger.error(f"Failed to parse macro JSON: {e}")
-            ai_verdict = f"📰 **Macro & Market Sweep Complete**\n\n**AI Synthesis:**\n{raw_json[:1800]}"
+        ai_verdict = result.get("analyst_thesis", "No analysis provided.")
         
         # Output proactive thought
         os.makedirs("memory_cache", exist_ok=True)
@@ -201,11 +186,7 @@ async def run_business_portfolio_sweep():
         # Send alert
         alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
         if alert_channel:
-            if len(ai_verdict) > 1950:
-                for chunk in [ai_verdict[i:i+1950] for i in range(0, len(ai_verdict), 1950)]:
-                    await alert_channel.send(chunk)
-            else:
-                await alert_channel.send(ai_verdict)
+            await send_long_message(alert_channel, ai_verdict)
             
         logger.info(f"✅ [{datetime.now().strftime('%H:%M')}] Business & Portfolio Sweep calculations and checks complete.")
     except Exception as e:
@@ -478,6 +459,18 @@ async def start_scheduled_sweeps():
             last_date = datetime.fromtimestamp(last_timestamp).date()
             return last_date < current_date and now.hour >= target_hour
 
+        def should_run_window(task_name, target_hour, target_minute, window_minutes=15):
+            last_timestamp = get_last_run(task_name)
+            if last_timestamp > 0:
+                last_date = datetime.fromtimestamp(last_timestamp).date()
+                if last_date == current_date:
+                    return False
+            
+            target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+            window_end = target_time + timedelta(minutes=window_minutes)
+            
+            return target_time <= now <= window_end
+
         # 1. YouTube Knowledge Sweep (12:00 AM)
         if should_run("youtube", 0):
             await run_youtube_sweep()
@@ -493,15 +486,15 @@ async def start_scheduled_sweeps():
             update_last_run("email_afternoon")
             
         # 3. Business & Portfolio Sweep (3x daily: 08:30, 13:00, 18:00 PKT)
-        if should_run("business_morning", 8) and (now.hour > 8 or now.minute >= 30):
+        if should_run_window("business_morning", 8, 30):
             await run_business_portfolio_sweep()
             update_last_run("business_morning")
             
-        if should_run("business_midday", 13):
+        if should_run_window("business_midday", 13, 0):
             await run_business_portfolio_sweep()
             update_last_run("business_midday")
             
-        if should_run("business_evening", 18):
+        if should_run_window("business_evening", 18, 0):
             await run_business_portfolio_sweep()
             update_last_run("business_evening")
             

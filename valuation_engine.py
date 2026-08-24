@@ -312,6 +312,73 @@ def execute_sell_fifo(user_id: str, ticker: str, sell_quantity: float, sell_pric
     finally:
         if DB_POOL: DB_POOL.putconn(conn)
         else: conn.close()
+def get_deterministic_portfolio_summary() -> dict:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Fetch live cash
+            cur.execute("SELECT liquid_cash FROM portfolio_cash WHERE id = 1")
+            cash_res = cur.fetchone()
+            liquid_cash = float(cash_res['liquid_cash']) if cash_res else 0.0
+
+            # 2. Fetch all holdings
+            cur.execute("SELECT ticker, shares, avg_buy_price FROM portfolio_holdings")
+            holdings = cur.fetchall() or []
+    except Exception as e:
+        print(f"Error fetching deterministic portfolio: {e}")
+        liquid_cash = 0.0
+        holdings = []
+    finally:
+        conn.close()
+
+    total_invested = 0.0
+    total_current_value = 0.0
+    position_summaries = []
+
+    for pos in holdings:
+        ticker = pos['ticker']
+        shares = float(pos['shares'])
+        avg_buy = float(pos['avg_buy_price'])
+        
+        if shares <= 0:
+            continue
+
+        live_price = fetch_live_price(ticker) or avg_buy
+        cost_basis = shares * avg_buy
+        market_val = shares * live_price
+        pos_pnl = market_val - cost_basis
+        pos_pnl_pct = (pos_pnl / cost_basis) * 100 if cost_basis > 0 else 0.0
+
+        total_invested += cost_basis
+        total_current_value += market_val
+        position_summaries.append(
+            f"- {ticker}: {shares:g} shares @ Avg Rs {avg_buy:.2f} (Spot: Rs {live_price:.2f} | PnL: {pos_pnl_pct:+.2f}%)"
+        )
+
+    total_pnl = total_current_value - total_invested
+    total_pnl_pct = (total_pnl / total_invested) * 100 if total_invested > 0 else 0.0
+    net_worth = total_current_value + liquid_cash
+
+    formatted_summary = (
+        f"LIQUID CASH: Rs {liquid_cash:,.2f}\n"
+        f"TOTAL INVESTED: Rs {total_invested:,.2f}\n"
+        f"PORTFOLIO MARKET VALUE: Rs {total_current_value:,.2f}\n"
+        f"TOTAL NET WORTH: Rs {net_worth:,.2f}\n"
+        f"TOTAL UNREALIZED PnL: Rs {total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)\n\n"
+        f"ACTIVE POSITIONS:\n" + ("\n".join(position_summaries) if position_summaries else "None (100% Cash)")
+    )
+
+    return {
+        "liquid_cash": liquid_cash,
+        "total_invested": total_invested,
+        "total_current_value": total_current_value,
+        "net_worth": net_worth,
+        "total_pnl": total_pnl,
+        "total_pnl_pct": total_pnl_pct,
+        "formatted_text": formatted_summary
+    }
+
 if __name__ == "__main__":
     # Test executions
     print(run_price_sentinel())
+    print(get_deterministic_portfolio_summary()['formatted_text'])
