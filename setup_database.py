@@ -69,6 +69,33 @@ def create_tables():
         """)
         print("✅ Created/Verified 'sector_valuations' table.")
 
+        # 5. Create System Macro State Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_macro_state (
+            key TEXT PRIMARY KEY,
+            value NUMERIC NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        """)
+        
+        cursor.execute("""
+        INSERT INTO system_macro_state (key, value)
+        VALUES ('cpi_inflation_rate', 0.092)
+        ON CONFLICT (key) DO NOTHING;
+        """)
+        print("✅ Created/Verified 'system_macro_state' table.")
+
+        # 6. Create Active Playbook Table (Learned Rules)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS active_playbook (
+            id SERIAL PRIMARY KEY,
+            source TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        print("✅ Created/Verified 'active_playbook' table.")
+
         # Commit changes and close the connection
         conn.commit()
         cursor.close()

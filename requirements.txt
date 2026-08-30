@@ -28,4 +28,4 @@ langchain-postgres>=0.0.12
 beautifulsoup4>=4.12.3
 pydantic>=2.8.2
 tenacity>=8.5.0
-cachetools>=5.5.0
+cachetools>=5.5.0playwright

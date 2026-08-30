@@ -15,6 +15,23 @@ def get_db_connection():
         raise ValueError("SUPABASE_DB_URL not found in environment variables.")
     return psycopg2.connect(db_url)
 
+def calculate_graham_intrinsic(eps: float, raw_g: float) -> float:
+    """
+    Calculates the Graham Intrinsic Value using a sanitized growth rate.
+    Intrinsic Value = EPS * (8.5 + 2g)
+    """
+    if eps <= 0:
+        return 0.0  # Money-losing companies have zero intrinsic value in this model
+        
+    # Sanitize g: Floor at 0%, Cap at 15% (0.15)
+    g_percentage = raw_g * 100 if raw_g < 1.0 else raw_g 
+    
+    safe_g = max(0.0, min(g_percentage, 15.0)) 
+    
+    intrinsic_value = eps * (8.5 + (2 * safe_g))
+    
+    return round(intrinsic_value, 2)
+
 def sync_eps_and_targets():
     """
     Fetches the latest EPS from PSX and updates the Supabase watchlist_targets table.
@@ -86,7 +103,7 @@ def run_price_sentinel():
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             # 1. Query the single row in portfolio_cash to get the liquid buffer
-            cursor.execute("SELECT liquid_cash FROM portfolio_cash WHERE id = 1")
+            cursor.execute("SELECT COALESCE(SUM(amount), 0) AS liquid_cash FROM cash_ledger")
             cash_row = cursor.fetchone()
             liquid_cash = float(cash_row['liquid_cash']) if cash_row else 0.0
 
@@ -316,8 +333,8 @@ def get_deterministic_portfolio_summary() -> dict:
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Fetch live cash
-            cur.execute("SELECT liquid_cash FROM portfolio_cash WHERE id = 1")
+            # 1. Fetch live cash dynamically from the transaction ledger
+            cur.execute("SELECT COALESCE(SUM(amount), 0) AS liquid_cash FROM cash_ledger")
             cash_res = cur.fetchone()
             liquid_cash = float(cash_res['liquid_cash']) if cash_res else 0.0
 
@@ -359,12 +376,14 @@ def get_deterministic_portfolio_summary() -> dict:
     total_pnl_pct = (total_pnl / total_invested) * 100 if total_invested > 0 else 0.0
     net_worth = total_current_value + liquid_cash
 
+    pnl_term = "GAIN" if total_pnl >= 0 else "LOSS"
+
     formatted_summary = (
         f"LIQUID CASH: Rs {liquid_cash:,.2f}\n"
         f"TOTAL INVESTED: Rs {total_invested:,.2f}\n"
         f"PORTFOLIO MARKET VALUE: Rs {total_current_value:,.2f}\n"
         f"TOTAL NET WORTH: Rs {net_worth:,.2f}\n"
-        f"TOTAL UNREALIZED PnL: Rs {total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)\n\n"
+        f"TOTAL UNREALIZED {pnl_term}: Rs {abs(total_pnl):,.2f} ({total_pnl_pct:+.2f}%)\n\n"
         f"ACTIVE POSITIONS:\n" + ("\n".join(position_summaries) if position_summaries else "None (100% Cash)")
     )
 

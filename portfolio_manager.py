@@ -15,7 +15,7 @@ import functools
 import datetime
 import pandas as pd
 import numpy as np
-# yfinance removed: replaced by direct PSX portal scraper (update_ticker_valuations)
+import yfinance as yf
 import concurrent.futures
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -36,6 +36,20 @@ def get_db_connection(db_url=None):
     conn_str = db_url if db_url else DATABASE_URL
     return psycopg2.connect(conn_str)
 
+def sanitize_price(raw_price) -> float:
+    """Strips commas and handles raw API strings to prevent PnL hallucinations."""
+    if raw_price is None:
+        return 0.0
+    if isinstance(raw_price, (int, float)):
+        return float(raw_price)
+    
+    clean_string = str(raw_price).replace(',', '').replace('Rs.', '').replace(' ', '').strip()
+    try:
+        return float(clean_string)
+    except ValueError:
+        print(f"[ERROR] Could not parse price: {raw_price}")
+        return 0.0
+
 @cached(cache=TTLCache(maxsize=100, ttl=900))
 def get_live_price(ticker: str) -> float:
     """Scrapes the live current price from the PSX Data Portal."""
@@ -49,9 +63,7 @@ def get_live_price(ticker: str) -> float:
         # The PSX Data Portal stores the live price inside the 'quote__close' class
         price_div = soup.find('div', class_='quote__close')
         if price_div:
-            # Clean the string (e.g., "Rs. 135.50" -> 135.50)
-            price_text = price_div.text.replace('Rs.', '').replace(',', '').strip()
-            return float(price_text)
+            return sanitize_price(price_div.text)
         return 0.0
     except Exception as e:
         print(f"Error fetching live price for {ticker}: {e}")
@@ -71,8 +83,7 @@ def get_live_price_and_change(ticker: str) -> tuple[float, float]:
         
         price_div = soup.find('div', class_='quote__close')
         if price_div:
-            price_text = price_div.text.replace('Rs.', '').replace(',', '').strip()
-            price = float(price_text)
+            price = sanitize_price(price_div.text)
             
         change_div = soup.find('div', class_='quote__change')
         if change_div:
@@ -107,23 +118,23 @@ def log_trade(ticker: str, action: str, quantity: float, price: float, fees: flo
             # average_price = (current_invested + new_invested) / total_quantity
             # new_invested = (quantity * price) + fees
             cursor.execute("""
-                INSERT INTO portfolio (ticker, total_quantity, average_price)
+                INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price)
                 VALUES (%s, %s, (%s * %s + %s) / %s)
                 ON CONFLICT (ticker) DO UPDATE SET
-                average_price = ((portfolio.average_price * portfolio.total_quantity) + (%s * %s + %s)) / (portfolio.total_quantity + %s),
-                total_quantity = portfolio.total_quantity + %s,
-                last_updated = CURRENT_TIMESTAMP;
+                avg_buy_price = ((portfolio_holdings.avg_buy_price * portfolio_holdings.shares) + (%s * %s + %s)) / (portfolio_holdings.shares + %s),
+                shares = portfolio_holdings.shares + %s,
+                updated_at = CURRENT_TIMESTAMP;
             """, (ticker, quantity, quantity, price, fees, quantity, quantity, price, fees, quantity, quantity))
             
         elif action == 'SELL':
             cursor.execute("""
-                UPDATE portfolio 
-                SET total_quantity = total_quantity - %s,
-                    last_updated = CURRENT_TIMESTAMP
+                UPDATE portfolio_holdings 
+                SET shares = shares - %s,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE ticker = %s;
             """, (quantity, ticker))
             
-            cursor.execute("DELETE FROM portfolio WHERE total_quantity <= 0 AND ticker = %s", (ticker,))
+            cursor.execute("DELETE FROM portfolio_holdings WHERE shares <= 0 AND ticker = %s", (ticker,))
             
         conn.commit()
         cursor.close()
@@ -168,10 +179,10 @@ def get_portfolio_summary() -> str:
         
         # We join the portfolio table with targets to show everything at once
         cursor.execute("""
-            SELECT p.ticker, p.total_quantity, p.average_price, w.target_price
-            FROM portfolio p
+            SELECT p.ticker, p.shares as total_quantity, p.avg_buy_price as average_price, w.target_price
+            FROM portfolio_holdings p
             LEFT JOIN watchlist_targets w ON p.ticker = w.ticker
-            WHERE p.total_quantity > 0 
+            WHERE p.shares > 0 
             ORDER BY p.ticker ASC
         """)
         rows = cursor.fetchall()
@@ -263,6 +274,62 @@ def get_watchlist_summary() -> str:
         import traceback
         return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
 
+import math
+
+def calculate_concentration_trim(ticker: str, current_shares: int, current_price: float, total_portfolio_value: float, max_asset_cap: float = 0.30, dcf_fair_value: float = 0.0) -> dict:
+    """
+    Calculates the exact whole number of shares to liquidate to bring an asset
+    strictly back under the max allowable single-asset portfolio cap, guarded by fundamental value logic.
+    """
+    if current_price <= 0 or total_portfolio_value <= 0:
+        return {"action": "HOLD", "shares_to_sell": 0, "excess_pkr": 0.0, "expected_cash_gen": 0.0}
+
+    current_holding_value = current_shares * current_price
+    weight = current_holding_value / total_portfolio_value
+
+    # RULE 1: Only consider concentration risk if the position exceeds an extreme structural limit (e.g., 30%)
+    if weight <= max_asset_cap:
+        return {
+            "action": "HOLD",
+            "current_weight": weight,
+            "shares_to_sell": 0,
+            "excess_pkr": 0.0,
+            "expected_cash_gen": 0.0
+        }
+
+    # RULE 2: If it does exceed cap, check valuation before selling. 
+    # If it's deeply undervalued, we accept the concentration because selling a compounder for tax/friction reasons is illogical.
+    margin_of_safety = 0.0
+    if dcf_fair_value > 0:
+        margin_of_safety = (dcf_fair_value - current_price) / dcf_fair_value
+        
+    if margin_of_safety > 0.15:
+        return {
+            "action": "HOLD",
+            "current_weight": weight,
+            "shares_to_sell": 0,
+            "excess_pkr": 0.0,
+            "expected_cash_gen": 0.0,
+            "override_msg": f"Position exceeds weight limit ({weight*100:.1f}%), but maintains a strong DCF margin of safety ({margin_of_safety*100:.1f}%). Overriding concentration trim to protect compounding."
+        }
+
+    # Calculate target shares and exact shares to liquidate
+    max_allowed_value = total_portfolio_value * max_asset_cap
+    target_shares_to_hold = math.floor(max_allowed_value / current_price)
+    shares_to_sell = current_shares - target_shares_to_hold
+    expected_cash_gen = shares_to_sell * current_price
+    new_weight = (target_shares_to_hold * current_price) / total_portfolio_value
+
+    return {
+        "action": "TRIM",
+        "current_shares": current_shares,
+        "target_shares": target_shares_to_hold,
+        "shares_to_sell": shares_to_sell,
+        "expected_cash_gen": expected_cash_gen,
+        "current_weight": weight,
+        "projected_weight": new_weight
+    }
+
 def check_profit_and_rebalance_triggers() -> list[dict]:
     """
     Evaluates the portfolio against quantitative rules and returns actionable alerts.
@@ -277,7 +344,7 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
         cash_balance = float(cash_res[0]) if cash_res else 0.0
         
         # Get portfolio holdings
-        cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
+        cursor.execute("SELECT ticker, shares as total_quantity, avg_buy_price as average_price FROM portfolio_holdings WHERE shares > 0")
         holdings = cursor.fetchall()
         
         # Get watchlist targets and sector data
@@ -360,6 +427,7 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
                         "type": "stale_target_warning",
                         "ticker": ticker,
                         "current_price": current_price,
+                        "current_shares": shares,
                         "target_price": target_price,
                         "message": f"Target price of {target_price} is over 90 days old. Fundamental re-evaluation required."
                     })
@@ -370,6 +438,7 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
                         "type": "target_valuation_reached",
                         "ticker": ticker,
                         "current_price": current_price,
+                        "current_shares": shares,
                         "target_price": target_price,
                         "gain_pct": gain_pct,
                         "shares_to_sell": shares_to_sell,
@@ -388,6 +457,7 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
                     "type": "macro_overvaluation",
                     "ticker": ticker,
                     "current_price": current_price,
+                    "current_shares": shares,
                     "current_trailing_pe": curr_pe,
                     "historical_fair_pe": hist_pe,
                     "shares_to_sell": shares_to_sell,
@@ -395,16 +465,17 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
                     "new_cash_balance": cash_balance + cash_gen
                 })
             # Concentration Trigger
-            if pos_value / total_value >= 0.40:
-                # Target max 35% exposure
-                target_value = total_value * 0.35
-                excess_value = pos_value - target_value
-                shares_to_sell = max(1, round(excess_value / current_price))
-                cash_gen = shares_to_sell * current_price
+            dcf_fair = w_data.get("target_price") or 0.0
+            trim_data = calculate_concentration_trim(ticker, shares, current_price, total_value, max_asset_cap=0.30, dcf_fair_value=dcf_fair)
+            
+            if trim_data["action"] == "TRIM" and trim_data["shares_to_sell"] > 0:
+                shares_to_sell = trim_data["shares_to_sell"]
+                cash_gen = trim_data["expected_cash_gen"]
                 alerts.append({
                     "type": "concentration_risk",
                     "ticker": ticker,
                     "current_price": current_price,
+                    "current_shares": shares,
                     "gain_pct": gain_pct,
                     "shares_to_sell": shares_to_sell,
                     "cash_generated": cash_gen,
@@ -449,11 +520,13 @@ def generate_daily_closing_summary() -> dict:
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # 1. Fetch Liquid Cash (Assuming withdrawals/buys are logged as negative amounts)
         cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
         cash_res = cursor.fetchone()
         liquid_cash = float(cash_res[0]) if cash_res else 0.0
         
-        cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
+        # 2. FIXED: Aligned schema columns to match your actual database structure
+        cursor.execute("SELECT ticker, shares, avg_buy_price FROM portfolio_holdings WHERE shares > 0")
         holdings = cursor.fetchall()
         
         cursor.execute("SELECT daily_pnl, daily_pnl_pct FROM portfolio_daily_snapshots WHERE snapshot_date = CURRENT_DATE")
@@ -476,19 +549,24 @@ def generate_daily_closing_summary() -> dict:
                 "top_gainer": ("N/A", 0.0),
                 "top_loser": ("N/A", 0.0),
                 "daily_pnl": 0.0,
-                "daily_pnl_pct": 0.0
+                "daily_pnl_pct": 0.0,
+                "current_holdings": []
             }
             
+        current_holdings_list = []
         for row in holdings:
             ticker = row[0]
             shares = float(row[1])
+            avg_price = float(row[2])
             
             current_price, change_pct = get_live_price_and_change(ticker)
             if current_price == 0.0:
-                current_price = float(row[2])
+                current_price = avg_price  # Fallback to avg buy price if PSX API fails
                 change_pct = 0.0
                 
-            equity_value += shares * current_price
+            market_value = shares * current_price
+            equity_value += market_value
+            current_holdings_list.append({"ticker": ticker, "market_value": market_value})
             
             if change_pct > top_gainer["change"]:
                 top_gainer = {"ticker": ticker, "change": change_pct}
@@ -506,7 +584,8 @@ def generate_daily_closing_summary() -> dict:
             "top_gainer": (top_gainer["ticker"], top_gainer["change"]),
             "top_loser": (top_loser["ticker"], top_loser["change"]),
             "daily_pnl": daily_pnl,
-            "daily_pnl_pct": daily_pnl_pct
+            "daily_pnl_pct": daily_pnl_pct,
+            "current_holdings": current_holdings_list
         }
     except Exception as e:
         import traceback
@@ -528,7 +607,7 @@ def record_daily_snapshot():
         cash_balance = float(cash_res[0]) if cash_res else 0.0
         
         # 2. Fetch current holdings and calculate equity value
-        cursor.execute("SELECT ticker, total_quantity, average_price FROM portfolio WHERE total_quantity > 0")
+        cursor.execute("SELECT ticker, shares as total_quantity, avg_buy_price as average_price FROM portfolio_holdings WHERE shares > 0")
         holdings = cursor.fetchall()
         
         equity_value = 0.0
@@ -638,7 +717,7 @@ def sync_portfolio_tool(holdings_json: str) -> str:
         cursor = conn.cursor()
         
         # Purge old records completely
-        cursor.execute("DELETE FROM portfolio;")
+        cursor.execute("DELETE FROM portfolio_holdings;")
         
         for item in holdings:
             ticker = str(item.get("ticker")).strip().upper()
@@ -647,7 +726,7 @@ def sync_portfolio_tool(holdings_json: str) -> str:
             
             cursor.execute(
                 """
-                INSERT INTO portfolio (ticker, total_quantity, average_price)
+                INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price)
                 VALUES (%s, %s, %s)
                 """,
                 (ticker, shares, avg_cost)
@@ -764,21 +843,113 @@ def update_ticker_valuations():
     except Exception as e:
         print(f"Error in update_ticker_valuations: {e}")
 
+import requests
+import re
+
+def fetch_dividend_yield(ticker: str) -> float:
+    """
+    Fetches the dividend yield securely via Yahoo Finance API, bypassing 
+    regional WAFs completely. 
+    """
+    try:
+        # Append .KA for Karachi Stock Exchange indexing
+        yahoo_ticker = f"{ticker}.KA"
+        stock = yf.Ticker(yahoo_ticker)
+        
+        # yfinance sometimes uses trailingAnnualDividendYield instead of dividendYield
+        div_yield = stock.info.get("dividendYield")
+        if div_yield is None:
+            div_yield = stock.info.get("trailingAnnualDividendYield", 0.0)
+        
+        # Guard against Yahoo returning None for stocks with no yield
+        if div_yield is None:
+            return 0.0
+            
+        return round(float(div_yield), 4)
+
+    except Exception as e:
+        print(f"[ERROR] yfinance routing failed for {ticker}: {e}")
+        return 0.0
+
 @cached(cache=TTLCache(maxsize=100, ttl=900))
 def get_fundamentals(ticker: str) -> dict:
     """
-    Fetches available fundamentals from the PSX Data Portal for a given ticker.
-    Returns a dict with at least 'trailingPE' if available.
+    Fetches available fundamentals from the PSX Data Portal JSON API (Option A)
+    with a fallback to scraping Sarmaaya.pk (Option B).
+    Returns a dict with 'eps', 'roic', and 'trailingPE'.
     """
     try:
-        pe = _scrape_psx_pe(ticker)
-        result = {}
-        if pe is not None:
-            result["trailingPE"] = pe
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Query only the columns present in the Supabase schema
+        cur.execute("SELECT dividend_yield, eps, roic FROM fundamentals WHERE ticker = %s", (ticker,))
+        row = cur.fetchone()
+        conn.close()
+        
+        if row and row[0] is not None:
+            return {
+                "dividend_yield": float(row[0]) if row[0] is not None else 0.0,
+                "trailingPE": 0.0,  # Not stored in table schema
+                "eps": float(row[1]) if row[1] is not None else 0.0,
+                "roic": float(row[2]) if row[2] is not None else 0.0
+            }
+    except Exception as e:
+        print(f"[Fundamentals] DB check failed for {ticker}: {e}")
+        
+    # 2. Only fall back to APIs if the database has nothing
+    print(f"[Fundamentals] Falling back to APIs/Yahoo Finance for {ticker}...")
+    import re
+    result = {'eps': 0.0, 'roic': 0.0, 'trailingPE': None, 'dividend_yield': 0.0}
+    
+    # Also fetch trailing PE if possible
+    pe = _scrape_psx_pe(ticker)
+    if pe is not None:
+        result["trailingPE"] = pe
+
+    # Option A: Fetch EPS, ROIC, and Dividend Yield from the PSX DPS internal JSON API endpoint
+    try:
+        url = f"https://dps.psx.com.pk/api/company/{ticker.upper()}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'eps' in data:
+                result['eps'] = float(data['eps'])
+            if 'roic' in data:
+                result['roic'] = float(data['roic'])
+            if 'dividendYield' in data:
+                val = data['dividendYield']
+                if val:
+                    val_str = str(val).strip()
+                    is_percentage_str = '%' in val_str
+                    val_clean = val_str.replace('%', '').strip()
+                    try:
+                        parsed_val = float(val_clean)
+                        # If it has a '%' or is > 1.0 (e.g. 16.5), we divide by 100 to get a true decimal.
+                        # Some APIs return 0.165 directly. We assume values > 1.0 are definitely not already decimals.
+                        if is_percentage_str or parsed_val > 1.0:
+                            result['dividend_yield'] = parsed_val / 100.0
+                        else:
+                            # If it's something like 0.165 (already a decimal), we leave it.
+                            # If it's a very low yield like 0.5 meaning 0.5%, and has no %, it'll be treated as 50% (0.5),
+                            # but Pakistan yields are rarely that low, and if they are, the % sign is usually present.
+                            result['dividend_yield'] = parsed_val
+                    except ValueError:
+                        pass
+            return result
+    except Exception as e:
+        print(f"[Fundamentals] PSX API failed for {ticker}: {e}")
+
+    # Option B: Fallback to PSX Master Screener for Dividend Yield
+    try:
+        print(f"[Fundamentals] Falling back to Yahoo Finance for {ticker}...")
+        result['dividend_yield'] = fetch_dividend_yield(ticker)
+        # EPS and ROIC scrapers are deprecated due to Next.js SSR architecture
         return result
     except Exception as e:
-        print(f"Error fetching fundamentals for {ticker}: {e}")
-        return {}
+        print(f"[Fundamentals] PSX Screener API fallback failed for {ticker}: {e}")
+        return result
 
 @functools.lru_cache(maxsize=32)
 def get_cached_historical_prices(ticker: str, start_date: str):

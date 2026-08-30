@@ -10,6 +10,49 @@ import psycopg
 
 logger = logging.getLogger("YouTubeScraper")
 
+# Strict Prompt Template for Sweep Summarization
+SWEEP_FORMAT_PROMPT = """
+You are a senior quantitative portfolio strategist. Analyze the provided transcript/content.
+Format the output cleanly using Markdown with exact line breaks and bold labels. 
+
+Structure your response into exactly four sections:
+
+🎙️ **Source & Core Topic**
+- [Name of Mentor / Channel] | [Core subject of discussion]
+
+🧠 **Tactical Method / Framework Learned**
+- Break down the underlying investment tactic, framework, or lesson clearly in 2–3 bullet points so the user can learn the mechanics.
+
+💼 **Portfolio Application**
+- Evaluate how this directly applies to our holdings (SYS, HUBC, LUCK, FFC, EFERT, MEBL, MARI) or our cash reserve. State clearly whether this validates holding, warns against accumulation, or signals rotation.
+
+🎯 **What This Research Means for Us**
+- 1–2 crisp, actionable sentences defining our strategic stance moving forward (e.g., "Keep cash dry until Q3 earnings confirm margin expansion" or "Disregard short-term political noise; fundamentals remain intact").
+
+EXTRACTED TICKERS (Strict format):
+!target TICKER FAIR_VALUE STOP_LOSS (Use 0 0 if not explicitly stated)
+
+EXTRACTED TACTICAL RULE (Strict format):
+!rule [Write exactly one concise, actionable sentence summarizing the core tactical lesson to be saved to the database playbook]
+"""
+
+def save_learned_rule(source: str, rule: str):
+    import psycopg2
+    import os
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO active_playbook (source, rule, created_at) VALUES (%s, %s, NOW())",
+            (source, rule)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"[Playbook] Successfully saved rule from {source}")
+    except Exception as e:
+        print(f"[Playbook] Error saving rule: {e}")
+
 def get_embeddings_model():
     return GoogleGenerativeAIEmbeddings(
         model="models/gemini-embedding-001", 

@@ -41,9 +41,37 @@ from google.api_core.exceptions import ResourceExhausted
 
 import httpx
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 client = genai.Client()
+
+def apply_research_sentiment_to_db(llm_output: str):
+    import re
+    import json
+    match = re.search(r"<SENTIMENT_MAPPING>(.*?)</SENTIMENT_MAPPING>", llm_output, re.DOTALL)
+    if not match:
+        print("[RAG Pipeline] No structured sentiment mapping found in output.")
+        return
+
+    try:
+        sentiment_dict = json.loads(match.group(1).strip())
+        from portfolio_manager import get_db_connection
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        for ticker, sentiment in sentiment_dict.items():
+            if sentiment in ["BULLISH", "BEARISH", "NEUTRAL"]:
+                cur.execute(
+                    "UPDATE portfolio_holdings SET research_sentiment = %s, sentiment_updated_at = CURRENT_TIMESTAMP WHERE ticker = %s",
+                    (sentiment, ticker)
+                )
+                print(f"[RAG Pipeline] Updated {ticker} sentiment -> {sentiment}")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[RAG Pipeline] Failed to parse and save sentiment: {e}")
 
 async def extract_and_analyze_email(raw_email_bytes: bytes) -> str:
     """
@@ -126,12 +154,27 @@ Instructions:
 
     contents = [prompt] + multimodal_parts
 
-    # 3. Call Gemini 2.5 Flash
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contents
-    )
+    # 3. Call Gemini 3.6 Flash with automated fallback
+    models_to_try = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+    response = None
     
+    for model_name in models_to_try:
+        try:
+            chat = client.aio.chats.create(
+                model=model_name,
+                config=types.GenerateContentConfig(
+                    tools=None,
+                    temperature=0.2
+                )
+            )
+            response = await chat.send_message(contents)
+            break
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}. Trying next...")
+            
+    if not response:
+        raise Exception("All fallback models failed.")
+        
     return response.text
 
 from portfolio_manager import log_trade, get_portfolio_summary, set_target, get_live_price, get_watchlist_summary, scan_shariah_market, sync_portfolio_tool
@@ -347,7 +390,9 @@ async def midnight_mentor_sweep():
             "Mashal Khan", 
             "Jawad Hafeez",
             "Investkaar",
-            "Sarmaaya Financials"
+            "Sarmaaya Financials",
+            "AKD Securities Limited",
+            "KTrade PK"
         ]
         
         print("Starting Unfiltered Midnight Mentor Sweep...")
@@ -412,6 +457,8 @@ async def midnight_mentor_sweep():
             
             Transcript: 
             {text}
+            
+            OUTPUT DIRECTIVE: You must start your response exactly with the character '* '. Provide only the bulleted list. Any conversational text before the first bullet point is a critical failure.
             """            
             inputs = {"messages": [HumanMessage(content=prompt)]}
             config = {"configurable": {"thread_id": f"midnight_sweep_{mentor}"}}
@@ -750,10 +797,133 @@ def visual_analyst_tool() -> str:
 # We are now utilizing the fully compiled, stateful LangGraph agent (agent_app) from agent.py.
 # The isolated AgentExecutor and ephemeral memory dictionary have been removed.
 
+from google import genai
+from google.genai import types
+
+CORE_DIRECTIVE = """
+You are an autonomous quantitative value investing agent managing a live PSX portfolio. 
+Your core mandate is capital preservation and deploying cash strictly based on mathematical intrinsic value and the provided mental models.
+
+CRITICAL RULES:
+1. NO TECHNICAL ANALYSIS: You are strictly forbidden from referencing Moving Averages, RSI, MACD, 'momentum', or 'chart patterns'. 
+2. DCF IS LAW: Base all accumulation and trim decisions purely on the provided DCF Intrinsic Value, Margin of Safety, and concentration limits.
+3. BAN ON SUNK COST FALLACY: Never base a hold/sell decision on the portfolio's 'average cost' or 'unrealized P/L'. The market does not care what price we bought at. Refusing to realize a loss is emotional weakness. Base sells on valuation, not cost basis.
+4. BAN ON THE DISPOSITION EFFECT: Never suggest selling a winning asset simply because it is in the green. Winners are meant to compound. Base sells strictly on valuation exhaustion (price exceeding DCF).
+5. APPLY INGESTED MENTAL MODELS: Always apply the principles from the latest vector ingestions (e.g., cutting emotional losers) to justify moves.
+"""
+
+# 1. Define the rigid tools the LLM is allowed to use
+import os
+import psycopg2
+import psycopg2.extras
+
+def trigger_research(ticker: str = "KMI30") -> str:
+    """Scans the entire KMI-30 universe, evaluating live prices against hardened DCF intrinsic values and active cash levels."""
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Pull all fundamentals and latest calculated metrics across the board
+        cur.execute("""
+            SELECT ticker, fcf, shares_outstanding, historical_growth, total_cash, total_debt 
+            FROM fundamentals
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        return f"Database error during universe scan: {str(e)}"
+
+    if not rows:
+        return "No fundamental records found in database."
+
+    evaluation_summary = []
+    
+    # Simple DCF evaluation loop across the universe
+    for r in rows:
+        t = r["ticker"]
+        fcf = float(r.get("fcf", 0) or 0)
+        shares = float(r.get("shares_outstanding", 0) or 0)
+        growth = float(r.get("historical_growth", 0) or 0)
+        cash = float(r.get("total_cash", 0) or 0)
+        debt = float(r.get("total_debt", 0) or 0)
+        
+        if fcf <= 0 or shares <= 0:
+            continue
+            
+        # Simplified execution of your hardened DCF model for screening
+        discount_rate = 0.12 + 0.07 # Normalized RFR (12%) + ERP (7%)
+        terminal_growth = 0.04
+        
+        # 5-year tapered projection simulation
+        current_fcf = fcf
+        pv_fcf = 0
+        for i in range(1, 6):
+            tapered = growth - ((growth - terminal_growth) * (i / 5))
+            current_fcf *= (1 + tapered)
+            pv_fcf += current_fcf / ((1 + discount_rate) ** i)
+            
+        terminal_val = (current_fcf * (1 + terminal_growth)) / (discount_rate - terminal_growth)
+        pv_terminal = terminal_val / ((1 + discount_rate) ** 5)
+        
+        equity_val = (pv_fcf + pv_terminal) + cash - debt
+        fair_value = round(equity_val / shares, 2)
+        
+        evaluation_summary.append(f"- **{t}**: Intrinsic DCF Fair Value = Rs. {fair_value}")
+
+    # Pull the latest active rules from Active Playbook
+    try:
+        conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT source, rule FROM active_playbook ORDER BY created_at DESC LIMIT 5")
+        active_rules = cur.fetchall()
+        if active_rules:
+            rules_formatted = "\n".join([f"- [{r['source']}]: {r['rule']}" for r in active_rules])
+        else:
+            rules_formatted = "Standard value compounding frameworks apply."
+        cur.close()
+        conn.close()
+    except Exception as e:
+        rules_formatted = f"Error fetching playbook rules: {e}"
+
+    return (
+        f"=== KMI-30 UNIVERSE QUANTITATIVE SCREEN ===\n"
+        f"Liquid Capital Available: Rs. 5,225.16\n\n"
+        f"Calculated Intrinsic Values:\n" + "\n".join(evaluation_summary) + "\n\n"
+        f"=== ACTIVE INVESTMENT PLAYBOOK (LEARNED TACTICS) ===\n"
+        f"{rules_formatted}\n\n"
+        f"MANDATE FOR RESEARCH:\n"
+        f"You must evaluate the target asset against these learned tactics and your DCF valuations. In your response, explicitly state which learned rule guided your verdict."
+    )
+
+def force_cash_sweep() -> str:
+    """Forces the cash deployment sweep to run immediately."""
+    import schedulers
+    import asyncio
+    asyncio.create_task(schedulers.run_cash_deployment_sweep())
+    return "Cash sweep triggered manually."
+
+# 2. Bind them to the model
+agent_tools = [trigger_research, force_cash_sweep]
+gemini_client = genai.Client()
+
 @bot.event
 async def on_message(message):
     # 🛑 Ignore messages from the bot itself
     if message.author.bot:
+        return
+
+    # Direct Mentions or DMs logic for Gemini tool calling
+    if bot.user in message.mentions or not message.guild:
+        chat = gemini_client.chats.create(
+            model='gemini-3.5-flash',
+            config=types.GenerateContentConfig(
+                system_instruction=CORE_DIRECTIVE,
+                tools=agent_tools
+            )
+        )
+        response = chat.send_message(message.content)
+        await message.channel.send(response.text)
         return
 
     # 🚀 THE FULL-FLEDGED FORCE TEST TRIGGER
@@ -910,18 +1080,16 @@ from agent import fetch_quote_with_fallback, clean_float
 
 import pytz
 
-@tasks.loop(minutes=15)
+@tasks.loop(minutes=5) # Balanced scanning interval
 async def market_watchdog():
     try:
         # 1. Strict Market-Hours Time Gate
         tz_pkt = pytz.timezone('Asia/Karachi')
         now_pkt = datetime.now(tz_pkt)
         
-        # Block weekends (5 = Saturday, 6 = Sunday)
         if now_pkt.weekday() >= 5:
             return 
             
-        # 1. Block outside 09:30 AM - 03:30 PM trading hours
         current_time = now_pkt.time()
         market_open = datetime.strptime("09:30", "%H:%M").time()
         market_close = datetime.strptime("15:30", "%H:%M").time()
@@ -975,16 +1143,219 @@ async def market_watchdog():
         # Offload blocking database and API calls to a thread
         triggered_alerts = await asyncio.to_thread(fetch_market_alerts_sync)
 
-        # 2. Fire the Alerts back in the async loop
+        # 2. Fire the Alerts back in the async loop and WAKE UP LANGGRAPH
         for alert, live_price in triggered_alerts:
+            # A. Notify the user via DM
             user = await bot.fetch_user(int(alert['discord_user_id']))
             if user:
                 await user.send(f"🚨 **MARKET ALERT:** {alert['ticker']} has crossed your target of {alert['target_price']} PKR. Current price: **{live_price} PKR**.")
 
+            # B. Route directly to the DCF Agent in the main channel
+            channel_id_str = os.getenv("ALERT_CHANNEL_ID") or os.getenv("ADMIN_CHANNEL_ID")
+            if channel_id_str:
+                channel = bot.get_channel(int(channel_id_str))
+                if channel:
+                    await channel.send(f"🚨 **Internal Watchdog Triggered:** `{alert['ticker']}` crossed `{alert['condition']}` target of Rs. {alert['target_price']}. Live price: `Rs. {live_price}`. Initiating instant DCF valuation sweep...")
+                    
+                    from agent import get_agent
+                    agent_app = await get_agent()
+                    prompt = f"Market Alert: {alert['ticker']} triggered a {alert['condition']} signal at Rs. {live_price}. Run a calculate_dcf_valuation for {alert['ticker']} and give me a strict tactical verdict comparing fair value to the current price."
+                    initial_state = {"messages": [("user", prompt)]}
+                    config = {"configurable": {"thread_id": f"watchdog_alert_{alert['ticker']}_{alert['alert_id']}"}}
+                    
+                    ai_verdict = await agent_app.ainvoke(initial_state, config)
+                    await send_long_message(channel, ai_verdict)
+
     except Exception as e:
         print("🔴 CRITICAL WATCHDOG TRACEBACK:")
+        import traceback
         traceback.print_exc()
         await log_error_to_discord(f"market_watchdog:\n{traceback.format_exc()}")
+
+RECENT_OPPORTUNITY_ALERTS = {}
+
+@tasks.loop(hours=4) # Scans every 4 hours to preserve API tokens while catching daily market shifts
+async def passive_opportunity_scanner():
+    try:
+        import os
+        import asyncio
+        from agent import get_screened_opportunities, get_agent
+        
+        candidates = await asyncio.to_thread(get_screened_opportunities)
+        
+        channel_id_str = os.getenv("ADMIN_CHANNEL_ID")
+        if not channel_id_str:
+            return
+            
+        channel = bot.get_channel(int(channel_id_str))
+
+        # Zero hallucination escape hatch
+        if not candidates:
+            print("Scanner Pass: 0 tickers passed quantitative hurdles. Aborting pass.")
+            return
+
+        # Construct the strictly quantified payload
+        dataset_summary = "\n".join([
+            f"- {c['ticker']} ({c['thesis_type']}): Price = Rs. {c['live_price']}, "
+            f"MoS = {c['margin_of_safety_pct']}%, Div Yield = {c['dividend_yield_pct']}%, ROIC = {c['roic_pct']}%"
+            for c in candidates
+        ])
+
+        analysis_prompt = f"""
+The following {len(candidates)} stock(s) have passed all strict quantitative hurdles (ROIC >= 12%, Earnings Yield >= 15%, MoS >= 25%):
+
+{dataset_summary}
+
+TASK:
+1. Review recent market news, sector tailwinds, and earnings momentum for these candidates.
+2. Filter out value traps (e.g., one-off earnings spikes, impending regulatory fines).
+3. If a strong thesis exists, select the SINGLE best asymmetric opportunity and output the entry, intrinsic target, and strategic thesis.
+4. If none present a compelling near-term catalyst, respond with strictly "NO_ACTION".
+"""
+        agent_app = await get_agent()
+        state = {"messages": [("user", analysis_prompt)]}
+        verdict = await agent_app.ainvoke(state, {"configurable": {"thread_id": "market_wide_scanner"}})
+        
+        raw_content = verdict["messages"][-1].content
+        if isinstance(raw_content, list):
+            final_text = " ".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in raw_content]).strip()
+        else:
+            final_text = str(raw_content).strip()
+
+        # 3. Only notify Discord if the AI proves the thesis
+        if "NO_ACTION" not in final_text:
+            await channel.send("🚨 **AUTONOMOUS RESEARCH OPPORTUNITY DETECTED** 🚨\nExtracting quantitative parameters...")
+            
+            from pydantic import BaseModel
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            
+            class OpportunityParser(BaseModel):
+                ticker: str
+                price: float
+                intrinsic: float
+            
+            llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            parser = llm.with_structured_output(OpportunityParser)
+            try:
+                parsed_op = parser.invoke(f"Extract the exact ticker, current price, and target/intrinsic price from this thesis:\n{final_text}")
+                op = {"ticker": parsed_op.ticker, "price": float(parsed_op.price), "intrinsic": float(parsed_op.intrinsic)}
+            except Exception as e:
+                await channel.send(f"⚠️ **Parsing Error:** Could not extract trade metrics from the thesis. {e}")
+                op = None
+            
+            if op:
+                from risk_engine import calculate_kelly_position_size
+                from portfolio_manager import generate_daily_closing_summary
+
+                # Pull fresh portfolio state
+                summary = generate_daily_closing_summary()
+                tot_val = summary.get("total_portfolio_value", 34000.0)
+                liq_cash = summary.get("liquid_cash", 5225.16)
+                current_holdings = summary.get("current_holdings", [])
+
+                entry_price = float(op['price'])
+                target_price = float(op['intrinsic'])
+                stop_loss = round(entry_price * 0.85, 2)  # Strict 15% stop loss
+
+                projected_upside_pct = (target_price - entry_price) / entry_price
+                from macro_indicators import passes_real_yield_hurdle
+                if not passes_real_yield_hurdle(projected_upside_pct):
+                    await channel.send("🚫 **Trade blocked.** Nominal yield does not exceed annualized currency devaluation.")
+                else:
+                    # Calculate Quarter-Kelly Sizing
+                    sizing = calculate_kelly_position_size(
+                        entry_price=entry_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
+                        total_portfolio_value=tot_val,
+                        liquid_cash=liq_cash
+                    )
+    
+                    from risk_engine import check_sector_concentration
+                    sector_safe, sector_msg = check_sector_concentration(
+                        ticker=op['ticker'],
+                        proposed_allocation_pkr=sizing['allocated_capital'],
+                        total_portfolio_value=tot_val,
+                        current_holdings=current_holdings
+                    )
+                    
+                    if not sector_safe:
+                        await channel.send(sector_msg)
+                    else:
+                        # Format Execution Payload
+                        sizing_header = (
+                            f"🎯 **QUANTITATIVE EXECUTION DIRECTIVE: {op['ticker']}**\n"
+                            f"• **Entry**: Rs. {entry_price:,.2f} | **Target**: Rs. {target_price:,.2f} | **Stop-Loss**: Rs. {stop_loss:,.2f}\n"
+                            f"• **Payoff Ratio**: {sizing.get('payoff_ratio', 'N/A')}x | **Kelly Weight**: {sizing.get('fractional_kelly_pct', 0)}%\n"
+                            f"• **Recommended Action**: Buy **{sizing['recommended_shares']} shares** (Rs. {sizing['allocated_capital']:,.2f})\n"
+                            f"• **Portfolio Impact**: Allocates {sizing['portfolio_weight_pct']}% of total net worth\n"
+                            "--------------------------------------------------"
+                        )
+        
+                        await channel.send(sizing_header)
+                
+            from discord_bot import send_long_message # Ensure import is available
+            await send_long_message(channel, final_text)
+
+    except Exception as e:
+        print(f"🔴 SCANNER ERROR: {e}")
+
+from psx_watchdog import fetch_latest_psx_announcements
+
+@tasks.loop(minutes=15) # Check for new filings every 15 minutes during market hours
+async def psx_filing_watchdog():
+    try:
+        import os
+        from agent import get_agent, DYNAMIC_KMI30_TICKERS
+        
+        # 1. Fetch new filings off the main thread
+        new_filings = await asyncio.to_thread(fetch_latest_psx_announcements)
+        
+        if not new_filings:
+            return
+
+        channel_id_str = os.getenv("ADMIN_CHANNEL_ID")
+        if not channel_id_str:
+            return
+            
+        channel = bot.get_channel(int(channel_id_str))
+        agent_app = await get_agent()
+
+        for filing in new_filings:
+            ticker = filing['symbol'].upper()
+            
+            # 2. Strict Filter: Only process if it is in our KMI-30 dynamic memory
+            if len(DYNAMIC_KMI30_TICKERS) > 0 and ticker not in DYNAMIC_KMI30_TICKERS:
+                continue
+                
+            print(f"📄 Processing new PSX Filing for {ticker}...")
+            
+            # 3. AI Impact Analysis
+            prompt = f"""
+            You are a quantitative researcher. The Pakistan Stock Exchange just published a live corporate filing for {ticker}.
+            
+            Filing Title: {filing['title']}
+            Time: {filing['date']} at {filing['time']}
+            
+            Analyze the title of this disclosure. Does this sound like a material event (e.g., earnings result, dividend, board shakeup, acquisition)? 
+            If it is just routine corporate noise (e.g., "Loss of Share Certificate"), output exactly: IGNORE.
+            If it is material, give me a brutal 2-sentence breakdown of what this likely means for the stock's fundamental valuation.
+            """
+            
+            state = {"messages": [("user", prompt)]}
+            verdict = await agent_app.ainvoke(state, {"configurable": {"thread_id": f"filing_{ticker}_{filing['time']}"}})
+            
+            raw_content = verdict["messages"][-1].content
+            final_text = " ".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in raw_content]).strip() if isinstance(raw_content, list) else str(raw_content).strip()
+
+            # 4. Route to Discord if material
+            if "IGNORE" not in final_text.upper():
+                await channel.send(f"🚨 **NEW OFFICIAL PSX FILING: {ticker}** 🚨\n**Title:** `{filing['title']}`")
+                from discord_bot import send_long_message 
+                await send_long_message(channel, final_text)
+
+    except Exception as e:
+        print(f"🔴 PSX FILING WATCHDOG ERROR: {e}")
 
 import yfinance as yf
 from datetime import datetime
@@ -994,28 +1365,60 @@ def get_dividend_data(ticker: str):
     Fetches the most recent cash dividend and its Ex-Date using Yahoo Finance.
     Returns a tuple: (dividend_amount, ex_date_string) or (0.0, None)
     """
+    dividend_amount = 0.0
+    ex_date_text = None
+    success = False
+    
     try:
         # Yahoo Finance tracks PSX tickers with the .KA suffix
         stock = yf.Ticker(f"{ticker.upper()}.KA")
         
         dividends = stock.dividends
         
-        # If no dividend history exists, return safely
-        if dividends.empty:
-            return 0.0, None
+        if dividends is not None and not dividends.empty:
+            # Extract the most recent dividend payout
+            latest_date = dividends.index[-1]
+            dividend_amount = float(dividends.iloc[-1])
+            ex_date_text = latest_date.strftime('%d %b %Y')
+            success = True
             
-        # Extract the most recent dividend payout
-        latest_date = dividends.index[-1]
-        dividend_amount = float(dividends.iloc[-1])
-        
-        # Format the date to match the '13 Aug 2026' string structure in your watchdog loop
-        ex_date_text = latest_date.strftime('%d %b %Y')
-        
-        return dividend_amount, ex_date_text
+            # Cache the successful result in portfolio_holdings
+            conn = DB_POOL.getconn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE portfolio_holdings SET dividend_amount = %s, ex_dividend_date = %s WHERE ticker = %s",
+                    (dividend_amount, ex_date_text, ticker.upper())
+                )
+                conn.commit()
+                cur.close()
+            except Exception as db_e:
+                print(f"Failed to cache dividend for {ticker}: {db_e}")
+            finally:
+                DB_POOL.putconn(conn)
 
     except Exception as e:
         print(f"yfinance failed for {ticker}: {str(e)}")
-        return 0.0, None
+        
+    if not success:
+        # Fallback to local cache in portfolio_holdings
+        try:
+            conn = DB_POOL.getconn()
+            try:
+                import psycopg2.extras
+                cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                cur.execute("SELECT dividend_amount, ex_dividend_date FROM portfolio_holdings WHERE ticker = %s LIMIT 1", (ticker.upper(),))
+                row = cur.fetchone()
+                if row and row['dividend_amount'] and row['ex_dividend_date']:
+                    dividend_amount = float(row['dividend_amount'])
+                    ex_date_text = row['ex_dividend_date']
+                cur.close()
+            finally:
+                DB_POOL.putconn(conn)
+        except Exception as cache_e:
+            print(f"Cache fallback failed for {ticker}: {cache_e}")
+
+    return dividend_amount, ex_date_text
 
 async def test_scraper(ctx, ticker: str):
     await ctx.send(f"Scraping PSX portal for {ticker.upper()}...")
@@ -1362,15 +1765,38 @@ async def run_email_sweep():
                 f"Subject: {subject}\n"
                 f"Sender: {sender}\n\n"
                 f"Content:\n{body_text[:12000]}\n\n"
-                f"Extract the core market outlook, key target stocks mentioned, and economic triggers."
+                f"Extract the core market outlook, key target stocks mentioned, and economic triggers.\n"
+                f"At the very end of your response, output a strict machine-readable sentiment tag for every ticker mentioned in this exact format:\n"
+                f"<SENTIMENT_MAPPING>\n"
+                f'{{"SYS": "BEARISH", "HUBC": "BULLISH", "POL": "BULLISH", "NBP": "BEARISH", "DGKC": "BULLISH", "SAZEW": "NEUTRAL"}}\n'
+                f"</SENTIMENT_MAPPING>\n"
+                f"Rules for sentiment: Use ONLY \"BULLISH\", \"BEARISH\", or \"NEUTRAL\"."
             )
-            inputs = {"messages": [HumanMessage(content=prompt)]}
-            unique_id = f"email_{uuid.uuid4().hex}"
-            config = {"configurable": {"session_id": unique_id, "thread_id": unique_id}}
-            agent_app = await get_agent()
-            response = await agent_app.ainvoke(inputs, config)
+            max_retries = 3
             
-            raw_output = response["messages"][-1].content
+            for attempt in range(max_retries):
+                try:
+                    chat = client.aio.chats.create(
+                        model="gemini-3.5-flash",
+                        config=types.GenerateContentConfig(
+                            tools=None,
+                            temperature=0.2
+                        )
+                    )
+                    response = await chat.send_message(prompt)
+                    break 
+                except errors.ServerError as e:
+                    if "503" in str(e):
+                        print(f"⚠️ Gemini API Overloaded. Retrying in 10 seconds... ({attempt+1}/{max_retries})")
+                        await asyncio.sleep(10)
+                    else:
+                        print(f"❌ Unhandled API Error: {e}")
+                        break
+            else:
+                print(f"❌ Failed to process email after {max_retries} attempts. Skipping.")
+                continue
+            
+            raw_output = response.text
             if isinstance(raw_output, list):
                 final_text = "".join(
                     block.get("text", "") for block in raw_output 
@@ -1379,6 +1805,7 @@ async def run_email_sweep():
             else:
                 final_text = str(raw_output)
             final_messages.append(f"📄 **{subject}**\n{final_text}")
+            apply_research_sentiment_to_db(final_text)
         
         print("📧 [Email Sweep] Summarization complete. Sending to Discord.")
         
@@ -1420,7 +1847,7 @@ async def start_scheduled_sweeps():
         # 1. YouTube Knowledge Sweep (12:00 AM)
         if current_time == "00:00":
             print("🕒 Triggering YouTube Knowledge Sweep (00:00)...")
-            await run_youtube_sweep()
+            sweep_youtube_transcripts()
             
         # 2. Email Sweeps (12:00 PM and 4:00 PM)
         elif current_time in ["12:00", "16:00"]:
@@ -1435,14 +1862,24 @@ async def start_scheduled_sweeps():
         # Check every 60 seconds to prevent tight CPU looping
         await asyncio.sleep(60)
 
+_booted = False
+
 @bot.event
 async def on_ready():
-    print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})")
-    await bot.tree.sync()
-    
-    await update_psx_tickers()
-    
-    bot.add_view(ApprovalView())
+    global _booted
+    if not _booted:
+        print(f"✅ Bot successfully connected to Discord as {bot.user} (ID: {bot.user.id})")
+        await bot.tree.sync()
+        
+        # Boot Sequence: Execute ONLY once
+        await update_psx_tickers()
+        from agent import update_kmi30_tickers
+        await update_kmi30_tickers()
+        
+        bot.add_view(ApprovalView())
+        _booted = True
+    else:
+        print("⚠️ Bot reconnected to Discord WebSocket. Skipping redundant boot sequence.")
     
     current_date = datetime.now().date()
     for task_name, task_func in [
@@ -1468,6 +1905,15 @@ async def on_ready():
     if not check_price_targets.is_running():
         check_price_targets.start()
         print("✅ Background price check loop started successfully.")
+    if not passive_opportunity_scanner.is_running():
+        passive_opportunity_scanner.start()
+        print("✅ Autonomous passive opportunity scanner started successfully.")
+    if not psx_filing_watchdog.is_running():
+        psx_filing_watchdog.start()
+        print("✅ Autonomous PSX filing watchdog started successfully.")
+    if not system_heartbeat.is_running():
+        system_heartbeat.start()
+        print("✅ System heartbeat started successfully.")
 
 async def buy_stock(ctx, ticker: str, quantity: float, price: float):
     """Command format: !buy [TICKER] [QTY] [PRICE]"""
@@ -1542,6 +1988,37 @@ async def check_price_targets():
         await log_error_to_discord(f"check_price_targets:\n{str(e)}")
 
 # Background loop started in on_ready
+
+import time
+import psutil
+
+BOT_START_TIME = time.time()
+
+@tasks.loop(hours=12)
+async def system_heartbeat():
+    try:
+        import os
+        channel_id = os.getenv("ADMIN_CHANNEL_ID")
+        if not channel_id:
+            return
+            
+        channel = bot.get_channel(int(channel_id))
+        if not channel:
+            return
+            
+        uptime_hours = round((time.time() - BOT_START_TIME) / 3600, 2)
+        
+        try:
+            mem = psutil.virtual_memory()
+            mem_str = f"{mem.percent}%"
+        except Exception:
+            mem_str = "OK"
+            
+        msg = f"🟢 [SYSTEM HEARTBEAT] Dedicated Node Online. Memory {mem_str}. Uptime: {uptime_hours} hours."
+        await channel.send(msg)
+    except Exception as e:
+        print(f"Heartbeat Error: {e}")
+
 
 def run_bot():
     token = os.getenv("DISCORD_BOT_TOKEN")

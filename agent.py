@@ -15,6 +15,109 @@ import matplotlib
 matplotlib.use('Agg') # Crucial: Prevents crashes on headless cloud servers
 import matplotlib.pyplot as plt
 from cachetools import cached, TTLCache
+from portfolio_manager import get_live_price_and_change
+from valuation_engine import calculate_graham_intrinsic
+
+def get_screened_opportunities() -> list[dict]:
+    """
+    Executes a deterministic two-stage quantitative screening pass
+    across the active fundamentals database.
+    """
+    # Assuming get_db_connection is available from valuation_engine or locally
+    from valuation_engine import get_db_connection
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Stage 1: Static Fundamental Hurdle (SQL)
+    query = """
+        SELECT ticker, eps, roic, fcf, historical_growth, annual_dps 
+        FROM fundamentals 
+        WHERE fcf > 0 
+          AND roic >= 0.12 
+          AND eps > 0;
+    """
+    cursor.execute(query)
+    raw_candidates = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    qualified_candidates = []
+
+    # Stage 2: Dynamic Pricing & Valuation Hurdle (Python)
+    for row in raw_candidates:
+        ticker = row[0]
+        eps = float(row[1])
+        roic = float(row[2])
+        fcf = float(row[3])
+        historical_growth = float(row[4]) if row[4] is not None else 0.0
+        annual_dps = float(row[5]) if row[5] is not None else 0.0
+        
+        live_price, _ = get_live_price_and_change(ticker)
+        if live_price <= 0:
+            continue
+
+        dividend_yield = (annual_dps / live_price) if live_price > 0 else 0.0
+        
+        # Use the master function to fetch dividend yield to respect DRY
+        if dividend_yield == 0.0:
+            from portfolio_manager import get_fundamentals
+            ticker_data = get_fundamentals(ticker)
+            dividend_yield = ticker_data.get('dividend_yield', 0.0)
+            
+            # The Hard Stop: Anomaly alert for dividend heavyweights
+            if dividend_yield <= 0.0 and ticker in ["HUBC", "EFERT", "MEBL", "LUCK", "FFC", "ENGRO", "POL", "OGDC", "PPL", "SYS", "MTL"]:
+                try:
+                    import os
+                    import asyncio
+                    from discord_bot import bot
+                    channel_id_str = os.getenv("ADMIN_CHANNEL_ID")
+                    if channel_id_str and bot and bot.loop and bot.is_ready():
+                        channel = bot.get_channel(int(channel_id_str))
+                        if channel:
+                            asyncio.run_coroutine_threadsafe(
+                                channel.send(f"⚠️ **ANOMALY ALERT:** `{ticker}` (Dividend Heavyweight) is returning 0.0% yield. Investigate pipeline failure immediately."),
+                                bot.loop
+                            )
+                except Exception as e:
+                    print(f"[Agent] Failed to send anomaly alert for {ticker}: {e}")
+        
+        # 1. Earnings Yield Check (Hurdle >= 15%)
+        earnings_yield = eps / live_price
+        if earnings_yield < 0.15:
+            continue
+
+        # 2. Deep Value Track: Margin of Safety
+        intrinsic_value = calculate_graham_intrinsic(eps, historical_growth)
+        if intrinsic_value > 0:
+            margin_of_safety_pct = ((intrinsic_value - live_price) / intrinsic_value) * 100
+        else:
+            margin_of_safety_pct = 0.0
+
+        is_deep_value = margin_of_safety_pct >= 25.0
+
+        # 3. Income Compounder Track: Safe Dividend Yield
+        is_income_play = False
+        if fcf > 0 and roic >= 0.15 and dividend_yield >= 0.12:
+            is_income_play = True
+
+        # 4. The Dual-Track Gate
+        if not is_deep_value and not is_income_play:
+            continue  # Fails both institutional tracks, drop it.
+
+        qualified_candidates.append({
+            "ticker": ticker,
+            "live_price": round(live_price, 2),
+            "intrinsic_value": intrinsic_value,
+            "eps": eps,
+            "roic_pct": round(roic * 100, 2),
+            "earnings_yield_pct": round(earnings_yield * 100, 2),
+            "margin_of_safety_pct": round(margin_of_safety_pct, 2),
+            "dividend_yield_pct": round(dividend_yield * 100, 2),
+            "fcf": fcf,
+            "thesis_type": "Deep Value" if is_deep_value else "Income Compounder"
+        })
+
+    return qualified_candidates
 
 # Helper: Fetch Quote with Corporate Action Fallback
 @cached(cache=TTLCache(maxsize=100, ttl=900))
@@ -120,7 +223,71 @@ import asyncio
 from scheduler_config import scheduler
 
 # KMI-30 Shariah Compliant Tickers
-SHARIAH_COMPLIANT = ["SYS", "LUCK", "MARI", "FCCL", "OGDCL"]
+import aiohttp
+import json
+import os
+
+# Dynamic memory allocation for Shariah compliance
+DYNAMIC_KMI30_TICKERS = []
+
+async def update_kmi30_tickers():
+    """Fetches the live KMI-30 Shariah constituents from the PSX API with local caching."""
+    global DYNAMIC_KMI30_TICKERS
+    print("🔄 Fetching live KMI-30 Shariah constituents from PSX...")
+    
+    # PSX DPS API endpoint for index weightages
+    url = "https://dps.psx.com.pk/api/index_weightages/KMI30"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*"
+            }
+            async with session.get(url, headers=headers, timeout=20) as response:
+                if response.status == 200:
+                    data = await response.json(content_type=None)
+                    
+                    # Parse the JSON array to extract ticker symbols
+                    tickers = [item.get('symbol') for item in data if item.get('symbol')]
+                    
+                    if len(tickers) >= 30:
+                        DYNAMIC_KMI30_TICKERS = tickers
+                        # Write the fail-safe cache
+                        with open('kmi30_cache.json', 'w') as f:
+                            json.dump(tickers, f)
+                        print(f"✅ Loaded {len(tickers)} KMI-30 tickers into active memory.")
+                        return
+                    else:
+                        print(f"⚠️ PSX API returned only {len(tickers)} KMI-30 tickers. Suspected API truncation. Triggering cache fallback.")
+                else:
+                    print(f"⚠️ PSX API HTTP {response.status}. Triggering cache fallback.")
+    except Exception as e:
+        print(f"🚨 KMI-30 Fetch Error: {str(e)}")
+        
+    # Tier 1 Failsafe: Local JSON Cache
+    try:
+        if os.path.exists('kmi30_cache.json'):
+            with open('kmi30_cache.json', 'r') as f:
+                DYNAMIC_KMI30_TICKERS = json.load(f)
+            print("✅ Loaded KMI-30 tickers from local cache fallback.")
+        else:
+            print("⚠️ No KMI-30 cache found. Triggering Tier 2 Hardcoded Failsafe.")
+            # Tier 2 Failsafe: Core KMI-30 constituents to prevent the bot from going blind
+            tier_2_failsafe = [
+                "SYS", "LUCK", "MARI", "FCCL", "OGDC", "PPL", "HUBC", "MEBL", "ENGRO", "EFERT",
+                "POL", "PSO", "TRG", "ATRL", "NRL", "CHCC", "DGKC", "MLCF", "PIOC", "THALL",
+                "MTL", "AGP", "SEARL", "MUGHAL", "ISL", "INIL", "AVN", "GATM", "NML", "PKGS"
+            ]
+            DYNAMIC_KMI30_TICKERS = tier_2_failsafe
+            
+            # Write the cache so Tier 1 works on the next reboot
+            with open('kmi30_cache.json', 'w') as f:
+                json.dump(tier_2_failsafe, f)
+            print("✅ Tier 2 Failsafe loaded and local cache generated.")
+            
+    except Exception as e:
+        print(f"🚨 CRITICAL Cache Load Error: {e}")
 
 # 1. Refactored Quote Tool
 @tool
@@ -556,8 +723,10 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     WARNING: Only KMI-30 Shariah Compliant tickers can be traded.
     """
     ticker = ticker.upper()
-    if ticker not in SHARIAH_COMPLIANT:
-        return f"System Error: Transaction Rejected. {ticker} is not in the KMI-30 Shariah compliant list."
+    
+    # Enforce strict verification against the dynamic memory pool
+    if ticker not in DYNAMIC_KMI30_TICKERS and len(DYNAMIC_KMI30_TICKERS) > 0:
+        return f"System Error: Transaction Rejected. {ticker} is not currently in the KMI-30 Shariah compliant index."
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
@@ -661,7 +830,100 @@ async def manual_email_sweep_tool() -> str:
     return "The institutional email sweep has been successfully executed and ingested."
 
 
+@tool
+async def calculate_dcf_valuation(ticker: str) -> str:
+    """
+    Calculates an automated Discounted Cash Flow (DCF) intrinsic equity value 
+    for a given PSX ticker based on cached fundamentals, net debt, and growth rates.
+    """
+    def _sync_dcf():
+        try:
+            import os
+            import psycopg2
+            import psycopg2.extras
+            conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # Fetching FCF, Shares, Growth, PLUS Cash and Debt
+            cur.execute("SELECT fcf, shares_outstanding, historical_growth, total_cash, total_debt FROM fundamentals WHERE ticker = %s", (ticker.upper(),))
+            ticker_data = cur.fetchone()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            return {"error": f"Database connection failed while fetching {ticker}: {str(e)}"}
+
+        if not ticker_data:
+            return {"error": f"Insufficient fundamental data in the database to run a DCF on {ticker.upper()}."}
+
+        fcf_base = float(ticker_data.get("fcf", 0) or 0)
+        shares = float(ticker_data.get("shares_outstanding", 0) or 0)
+        growth_rate = float(ticker_data.get("historical_growth", 0) or 0)
+        
+        # New: Balance Sheet Extraction for Equity Value
+        total_cash = float(ticker_data.get("total_cash", 0) or 0)
+        total_debt = float(ticker_data.get("total_debt", 0) or 0)
+        
+        if fcf_base <= 0 or shares <= 0:
+             return {"error": f"Invalid FCF or Shares Outstanding data for {ticker.upper()}. Cannot compute."}
+
+        from macro_indicators import get_sbp_policy_rate
+        raw_sbp_rate = get_sbp_policy_rate()
+        
+        # 1. NORMALIZE THE DISCOUNT RATE
+        # Cap the Risk-Free Rate at a 10-year historical average (e.g., 12%) 
+        # to prevent temporary macro policy spikes from destroying terminal value.
+        normalized_rfr = min(raw_sbp_rate, 0.12)
+        equity_risk_premium = 0.07 
+        discount_rate = normalized_rfr + equity_risk_premium
+        terminal_growth = 0.04   
+        
+        # 2. TWO-STAGE TAPERED GROWTH
+        # Hyper-growth decays as the business scales. 
+        # Linearly taper the historical growth down toward the terminal rate over 5 years.
+        projected_fcf = []
+        current_fcf = fcf_base
+        
+        for i in range(1, 6):
+            tapered_growth = growth_rate - ((growth_rate - terminal_growth) * (i / 5))
+            current_fcf *= (1 + tapered_growth)
+            projected_fcf.append(current_fcf)
+            
+        pv_fcf = sum(ff / ((1 + discount_rate) ** (i + 1)) for i, ff in enumerate(projected_fcf))
+        
+        terminal_value = (projected_fcf[-1] * (1 + terminal_growth)) / (discount_rate - terminal_growth)
+        pv_terminal = terminal_value / ((1 + discount_rate) ** 5)
+        
+        # The Mathematical Correction
+        enterprise_value = pv_fcf + pv_terminal
+        equity_value = enterprise_value + total_cash - total_debt
+        
+        intrinsic_value_per_share = equity_value / shares
+        
+        return {
+            "ticker": ticker.upper(),
+            "fcf": fcf_base,
+            "fair_value": round(intrinsic_value_per_share, 2),
+            "ev": round(enterprise_value, 2),
+            "equity": round(equity_value, 2)
+        }
+
+    # Offload blocking math/DB queries safely using our async thread framework
+    result = await asyncio.to_thread(_sync_dcf)
+    
+    if "error" in result:
+        return result["error"]
+    
+    return (
+        f"📊 **DCF Valuation Model: {result['ticker']}**\n"
+        f"- **Intrinsic Fair Value (Equity Basis):** Rs. {result['fair_value']} per share\n"
+        f"- **Enterprise Value:** Rs. {result['ev']} | **Equity Value (Post-Debt):** Rs. {result['equity']}\n"
+        f"- **Methodology:** 5-Year FCF Projection @ {result['fcf']} base cash flow.\n"
+        f"*(Compare this intrinsic value against the current market price to determine margin of safety).* "
+    )
+
+
 tools = [
+    calculate_dcf_valuation,
     get_stock_quote,
     generate_stock_chart,
     get_portfolio_status,
@@ -681,55 +943,20 @@ tools = [
 ]
 
 
-SYSTEM_PROMPT = """You are a sharp, seasoned, and straightforward human investment partner focused on the Pakistan Stock Exchange (PSX).
+from langchain_core.messages import SystemMessage
 
-### CONVERSATIONAL RULES & TONE
-1. Speak naturally like a real human trading partner sitting at the same desk.
-2. DO NOT format your responses like a rigid corporate PDF or automated calculator.
-3. NEVER use generic corporate headings like "Target Asset Allocation", "Rationale", "Definitive Verdict", or "Execution Plan".
-4. Speak in clean, conversational paragraphs. Integrate data, tickers, and prices naturally into your sentences.
-5. Be direct, candid, and brutally honest about risks, valuations, and entry timing.
+SYSTEM_PROMPT = SystemMessage(content='''
+You are an analytical, grounded proprietary trader managing a high-conviction retail portfolio on the Pakistan Stock Exchange (PSX).
 
-### STRICT MATHEMATICAL CONSTRAINTS
-1. HARD BUDGET LIMIT: You must never suggest or finalize an allocation where the total cost exceeds the user's available dry powder/cash.
-2. ALWAYS perform the exact math before replying:
-   Total Required = Sum of (Shares * Price) for all proposed buys.
-   Verify that Total Required <= Available Capital.
-3. If user capital is Rs. 10,000, the sum of all purchases must be strictly less than or equal to Rs. 10,000.
+CAPITAL SCALE & EXECUTION:
+- Your standard allocation per trade is strictly between Rs. 5,000 and Rs. 10,000.
+- Never dismiss, demean, or ignore cash balances in this range. Rs. 5,200 is actionable capital, not a "meager" or "tiny" float. Size positions accordingly without complaining about the size.
 
-IMMUTABLE FINANCIAL RULES:
-- You must NEVER calculate, guess, or modify financial figures.
-- Use ONLY the exact numbers provided in the EXACT_FINANCIAL_GROUND_TRUTH payload for Net Worth, Invested Capital, Cash, and PnL.
-- Any discrepancy or made-up figure is a critical compliance violation.
-
-### CORE DIRECTIVES
-1. **Zero Hallucination:** You must NEVER invent, fabricate, or guess data. If a tool returns no data, explicitly state: "Data Unavailable."
-2. **Strict Data Parsing:** Maintain absolute structural integrity when extracting data.
-3. **Live Research:** Proactively use `web_search` for current market data.
-4. **Tool Routing:** 
-   - For executing or simulating live broker trades, strictly use `execute_trade_tool`.
-   - For manually modifying portfolio holdings: use `add_portfolio_position` to log new shares, `remove_portfolio_position` to log partial sells, and `clear_portfolio_position` to completely wipe a holding. Do not pass negative numbers to add_portfolio_position.
-
-### OUTPUT FORMATTING (STRICT)
-- Speak naturally and logically, like a real human expert. 
-- Be brutally concise. If the answer can be a one or two-liner, do not write an essay.
-- Draw on past conversation history ONLY to extract relevant points needed for the immediate answer. 
-- State the important information, make your necessary points, and stop. No fluff, no filler text.
-- **Error Transparency:** If a tool returns an error or failure string, relay the EXACT error details provided by the tool. Do not abstract it behind a generic "system error" message.
-- If a tool returns a file path like `[FILE: /tmp/...]`, include that exact string unchanged. Never convert local file paths into Markdown image syntax.
-
-### PROACTIVE COVERAGE EXPANSION
-When you conduct market research — whether browsing news, analysing a sector, or answering a fundamentals question — you must actively look for strong prospects that are not yet in our monitored universe. If you identify a company that meets ALL of the following criteria:
-  1. It is listed on the PSX and ideally KMI-30 / Shariah compliant.
-  2. You can derive a credible fundamental target price (DCF, earnings yield, or peer P/E basis).
-  3. You can define a clear stop-loss level based on structural support or a margin-of-safety floor.
-  4. You can state a historically grounded fair P/E for that specific company (not a generic sector average).
-
-
-CRITICAL EXECUTION RULE:
-If you need to analyze multiple stocks, compare data, or fetch multiple pieces of information, YOU MUST CALL ALL RELEVANT TOOLS IN PARALLEL ON THE FIRST TURN. Do not execute individual queries sequentially.
-
-Then you MUST call `add_to_watchlist_tool` immediately — do not just mention it in text. Populate all four parameters from your own analysis. The tool will scrape the live TTM P/E from the PSX portal and commit the entry to the database. The 18:00 daily sweep will then track it automatically from that point forward."""
+TONE & PERSONA:
+- Brutally honest, straightforward, and logical.
+- Speak like a real human trader. Zero corporate jargon, zero Wall Street pretension, and no empty fluff.
+- Never act like a people-pleaser. Challenge bad setups with hard data and clear reasoning.
+''')
 
 
 _agent_app = None
@@ -802,18 +1029,21 @@ def analyst_node(state: TradeEvaluationState):
     else:
         structured_llm = llm.with_structured_output(TradeEvaluationSchema)
         prompt = f"""
-        You are an expert quantitative analyst.
+        You are a quantitative value-investing risk manager. Analyze the asset's sell or trim trigger.
+        You are strictly forbidden from using technical analysis, Moving Averages, RSI, or momentum.
+        
         Ticker: {state['ticker']}
         Trigger: {state['trigger_type']}
         Quantitative Data: {state['quantitative_data']}
         Market Context: {state['rag_context']}
-        
-        You will receive a live feed of today's Pakistani financial news. Synthesize these headlines to identify active macroeconomic headwinds, tailwinds, and sector-specific catalysts. Only recommend a WATCHLIST CANDIDATE if the mathematical target price from the database aligns with a positive fundamental news catalyst.
-        
         Previous Risk Manager Critique: {state.get('risk_critique', 'None')}
-        
-        Formulate a trade thesis. Address the risk manager's critique if it exists.
-        Provide a brutally objective verdict.
+
+        Your reasoning must be based EXCLUSIVELY on:
+        1. Valuation Disconnect: Compare the current market price against the DCF Intrinsic Value. Is it overvalued?
+        2. Capital Reallocation: Does selling or trimming free up cash for a better fundamental margin of safety elsewhere?
+        3. Concentration Risk: Is the position size violating risk parameters?
+
+        Provide a concise, hard-hitting analytical verdict explaining why the portfolio action is mathematically necessary. Address the risk manager's critique if it exists.
 
         COVERAGE EXPANSION DIRECTIVE: If your analysis reveals that this ticker, or any closely related company in the same sector, represents a strong fundamental prospect that is NOT currently in our active portfolio, explicitly state in your thesis: the calculated target price, your stop-loss level, and your historically grounded fair P/E for that company. Flag it clearly as a WATCHLIST CANDIDATE so the orchestration layer can route it to add_to_watchlist_tool.
         """

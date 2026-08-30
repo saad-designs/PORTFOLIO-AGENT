@@ -6,6 +6,8 @@ from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_
 import traceback
 from discord_bot import bot, get_last_run, update_last_run, send_long_message
 from langchain_google_genai import ChatGoogleGenerativeAI
+import yfinance as yf
+from portfolio_manager import get_db_connection
 
 # Define your admin channel ID here or pull from os.environ
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", 0))
@@ -17,6 +19,7 @@ logger = logging.getLogger("PortfolioAgentSchedulers")
 import json
 
 STATE_DATE_FILE = "scheduler_date_state.json"
+_has_run_closing_report_today = None
 
 def get_last_run_date(task_name):
     if os.path.exists(STATE_DATE_FILE):
@@ -44,71 +47,161 @@ def set_last_run_date(task_name, date_str):
 alert_cooldowns = {}
 technical_alert_cooldowns = {}
 
+async def run_weekly_fundamentals_sweep():
+    """
+    Weekly Scraper to update TTM FCF and 5/3-Year CAGR for DCF calculations.
+    Runs once a week to prevent API latency during live evaluations.
+    """
+    logger.info("🤖 [SCHEDULER] Starting Weekly Fundamentals Sweep for DCF data...")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT ticker FROM fundamentals")
+        tickers = [row[0] for row in cur.fetchall()]
+        
+        for ticker in tickers:
+            try:
+                stock = yf.Ticker(f"{ticker.upper()}.KA")
+                
+                # 1. TTM FCF Logic with strict column-count guardrails
+                cashflow = stock.quarterly_cashflow
+                fcf = None
+                if not cashflow.empty and 'Free Cash Flow' in cashflow.index:
+                    fcf_row = cashflow.loc['Free Cash Flow'].dropna()
+                    if len(fcf_row) >= 4:
+                        fcf = fcf_row.iloc[:4].sum()
+                    elif len(fcf_row) > 0:
+                        # Fragmented data: Annualize what is available
+                        fcf = (fcf_row.sum() / len(fcf_row)) * 4
+                
+                # Fallback to Annual Cashflow if quarterly is fully missing/invalid
+                if fcf is None:
+                    annual_cf = stock.cashflow
+                    if not annual_cf.empty and 'Free Cash Flow' in annual_cf.index:
+                        fcf_annual_row = annual_cf.loc['Free Cash Flow'].dropna()
+                        if len(fcf_annual_row) > 0:
+                            fcf = fcf_annual_row.iloc[0]
+                
+                # 2. CAGR Logic (true 5-year, fallback to true 3-year)
+                cagr = None
+                financials = stock.financials
+                if not financials.empty and 'Diluted EPS' in financials.index:
+                    eps_row = financials.loc['Diluted EPS'].dropna()
+                    
+                    # Try true 5-Year CAGR (requires 6 years of data, index 0 to 5)
+                    if len(eps_row) >= 6:
+                        current = eps_row.iloc[0]
+                        past = eps_row.iloc[5]
+                        if past > 0 and current > 0:
+                            cagr = (current / past) ** (1/5) - 1
+                    
+                    # Try true 4-Year CAGR if we only have 5 years (index 0 to 4)
+                    if cagr is None and len(eps_row) >= 5:
+                        current = eps_row.iloc[0]
+                        past = eps_row.iloc[4]
+                        if past > 0 and current > 0:
+                            cagr = (current / past) ** (1/4) - 1
+                            
+                    # Try true 3-Year CAGR (requires 4 years of data, index 0 to 3)
+                    if cagr is None and len(eps_row) >= 4:
+                        current = eps_row.iloc[0]
+                        past = eps_row.iloc[3]
+                        if past > 0 and current > 0:
+                            cagr = (current / past) ** (1/3) - 1
+                            
+                    # Try true 2-Year CAGR if we only have 3 years (index 0 to 2)
+                    if cagr is None and len(eps_row) >= 3:
+                        current = eps_row.iloc[0]
+                        past = eps_row.iloc[2]
+                        if past > 0 and current > 0:
+                            cagr = (current / past) ** (1/2) - 1
+                
+                # Update DB only if valid data was found
+                if fcf is not None or cagr is not None:
+                    # Construct dynamic update
+                    set_clauses = []
+                    params = []
+                    if fcf is not None:
+                        set_clauses.append("fcf = %s")
+                        params.append(float(fcf))
+                    if cagr is not None:
+                        set_clauses.append("historical_growth = %s")
+                        params.append(float(cagr))
+                        
+                    params.append(ticker)
+                    query = f"UPDATE fundamentals SET {', '.join(set_clauses)} WHERE ticker = %s"
+                    cur.execute(query, tuple(params))
+                    conn.commit()
+                else:
+                    logger.warning(f"⚠️ [Weekly Sweep] No FCF or CAGR data found for {ticker}. Skipping.")
+                
+            except Exception as e:
+                logger.error(f"Error updating fundamentals for {ticker}: {e}")
+                conn.rollback()
+        
+        cur.close()
+        conn.close()
+        logger.info("✅ [SCHEDULER] Weekly Fundamentals Sweep completed.")
+    except Exception as e:
+        logger.error(f"Failed Weekly Fundamentals Sweep: {e}")
+
 async def run_youtube_sweep():
     """
     12:00 AM: YouTube Knowledge Sweep
     Extracts playlist transcripts, processes summaries, and logs them into memory.
     """
-    logger.info("🤖 [00:00] Initializing YouTube Knowledge Sweep...")
+    print("🕒 Triggering YouTube Knowledge Sweep (00:00)...")
     try:
-        # Placeholder for targeted web/RSS/API extraction routine
-        # In production, this pulls latest transcripts/articles into raw text strings
-        class HarvestedItem:
-            def __init__(self, source, title, content, date):
-                self.source = source
-                self.title = title
-                self.content = content
-                self.date = date
-
-        harvested_items = [
-            HarvestedItem("ARN", "Sector Rotation", "Recent analysis on sector rotation towards high-dividend energy stocks.", str(datetime.now())),
-            HarvestedItem("InvestKaar", "Value Compounding", "Long-term value compounding framework updates for cyclical downturns.", str(datetime.now())),
-            HarvestedItem("Jawad Hafeez", "Psychology", "Psychology of holding winners and cutting emotional losers in flat markets.", str(datetime.now()))
-        ]
+        from youtube_scraper import fetch_mentor_transcripts
+        mentors = ["Abdul Rehman Najam", "Mashal Khan", "Jawad Hafeez", "Investkaar", "Sarmaaya Financials", "AKD Securities Limited", "KTrade PK"]
         
-        # Inside your automated YouTube/Email loop:
-        for item in harvested_items:
-            # 1. Automatic Silent Vector Ingestion (No !learn needed)
-            await asyncio.to_thread(
-                vector_db.add_texts,
-                texts=[item.content],
-                metadatas=[{"source": item.source, "title": item.title, "date": item.date}]
-            )
+        # 300 seconds (5 minutes) absolute maximum execution time
+        # asyncio.to_thread prevents a synchronous scraper from freezing your entire async bot
+        transcripts = await asyncio.wait_for(asyncio.to_thread(fetch_mentor_transcripts, mentors), timeout=300.0)
+        
+        if transcripts:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from ingestion import SWEEP_FORMAT_PROMPT, save_learned_rule
+            from vector_brain import ingest_knowledge_tool
+            import re
             
-            # 2. LLM Summarization & Discord Output
-            try:
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-3.5-flash-lite",
-                    google_api_key=os.getenv("GOOGLE_API_KEY", "")
-                )
-                prompt = f"Summarize this briefly for Discord:\nTitle: {item.title}\nSource: {item.source}\nContent: {item.content}"
-                summary_response = await asyncio.to_thread(llm.invoke, prompt)
+            llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
+            
+            for mentor, text in transcripts.items():
+                prompt = SWEEP_FORMAT_PROMPT + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
+                response = await asyncio.to_thread(llm.invoke, prompt)
                 
-                content_val = summary_response.content
-                if isinstance(content_val, list):
-                    cleaned_summary = "".join(part.get("text", "") for part in content_val if isinstance(part, dict))
-                elif isinstance(content_val, dict):
-                    cleaned_summary = content_val.get("text", str(content_val))
+                # Handle potential list response from Gemini content
+                formatted_text = response.content
+                if isinstance(formatted_text, list):
+                    formatted_text = "".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in formatted_text])
                 else:
-                    cleaned_summary = str(content_val)
+                    formatted_text = str(formatted_text)
                 
-                alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
+                # Extract rule if it exists
+                try:
+                    rule_match = re.search(r'!rule\s+(.+)', formatted_text, re.IGNORECASE)
+                    if rule_match:
+                        rule = rule_match.group(1).strip()
+                        # Clean up formatting if the LLM adds asterisks or markdown to the rule line itself
+                        rule = rule.replace('**', '').strip()
+                        await asyncio.to_thread(save_learned_rule, mentor, rule)
+                except Exception as e:
+                    print(f"⚠️ [YouTube Sweep] Error extracting rule for {mentor}: {e}")
+                
+                # Post structured sweep to Discord
                 if alert_channel:
-                    discord_msg = f"🧠 **Silent Vector Ingestion Complete**\n**Source:** {item.source}\n**Title:** {item.title}\n**Summary:** {cleaned_summary}"
-                    await alert_channel.send(discord_msg)
-            except Exception as e:
-                logger.error(f"Summarization error: {e}")
-            
-        logger.info("✅ [00:00] YouTube Knowledge Sweep successfully updated with fresh mental models.")
+                    await send_long_message(alert_channel, f"🎥 **Knowledge Ingestion Report:**\n{formatted_text}")
+                    
+                # Store the high-signal structured output in Vector DB instead of rambling text
+                await asyncio.to_thread(ingest_knowledge_tool.invoke, {"input_text_or_url": formatted_text})
+                
+        print("✅ [YouTube Sweep] Knowledge ingestion complete.")
+    except asyncio.TimeoutError:
+        print("⚠️ [YouTube Sweep] FATAL: Connection timed out after 5 minutes. Aborting to protect system loop.")
     except Exception as e:
-        error_msg = f"❌ [YouTube Sweep Error]: {str(e)}"
-        logger.error(error_msg)
-        
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            tb_str = traceback.format_exc()
-            discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (YouTube)**\n```python\n{tb_str[-1900:]}\n```"
-            await alert_channel.send(discord_msg)
+        print(f"⚠️ [YouTube Sweep] Error: {e}")
 
 async def run_email_sweep():
     """
@@ -201,10 +294,104 @@ async def run_business_portfolio_sweep():
 
 async def run_intraday_price_loop():
     """
-    Periodic 60-minute loop during market hours to evaluate profit and rebalancing triggers.
+    Periodic 10-minute loop during market hours to evaluate profit and rebalancing triggers,
+    and forward-looking exit/exhaustion signals.
     """
     logger.info(f"🔄 [{datetime.now().strftime('%H:%M')}] Initializing Intraday Price & Alert Loop...")
     try:
+        # --- 1. EXIT & EXHAUSTION EVALUATOR ---
+        from risk_engine import evaluate_exit_and_exhaustion
+        from agent import fetch_stocks_with_fallback
+        from portfolio_manager import get_db_connection
+        import pandas as pd
+        from datetime import timedelta
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT p.ticker, p.shares as total_quantity, p.avg_buy_price as average_price, w.target_price, p.research_sentiment, p.sentiment_updated_at
+            FROM portfolio_holdings p
+            LEFT JOIN watchlist_targets w ON p.ticker = w.ticker
+            WHERE p.shares > 0
+        ''')
+        holdings = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        alert_channel = bot.get_channel(PROSPECT_CHANNEL_ID)
+        now_ts = datetime.now().timestamp()
+        
+        for row in holdings:
+            ticker, shares, avg_price, target_price, research_sentiment, sentiment_updated_at = row
+            target_price = float(target_price) if target_price else 0.0
+            
+            if sentiment_updated_at is None:
+                days_since_update = 999  # Force it to decay to NEUTRAL if no timestamp exists
+            else:
+                days_since_update = (datetime.now() - sentiment_updated_at).days
+            
+            if days_since_update > 30:
+                research_sentiment = "NEUTRAL"
+            
+            
+            end_date = datetime.today()
+            start_date = end_date - timedelta(days=60)
+            raw_hist, _ = fetch_stocks_with_fallback(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+            
+            # Ensure dataframe is chronologically ordered before risk engine validation
+            if raw_hist is not None and not raw_hist.empty:
+                if isinstance(raw_hist.index, pd.DatetimeIndex):
+                    raw_hist = raw_hist.sort_index(ascending=True)
+                elif 'Date' in raw_hist.columns:
+                    raw_hist['Date'] = pd.to_datetime(raw_hist['Date'])
+                    raw_hist = raw_hist.sort_values('Date', ascending=True)
+
+            if not raw_hist.empty and len(raw_hist) >= 30:
+                if raw_hist is None or raw_hist.empty or 'Close' not in raw_hist.columns:
+                    print(f"⚠️ [Risk Engine] Corrupt or missing OHLC data. Skipping ticker evaluation.")
+                    continue
+                
+                current_price = raw_hist['Close'].iloc[-1]
+                
+                eval_res = evaluate_exit_and_exhaustion(
+                    ticker=ticker,
+                    current_price=current_price,
+                    entry_price=float(avg_price),
+                    target_price=target_price,
+                    fair_value=target_price,
+                    ohlc_df=raw_hist,
+                    latest_research_sentiment=research_sentiment
+                )
+                
+                action = eval_res.get("action", "HOLD")
+                if action in ["TAKE_PROFIT_PEAK", "TAKE_PROFIT_OVERBOUGHT", "EXIT_DOWNSIDE_WARNING"]:
+                    cooldown_key = f"{ticker}_{action}"
+                    if now_ts - alert_cooldowns.get(cooldown_key, 0) >= 4 * 3600:
+                        alert_cooldowns[cooldown_key] = now_ts
+                        
+                        price = eval_res.get("price", current_price)
+                        rsi = eval_res.get("rsi", "N/A")
+                        reason = eval_res.get("reason", "")
+                        pct_change = ((price - float(avg_price)) / float(avg_price)) * 100 if float(avg_price) > 0 else 0
+                        
+                        if action == "EXIT_DOWNSIDE_WARNING":
+                            msg = f"🚨 **DOWNSIDE RISK ALERT:** {ticker}\n\n"
+                            msg += f"**Current Price:** Rs. {price:.2f} ({pct_change:+.2f}%)\n\n"
+                            msg += f"**Diagnostic Reason:** {reason}\n\n"
+                            msg += f"**Recommendation:** SELL / EXIT. Technical structure points to further downside before stabilization."
+                        else:
+                            msg = f"💰 **TARGET REACHED / MAXIMUM VALUATION:** {ticker}\n\n"
+                            msg += f"**Current Price:** Rs. {price:.2f} ({pct_change:+.2f}%)\n\n"
+                            msg += f"**Target Price:** Rs. {target_price:.2f} | **RSI:** {rsi}\n\n"
+                            msg += f"**Diagnostic Reason:** {reason}\n\n"
+                            msg += f"**Recommendation:** TAKE PROFIT. Lock in gains or place tight trailing stops."
+                            
+                        if alert_channel:
+                            await alert_channel.send(msg)
+                        else:
+                            print(msg)
+
+        # --- 2. EXISTING PROFIT AND REBALANCE TRIGGERS ---
         from portfolio_manager import check_profit_and_rebalance_triggers
         alerts = await asyncio.to_thread(check_profit_and_rebalance_triggers)
         
@@ -242,6 +429,14 @@ async def run_intraday_price_loop():
             start_date = end_date - timedelta(days=30)
             raw_hist, _ = fetch_stocks_with_fallback(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
             
+            # Ensure dataframe is chronologically ordered before risk engine validation
+            if raw_hist is not None and not raw_hist.empty:
+                if isinstance(raw_hist.index, pd.DatetimeIndex):
+                    raw_hist = raw_hist.sort_index(ascending=True)
+                elif 'Date' in raw_hist.columns:
+                    raw_hist['Date'] = pd.to_datetime(raw_hist['Date'])
+                    raw_hist = raw_hist.sort_values('Date', ascending=True)
+
             momentum_data = {}
             if not raw_hist.empty and len(raw_hist) >= 5:
                 closes = raw_hist['Close'] if 'Close' in raw_hist.columns else raw_hist.iloc[:, 3]
@@ -272,6 +467,25 @@ async def run_intraday_price_loop():
             result = await asyncio.to_thread(graph.invoke, state)
             ai_verdict = result.get("analyst_thesis", "No thesis generated.")
             
+            import math
+            parsed_rationale = ai_verdict
+            ai_action = "Sell"
+            
+            try:
+                decision_data = json.loads(ai_verdict)
+                ai_action = decision_data.get("action", "Sell").title()
+                parsed_rationale = decision_data.get("rationale", "No rationale provided.")
+                trim_percentage = float(decision_data.get("trim_percentage", 0.0))
+                
+                current_shares = alert.get("current_shares", 0)
+                
+                if ai_action.upper() == "TRIM" and trim_percentage > 0:
+                    shares_to_sell = math.floor(current_shares * (trim_percentage / 100.0))
+                    alert["shares_to_sell"] = shares_to_sell
+                    alert["cash_generated"] = shares_to_sell * alert.get("current_price", 0)
+            except json.JSONDecodeError:
+                print(f"[ERROR] LLM returned malformed JSON for {ticker}.")
+
             # Format actionable alert message
             if alert_type == "stale_target_warning":
                 msg = f"⚠️ **STALE TARGET WARNING**\n"
@@ -283,10 +497,10 @@ async def run_intraday_price_loop():
                 msg += f"**Current Price:** Rs. {alert.get('current_price', 0):.2f}\n"
                 if 'gain_pct' in alert:
                     msg += f"**Gain:** {alert['gain_pct']:.2f}%\n"
-                msg += f"**Action:** Sell **{alert.get('shares_to_sell', 0)}** shares\n"
+                msg += f"**Action:** {ai_action} **{alert.get('shares_to_sell', 0)}** shares\n"
                 msg += f"**Expected Cash Gen:** Rs. {alert.get('cash_generated', 0):,.2f}\n"
                 msg += f"**Est. New Balance:** Rs. {alert.get('new_cash_balance', 0):,.2f}\n\n"
-                msg += f"🧠 **AI Contextual Verdict (Multi-Agent):**\n{ai_verdict}\n"
+                msg += f"🧠 **AI Contextual Verdict (Multi-Agent):**\n{parsed_rationale}\n"
             
             if alert_channel:
                 await alert_channel.send(msg)
@@ -419,10 +633,108 @@ async def run_intraday_technical_scanner():
             tb_str = traceback.format_exc()
             await alert_channel.send(f"⚠️ **CRITICAL SWEEP FAILURE (Tech Scanner)**\n```python\n{tb_str[-1900:]}\n```")
 
+async def run_monthly_macro_sync():
+    """Monthly background task to update macro variables via Chromium."""
+    from macro_indicators import fetch_inflation_via_browser
+    from portfolio_manager import get_db_connection
+    
+    new_rate = await fetch_inflation_via_browser()
+    
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO system_macro_state (key, value, updated_at)
+                    VALUES ('cpi_inflation_rate', %s, NOW())
+                    ON CONFLICT (key) DO UPDATE 
+                    SET value = EXCLUDED.value, updated_at = NOW();
+                """, (new_rate,))
+                conn.commit()
+        finally:
+            conn.close()
+        logger.info(f"✅ Macro sync complete. New CPI: {new_rate}")
+    else:
+        logger.error("🚨 Macro sync failed: No DB connection.")
+
+async def fetch_kmi30_valuations():
+    conn = get_db_connection()
+    try:
+        from psycopg2.extras import RealDictCursor
+        from market_data_scraper import fetch_live_price
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("SELECT ticker, target_price FROM watchlist_targets WHERE target_price > 0")
+            targets = cursor.fetchall()
+            kmi30_data = []
+            for row in targets:
+                price = fetch_live_price(row['ticker'])
+                if price and price > 0:
+                    kmi30_data.append({'ticker': row['ticker'], 'live_price': price, 'fair_value': float(row['target_price'])})
+            return kmi30_data
+    except Exception as e:
+        logger.error(f"Error fetching KMI30 valuations: {e}")
+        return []
+    finally:
+        conn.close()
+
+async def run_cash_deployment_sweep():
+    logger.info("Executing Intraday Cash Deployment Sweep...")
+    # 1. Check Liquid Cash
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        cash_res = cursor.fetchone()
+        liquid_cash = float(cash_res[0]) if cash_res else 0.0
+    except Exception as e:
+        logger.error(f"Error fetching liquid cash: {e}")
+        liquid_cash = 0.0
+    finally:
+        conn.close()
+    
+    if liquid_cash < 1000:
+        return # Insufficient capital, abort sweep silently
+        
+    # 2. Fetch current prices and DCF values from your database
+    kmi30_data = await fetch_kmi30_valuations() 
+    
+    actionable_setups = []
+    
+    for asset in kmi30_data:
+        ticker = asset['ticker']
+        price = asset['live_price']
+        intrinsic = asset['fair_value']
+        
+        if intrinsic <= 0:
+            continue
+            
+        # Calculate Margin of Safety
+        discount = ((intrinsic - price) / intrinsic) * 100
+        
+        # Rigid Logic: Only flag if trading at least 20% BELOW intrinsic value
+        if discount >= 20.0:
+            shares_affordable = int(liquid_cash // price)
+            actionable_setups.append(
+                f"**{ticker}**: Price Rs. {price} | DCF Rs. {intrinsic} | **{discount:.1f}% Undervalued** | Can buy {shares_affordable} shares."
+            )
+            
+    # 3. Dispatch to Discord only if a threshold is crossed
+    if actionable_setups:
+        payload = (
+            f"🚨 **Cash Deployment Alert** 🚨\n"
+            f"Liquid Capital: Rs. {liquid_cash}\n\n"
+            f"The following KMI-30 assets have crossed the 20% Margin of Safety threshold:\n"
+            + "\n".join(actionable_setups)
+        )
+        channel = bot.get_channel(ADMIN_CHANNEL_ID)
+        if channel:
+            await send_long_message(channel, payload)
+
 async def start_scheduled_sweeps():
     """
     Async background scheduler loop grouping tasks into distinct temporal buckets.
     """
+    global _has_run_closing_report_today
     logger.info("🚀 Master background scheduled sweeps started (Intraday Loop, 00:00 YouTube, 12/16:00 Email, 18:00 Business).")
     
     # Ensure Discord bot is ready before doing anything that requires fetching channels
@@ -471,6 +783,16 @@ async def start_scheduled_sweeps():
             
             return target_time <= now <= window_end
 
+        # 0. Monthly Macro Sync (2nd of every month at 10:00)
+        if current_date.day == 2 and should_run("monthly_macro_sync", 10):
+            await run_monthly_macro_sync()
+            update_last_run("monthly_macro_sync")
+            
+        # 0.5. Weekly Fundamentals Sweep (Sunday at 02:00)
+        if current_date.weekday() == 6 and should_run("weekly_fundamentals", 2):
+            await run_weekly_fundamentals_sweep()
+            update_last_run("weekly_fundamentals")
+
         # 1. YouTube Knowledge Sweep (12:00 AM)
         if should_run("youtube", 0):
             await run_youtube_sweep()
@@ -498,11 +820,29 @@ async def start_scheduled_sweeps():
             await run_business_portfolio_sweep()
             update_last_run("business_evening")
             
-        # 4. Intraday Price & Alert Loop (Every 60 minutes, weekdays 09:15 - 16:30)
+        # 4. Intraday Price & Alert Loop (Every 10 minutes, weekdays 09:15 - 16:30)
         if current_date.weekday() < 5: # Monday = 0, Friday = 4
+            
+            # 5x Intraday Cash Deployment Sweep
+            if should_run_window("cash_sweep_10_00", 10, 0):
+                await run_cash_deployment_sweep()
+                update_last_run("cash_sweep_10_00")
+            if should_run_window("cash_sweep_11_30", 11, 30):
+                await run_cash_deployment_sweep()
+                update_last_run("cash_sweep_11_30")
+            if should_run_window("cash_sweep_13_00", 13, 0):
+                await run_cash_deployment_sweep()
+                update_last_run("cash_sweep_13_00")
+            if should_run_window("cash_sweep_14_30", 14, 30):
+                await run_cash_deployment_sweep()
+                update_last_run("cash_sweep_14_30")
+            if should_run_window("cash_sweep_15_15", 15, 15):
+                await run_cash_deployment_sweep()
+                update_last_run("cash_sweep_15_15")
+
             if (now.hour > 9 or (now.hour == 9 and now.minute >= 15)) and (now.hour < 16 or (now.hour == 16 and now.minute <= 30)):
                 last_intraday_ts = get_last_run("intraday_loop")
-                if now.timestamp() - last_intraday_ts >= 3600: # 3600 seconds = 60 minutes
+                if now.timestamp() - last_intraday_ts >= 600: # 600 seconds = 10 minutes
                     await run_intraday_price_loop()
                     update_last_run("intraday_loop")
                     
@@ -512,14 +852,17 @@ async def start_scheduled_sweeps():
                     update_last_run("technical_scanner")
                     
         # 5. Daily Closing Summary
-        # Monday - Thursday (0-3) at 16:00
-        # Friday (4) at 17:00
-        if current_date.weekday() <= 3 and should_run("daily_summary_mt", 16):
-            await run_daily_closing_briefing()
-            update_last_run("daily_summary_mt")
-        elif current_date.weekday() == 4 and should_run("daily_summary_f", 17):
-            await run_daily_closing_briefing()
-            update_last_run("daily_summary_f")
+        if current_date.weekday() <= 3 and now.hour == 16 and now.minute == 0:
+            if _has_run_closing_report_today != current_date:
+                logger.info("[SCHEDULER] Triggering Market Close Report...")
+                await run_daily_closing_briefing()
+                _has_run_closing_report_today = current_date
+                
+        elif current_date.weekday() == 4 and now.hour == 17 and now.minute == 0:
+            if _has_run_closing_report_today != current_date:
+                logger.info("[SCHEDULER] Triggering Market Close Report...")
+                await run_daily_closing_briefing()
+                _has_run_closing_report_today = current_date
             
         # Check every 60 seconds to prevent tight CPU looping
         await asyncio.sleep(60)

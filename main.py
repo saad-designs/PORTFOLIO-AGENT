@@ -23,11 +23,14 @@ except ImportError as e:
 from dotenv import load_dotenv
 load_dotenv()
 
+import rate_limiter
+rate_limiter.apply_global_rate_limits()
+
 import psycopg2
 import psycopg2.extras
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import agent
@@ -74,10 +77,13 @@ async def lifespan(app: FastAPI):
     # Grab the active event loop
     loop = asyncio.get_running_loop()
     
-    from schedulers import initialize_background_schedulers
+    from schedulers import initialize_background_schedulers, run_youtube_sweep
     # Initialize background intelligence loops
     initialize_background_schedulers(loop)
     print("🚀 Portfolio Agent core running with autonomous background learning.")
+    
+    print("🚀 Triggering YouTube & Business Sweep catch-up...")
+    asyncio.create_task(run_youtube_sweep())
     
     yield
     # Shutdown
@@ -107,6 +113,73 @@ async def discord_webhook(payload: WebhookPayload):
     config = {"configurable": {"thread_id": payload.thread_id}}
     await app.state.graph.ainvoke(Command(resume=payload.action), config=config)
     return {"status": "success", "action": payload.action}
+
+async def process_webhook_alert(ticker: str, signal: str, price: float):
+    import os
+    import traceback
+    
+    print(f"⚡ [Webhook Task] Background worker started for {ticker}...")
+    
+    try:
+        from discord_bot import bot, send_long_message
+        from agent import get_agent  # FIX: Import the async getter, not the empty variable
+        
+        # 1. Verify Channel Access
+        channel_id_str = os.getenv("ALERT_CHANNEL_ID") or os.getenv("ADMIN_CHANNEL_ID")
+        if not channel_id_str:
+            print("❌ [Webhook Task] ERROR: ALERT_CHANNEL_ID or ADMIN_CHANNEL_ID is not set!")
+            return
+            
+        channel = bot.get_channel(int(channel_id_str))
+        if not channel:
+            print(f"❌ [Webhook Task] ERROR: Bot could not find the Discord channel {channel_id_str}.")
+            return
+
+        print(f"✅ [Webhook Task] Channel found. Sending initial Discord alert...")
+        await channel.send(f"🚨 **Real-Time Webhook Triggered:** `{ticker}` hit signal `{signal}` at price `Rs. {price}`. Initiating instant DCF valuation sweep...")
+
+        # 2. Force AI Execution
+        print(f"🧠 [Webhook Task] Waking up LangGraph agent for {ticker}...")
+        prompt = f"Market Alert: {ticker} triggered a {signal} signal at Rs. {price}. Run a calculate_dcf_valuation for {ticker} and give me a strict tactical verdict comparing fair value to the current price."
+        initial_state = {"messages": [("user", prompt)]}
+        
+        # FIX: Ensure the graph is compiled and fetched before invoking
+        agent_app = await get_agent()
+        
+        config = {"configurable": {"thread_id": f"webhook_alert_{ticker}"}}
+        ai_verdict = await agent_app.ainvoke(initial_state, config)
+        
+        # 3. Route Output
+        print(f"✅ [Webhook Task] Agent analysis complete. Pushing to Discord...")
+        await send_long_message(channel, ai_verdict)
+        print(f"🚀 [Webhook Task] Webhook pipeline fully complete for {ticker}.")
+
+    except Exception as e:
+        print(f"\n❌ [CRITICAL WEBHOOK ERROR] The background task crashed:")
+        traceback.print_exc()
+        print("\n")
+
+@app.post("/webhook/market-alert")
+async def handle_market_alert(request: Request, background_tasks: BackgroundTasks):
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    ticker = data.get("ticker")
+    signal_type = data.get("signal")
+    price = data.get("price")
+
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker symbol missing")
+
+
+    # Trigger agent background workflow using BackgroundTasks wrapped in our dispatcher
+    thread_id = str(uuid.uuid4())
+    
+    background_tasks.add_task(process_webhook_alert, ticker, signal_type, price)
+
+    return {"status": "success", "processed_ticker": ticker}
 
 @app.post("/trigger")
 async def trigger_agent():

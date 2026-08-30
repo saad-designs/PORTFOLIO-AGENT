@@ -70,7 +70,7 @@ def get_transcript(video_id):
     try:
         # Primary Attempt: Fetch transcripts in preferred language order
         print("DIAGNOSTIC: Attempting fast anonymous pull...")
-        data = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'ur', 'hi', 'en-US'])
+        data = YouTubeTranscriptApi.get_transcript(video_id)
         transcript = " ".join([entry['text'] for entry in data])
         
         print("DIAGNOSTIC: Transcript pulled successfully via fast API!")
@@ -82,9 +82,53 @@ def get_transcript(video_id):
         try:
             return get_transcript_fallback(video_id)
         except Exception as yt_err:
-            print(f"⚠️ Fallback pipeline failed for {video_id}: {yt_err}")
+            print(f"[WARNING] Fallback pipeline failed for {video_id}: {yt_err}")
             return ""
 
+
+def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") -> str:
+    """
+    Transcribes downloaded YouTube audio using Gemini 3.5 Transcribe.
+    """
+    if not os.path.exists(audio_file_path):
+        print(f"[ERROR] Audio file not found: {audio_file_path}")
+        return ""
+
+    print(f"[DIAGNOSTIC] Uploading {audio_file_path} to Gemini 3.5 Transcribe...")
+    
+    try:
+        # 1. Upload the audio payload
+        audio_file = client.files.upload(file=audio_file_path)
+        
+        # 2. Call the Interactions API for smart transcription
+        response = client.interactions.create(
+            model="gemini-3.5-transcribe",
+            input=[
+                {
+                    "type": "audio",
+                    "uri": audio_file.uri,
+                    "mime_type": mime_type
+                }
+            ],
+            generation_config={
+                "transcription_config": {
+                    # Passing an empty list forces dynamic language auto-detection
+                    "language_codes": [],
+                }
+            }
+        )
+        
+        # 3. Ruthlessly purge the remote file to prevent cloud storage bloat
+        client.files.delete(name=audio_file.name)
+        
+        print("[DIAGNOSTIC] Transcription successful.")
+        
+        # Extract the formatted text from the response
+        return getattr(response, "text", str(response))
+
+    except Exception as e:
+        print(f"[ERROR] Gemini Transcribe pipeline failed: {e}")
+        return ""
 
 @retry(
     retry=retry_if_exception_type((Timeout, ConnectionError)),
@@ -122,21 +166,7 @@ def get_transcript_fallback(video_id):
                 break
                 
         if temp_audio_file:
-            print(f"DIAGNOSTIC: Uploading {temp_audio_file} to Gemini...")
-            gemini_file = client.files.upload(file=temp_audio_file)
-            
-            try:
-                prompt = "Listen to this market analysis video audio carefully (often in Urdu/English). Transcribe and summarize the key stock market commentary, macroeconomic observations, mentioned PSX ticker symbols, and the core strategic takeaway."
-                response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=[prompt, gemini_file]
-                )
-                
-                print("DIAGNOSTIC: Successfully generated audio summary with Gemini.")
-                return response.text
-            finally:
-                print("DIAGNOSTIC: Purging audio file from Gemini...")
-                client.files.delete(name=gemini_file.name)
+            return transcribe_mentor_audio(temp_audio_file)
         else:
             raise Exception("Audio download failed or file not found")
             
@@ -169,7 +199,21 @@ def get_transcript_fallback(video_id):
         # Cleanup local audio file
         if temp_audio_file and os.path.exists(temp_audio_file):
             print(f"DIAGNOSTIC: Cleaning up local temporary file {temp_audio_file}...")
-            os.remove(temp_audio_file)
+            try:
+                os.remove(temp_audio_file)
+            except Exception as cleanup_err:
+                print(f"[WARNING] Could not clean up {temp_audio_file}: {cleanup_err}")
+
+def is_video_processed(video_id: str) -> bool:
+    try:
+        with open("processed_videos.txt", "r") as f:
+            return video_id in f.read()
+    except FileNotFoundError:
+        return False
+
+def mark_video_processed(video_id: str):
+    with open("processed_videos.txt", "a") as f:
+        f.write(f"{video_id}\n")
 
 def fetch_mentor_transcripts(mentor_names: list) -> dict:
     transcripts = {}
@@ -185,11 +229,19 @@ def fetch_mentor_transcripts(mentor_names: list) -> dict:
             if not video_id:
                 continue
                 
+            if is_video_processed(video_id):
+                print(f"Video {video_id} already ingested. Skipping.")
+                continue
+                
             transcript = get_transcript(video_id)
-            if transcript:
-                transcripts[name] = transcript
+            if not transcript or len(transcript.strip()) < 15 or transcript.startswith("Title: "):
+                print(f"DIAGNOSTIC: Audio ingestion yielded no speech or only metadata for {name}. Skipping LLM.")
+                continue
+                
+            transcripts[name] = transcript
+            mark_video_processed(video_id)
         except Exception as e:
-            print(f"⚠️ Unhandled error extracting transcript for {name}: {e}. Skipping mentor.")
+            print(f"[ERROR] Unhandled error extracting transcript for {name}: {e}. Skipping mentor.")
             continue
             
     return transcripts

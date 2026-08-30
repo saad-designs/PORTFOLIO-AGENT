@@ -7,6 +7,40 @@ import logging
 
 logger = logging.getLogger("PortfolioAgentTechnicalEngine")
 
+def sanitize_ohlc_data(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """
+    Enforces chronological order and strict mathematical constraints on OHLC data.
+    Purges corrupted rows to prevent indicator hallucination.
+    """
+    if df is None or df.empty:
+        return df
+
+    initial_len = len(df)
+    
+    # 1. Force chronological order (prevents moving average distortion)
+    df = df.sort_index()
+    
+    # 2. Drop rows missing critical price data
+    df = df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+    
+    # 3. Enforce strict OHLC mathematical reality
+    valid_rows = (
+        (df['High'] >= df['Low']) &
+        (df['High'] >= df['Open']) &
+        (df['High'] >= df['Close']) &
+        (df['Low'] <= df['Open']) &
+        (df['Low'] <= df['Close'])
+    )
+    
+    df = df[valid_rows]
+    
+    dropped = initial_len - len(df)
+    if dropped > 0:
+        print(f"[SANITIZER] {ticker}: Purged {dropped} corrupted row(s) violating OHLC constraints.")
+        
+    return df
+
+
 def fetch_technical_signals(ticker: str) -> dict:
     """
     Fetches the last 3 months of daily data for a PSX ticker via Yahoo Finance.
@@ -21,6 +55,12 @@ def fetch_technical_signals(ticker: str) -> dict:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
+        if df.empty or len(df) < 25:
+            return None
+            
+        # Sanitize before returning to the math engine
+        df = sanitize_ohlc_data(df, ticker)
+        
         if df.empty or len(df) < 25:
             return None
             

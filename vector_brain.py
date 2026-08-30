@@ -19,6 +19,43 @@ embeddings = GoogleGenerativeAIEmbeddings(
 
 from langchain_postgres import PGVector
 from utils import normalize_ticker
+import asyncio
+from duckduckgo_search import DDGS
+
+async def execute_live_web_search(query: str):
+    print(f"🧠 [Hybrid Gate] RAG Vector Search: Scant context found for {query}. Triggering live web search.")
+    
+    def _sync_search():
+        results = []
+        try:
+            # v8.1.1 syntax uses the standard DDGS context manager
+            with DDGS() as ddgs:
+                for r in ddgs.text(query, max_results=3):
+                    results.append(r)
+        except Exception as e:
+            print(f"Web search failed: {e}")
+        return results
+
+    # Execute the synchronous scraper in a thread so it doesn't hang the Discord bot
+    return await asyncio.to_thread(_sync_search)
+
+def get_web_search_tool():
+    """
+    Initializes Tavily search tool safely without throwing Pydantic validation errors
+    if the API key is missing.
+    """
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    
+    if not tavily_key:
+        print("[WARNING] TAVILY_API_KEY missing from environment. Web search fallback disabled.")
+        return None
+
+    try:
+        from langchain_tavily import TavilySearch
+        return TavilySearch(max_results=3)
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize Tavily search: {e}")
+        return None
 
 # Persistent Supabase pgvector Storage
 db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
@@ -125,7 +162,7 @@ import asyncio
 
 class TradeEvaluationSchema(BaseModel):
     step_by_step_analysis: str = Field(description="Step-by-step internal monologue breaking down the logic")
-    quantitative_assessment: str = Field(description="Evaluation of momentum, RSI, and quantitative metrics")
+    quantitative_assessment: str = Field(description="Evaluation of DCF Intrinsic Value and fundamental metrics")
     risk_critique_response: str = Field(description="Defense of the trade thesis against core risk parameters")
     ticker: str = Field(description="The normalized ticker symbol (e.g., 'MEBL')")
     action: str = Field(description="Must be 'HOLD', 'SELL', or 'TRIM'")
@@ -153,17 +190,14 @@ async def get_market_context(ticker: str) -> str:
     results = await asyncio.to_thread(_similarity_search)
     
     if not results or len(results) < 2:
-        print(f"🧠 [Hybrid Gate] RAG Vector Search: Scant context found for {ticker}. Triggering live web search.")
         try:
-            from langchain_community.tools.tavily_search import TavilySearchResults
-            search_tool = TavilySearchResults(max_results=3)
             query = f"{ticker} PSX Pakistan stock market news"
-            live_snippets = await asyncio.to_thread(search_tool.invoke, {"query": query})
+            live_snippets = await execute_live_web_search(query)
             context = f"Live Web Search Snippets:\n{live_snippets}\n"
             if results:
                  context += "\nArchived Vector Context:\n" + "\n\n".join([doc.page_content for doc in results])
         except Exception as e:
-            print(f"⚠️ Tavily search unavailable ({e}). Proceeding with quantitative data only.")
+            print(f"[WARNING] Live web search query failed for {ticker}: {e}")
             if results:
                  context = "\nArchived Vector Context:\n" + "\n\n".join([doc.page_content for doc in results])
             else:
