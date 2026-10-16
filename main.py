@@ -78,8 +78,11 @@ from pydantic import BaseModel
 from typing import Optional
 import re
 import json
+if not os.getenv("GEMINI_API_KEY") and os.getenv("GOOGLE_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 from google import genai
-client = genai.Client(http_options={"timeout": 300000})
+raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
 import agent
 from langgraph.types import Command
 import uuid
@@ -88,7 +91,7 @@ import os
 import discord_bot
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsapp_media_payload
+from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsapp_media_payload, process_whatsapp_text_payload
 from scheduler_config import scheduler
 import aiohttp
 from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_whatsapp_monitored_chats
@@ -135,7 +138,7 @@ async def run_startup_orchestration():
                     async with session.post(
                         "http://127.0.0.1:3000/api/catchup",
                         json={"since_timestamp": last_ts, "target_chat_ids": monitored_chats},
-                        timeout=aiohttp.ClientTimeout(total=60)
+                        timeout=aiohttp.ClientTimeout(total=120)
                     ) as resp:
                         data = await resp.json()
                         print(f"✅ [Startup Orchestrator] WhatsApp catch-up complete: {data.get('replayed', 0)} messages replayed.")
@@ -307,41 +310,71 @@ async def handle_market_alert(request: Request, background_tasks: BackgroundTask
     return {"status": "success", "processed_ticker": ticker}
 
 class WhatsAppMessagePayload(BaseModel):
-    chat_id: str
-    sender: str
-    body: str
-    timestamp: int
-    is_group: bool
+    chat_id: Optional[str] = None
+    sender: Optional[str] = "KTrade"
+    body: Optional[str] = ""
+    timestamp: Optional[int] = None
+    is_group: Optional[bool] = True
+    source: Optional[str] = "KTrade"
+    has_media: Optional[bool] = False
+    media_base64: Optional[str] = None
+    mime_type: Optional[str] = None
+    filename: Optional[str] = None
 
 @app.post("/api/ingest-whatsapp-message")
 async def ingest_whatsapp_message(payload: WhatsAppMessagePayload):
+    import base64
     from portfolio_manager import supabase
     
-    # Extract uppercase words that look like stock symbols for diagnostics
-    import re
-    symbols = re.findall(r'\b[A-Z]{3,5}\b', payload.body)
-    # Exclude common non-stock words if necessary, but TEST_SIGNAL etc.
-    symbols = [s for s in symbols if s in ["HUBC", "LUCK"]] # Explicitly filtering for the test for safety, or just leave it. Let's just do a simple check.
-    if not symbols:
-        if "HUBC" in payload.body: symbols.append("HUBC")
-        if "LUCK" in payload.body: symbols.append("LUCK")
-        
-    print(f"POST /api/ingest-whatsapp-message 200 OK")
-    print(f"Diagnostic parsing: {payload.sender} - Extracted stock symbols: ({', '.join(symbols)})")
-    
+    chat_id = payload.chat_id or "KTrade"
+    sender = payload.sender or "KTrade"
+    body = payload.body or ""
+    source = payload.source or "KTrade"
+    timestamp = payload.timestamp or int(time.time())
+
+    # Optional archival to Supabase messages table
     if supabase:
         try:
             supabase.table("messages").insert({
-                "chat_id": payload.chat_id,
-                "sender": payload.sender,
-                "body": payload.body,
-                "timestamp": payload.timestamp,
+                "chat_id": chat_id,
+                "sender": sender,
+                "body": body[:500] if body else f"[{payload.filename or 'Media Attachment'}]",
+                "timestamp": timestamp,
                 "is_group": payload.is_group
             }).execute()
+        except Exception:
+            pass
+
+    # 1. Multimodal payload (image charts, PDF research, or voice notes)
+    if payload.has_media and payload.media_base64:
+        try:
+            file_bytes = base64.b64decode(payload.media_base64)
+            mimetype = payload.mime_type or "image/png"
+            filename = payload.filename or "media_attachment"
+            print(f"📥 [WhatsApp Webhook] Multimodal Ingestion: {filename} ({mimetype}, {len(file_bytes)} bytes) from {source}")
+            result = await process_whatsapp_media_payload(
+                file_bytes=file_bytes,
+                filename=filename,
+                mimetype=mimetype,
+                caption=body,
+                source=source,
+                timestamp=timestamp
+            )
+            return {"status": "success", "multimodal": True, "result": result}
         except Exception as e:
-            print(f"Supabase insert error: {e}")
-            
-    return {"status": "received"}
+            print(f"❌ [WhatsApp Webhook] Multimodal processing failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    # 2. Plain text intelligence payload
+    elif body and len(body.strip()) > 0:
+        result = await process_whatsapp_text_payload(
+            text=body.strip(),
+            source=source,
+            timestamp=timestamp
+        )
+        return {"status": "success", "multimodal": False, "result": result}
+
+    return {"status": "ignored", "reason": "empty body and no media"}
 
 @app.post("/api/ingest-whatsapp-media")
 async def ingest_whatsapp_media_endpoint(
@@ -359,13 +392,12 @@ async def ingest_whatsapp_media_endpoint(
             filename=file.filename,
             mimetype=mimetype,
             caption=caption,
-            source=source
+            source=source,
+            timestamp=timestamp
         )
-        if result.get("status") == "success" and timestamp:
-            update_whatsapp_checkpoint(timestamp)
         return result
     except Exception as e:
-        print(f"❌ [WhatsApp Endpoint Error]: {e}")
+        print(f"❌ [WhatsApp Media Endpoint Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class WhatsAppTextPayload(BaseModel):
@@ -376,54 +408,13 @@ class WhatsAppTextPayload(BaseModel):
 @app.post("/api/ingest-whatsapp-text")
 async def ingest_whatsapp_text(payload: WhatsAppTextPayload):
     try:
-        text = payload.text.strip()
-        source = payload.source
-        
-        # 1. Extract embedded URLs
-        urls = re.findall(r'https?://[^\s]+', text)
-        
-        # 2. Gemini Extraction Schema (Force JSON)
-        extraction_prompt = f"""
-        You are a quantitative financial analyst. Analyze this raw desk commentary:
-        "{text}"
-        
-        Extract the structured intelligence strictly as a JSON object with this schema:
-        {{
-            "tickers_mentioned": ["TICKER1", "TICKER2"] or [],
-            "aggregate_sentiment": "BULLISH" | "BEARISH" | "NEUTRAL" | "NONE",
-            "thesis_summary": "One clean sentence summarizing the core financial argument.",
-            "actionable": true | false
-        }}
-        Do not return markdown, only the raw JSON.
-        """
-        
-        # Assuming you have your gemini client initialized
-        chat = client.chats.create(model="gemini-3.8-flash")
-        response = chat.send_message(extraction_prompt)
-        
-        # 3. Clean and Parse JSON
-        clean_json_str = response.text.replace('```json', '').replace('```', '').strip()
-        structured_data = json.loads(clean_json_str)
-        
-        print(f"✅ [WhatsApp Ingest] Extracted intelligence for {structured_data.get('tickers_mentioned')} | Sentiment: {structured_data.get('aggregate_sentiment')}")
-
-        # 4. Ingest Clean Data to Vector Store
-        # await vector_brain.ingest_structured_intel(
-        #     summary=structured_data['thesis_summary'],
-        #     tickers=structured_data['tickers_mentioned'],
-        #     sentiment=structured_data['aggregate_sentiment'],
-        #     source=source,
-        #     links=urls
-        # )
-
-        if payload.timestamp:
-            update_whatsapp_checkpoint(payload.timestamp)
-
-        return {"status": "success", "extracted": structured_data}
-
+        return await process_whatsapp_text_payload(
+            text=payload.text,
+            source=payload.source,
+            timestamp=payload.timestamp
+        )
     except Exception as e:
         print(f"❌ [WhatsApp Ingest Error]: {e}")
-        # Fail gracefully without crashing the Node bridge
         return {"status": "failed", "error": str(e)}
 
 @app.post("/trigger")

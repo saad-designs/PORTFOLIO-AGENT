@@ -1,8 +1,12 @@
 import os
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 import psycopg2
 from dotenv import load_dotenv
 
-load_dotenv()
+env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+load_dotenv(dotenv_path=env_path)
 DATABASE_URL = os.getenv("SUPABASE_DB_URL")
 
 def update_monitored_chats(actual_chats):
@@ -15,25 +19,34 @@ def update_monitored_chats(actual_chats):
     cur = conn.cursor()
 
     try:
-        # Delete the dummy records
-        print("🗑️ Deleting dummy records...")
+        # Delete dummy placeholder records or non-KTrade records
+        print("🗑️ Deleting placeholder/dummy records...")
         cur.execute("""
             DELETE FROM whatsapp_monitored_chats 
-            WHERE chat_id IN ('92300XXXXXXX@c.us', '1203630XXXXXXXX@g.us');
-        """)
+            WHERE chat_id LIKE '%%XXXX%%' 
+               OR chat_id NOT IN (%s, %s);
+        """, (actual_chats[0][0], actual_chats[1][0]))
         
-        # Insert the actual records
-        if actual_chats:
-            print(f"📥 Inserting new records: {actual_chats}")
-            insert_query = """
-                INSERT INTO whatsapp_monitored_chats (chat_id, mentor_name)
-                VALUES (%s, %s)
-                ON CONFLICT (chat_id) DO NOTHING;
-            """
-            cur.executemany(insert_query, actual_chats)
+        # Insert the actual KTrade records
+        print(f"📥 Upserting KTrade records: {actual_chats}")
+        insert_query = """
+            INSERT INTO whatsapp_monitored_chats (chat_id, mentor_name, is_active)
+            VALUES (%s, %s, TRUE)
+            ON CONFLICT (chat_id) DO UPDATE 
+            SET mentor_name = EXCLUDED.mentor_name, is_active = TRUE;
+        """
+        cur.executemany(insert_query, actual_chats)
         
         conn.commit()
         print("✅ Database successfully updated.")
+
+        # Query and print current contents
+        print("\n📋 Current whatsapp_monitored_chats table:")
+        cur.execute("SELECT chat_id, mentor_name, is_active, added_at FROM whatsapp_monitored_chats ORDER BY added_at ASC;")
+        rows = cur.fetchall()
+        for r in rows:
+            print(f"  • ID: {r[0]} | Name: {r[1]} | Active: {r[2]} | Added: {r[3]}")
+
     except Exception as e:
         conn.rollback()
         print(f"❌ Database update failed: {e}")
@@ -42,16 +55,10 @@ def update_monitored_chats(actual_chats):
         conn.close()
 
 if __name__ == "__main__":
-    # TODO: Add the actual IDs and names here!
-    # Example format: 
-    # actual_chats = [
-    #     ('1234567890@c.us', 'Mentor John'),
-    #     ('9876543210-123456@g.us', 'Alpha Group')
-    # ]
+    actual_chats = [
+        ('120363405626670375@g.us', 'KTrade - E Trader Assistance 6'),
+        ('120363404462896702@g.us', 'KTrade - E Trader Assistance 6 (Secondary)')
+    ]
     
-    actual_chats = [] 
-    
-    if actual_chats:
-        update_monitored_chats(actual_chats)
-    else:
-        print("⚠️ No actual chats provided. Please update the 'actual_chats' list with the real IDs and run again.")
+    update_monitored_chats(actual_chats)
+
