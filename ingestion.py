@@ -202,14 +202,14 @@ from google.genai import types
 async def generate_with_fallback(client: genai.Client, contents: list) -> str:
     """
     Executes Gemini generation with model cascade.
-    Retries with exponential backoff on 429/quota, 503, DNS or network disconnects,
-    failing fast on 404/invalid model errors to the next model in cascade.
+    Retries on transient network disconnects or RPM limits,
+    failing fast on daily quota exhaustion or 404s to the next model in cascade.
     """
-    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    models_to_try = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
     last_error = None
     
     for model_name in models_to_try:
-        max_attempts = 3
+        max_attempts = 2
         for attempt in range(max_attempts):
             try:
                 chat = client.chats.create(model=model_name)
@@ -222,9 +222,15 @@ async def generate_with_fallback(client: genai.Client, contents: list) -> str:
                 last_error = e
                 print(f"⚠️ [Fallback] {model_name} (attempt {attempt+1}) failed with: {repr(e)}")
                 error_str = str(e).lower()
-                # Real exponential backoff on rate-limit, transient network, DNS or connect errors
+
+                # If daily quota / free-tier per-day limit is exhausted, fail fast to next model immediately!
+                if any(x in error_str for x in ["perday", "daily", "freetier", "free_tier_requests", "limit: 20", "quotaid"]):
+                    print(f"⚠️ [Fallback] {model_name} daily quota exhausted. Switching immediately to next model...")
+                    break
+
+                # Real exponential backoff on transient rate-limit (RPM) or network errors
                 if any(x in error_str for x in ["429", "resource_exhausted", "quota", "503", "server disconnected", "connection error", "timeout", "connecterror", "getaddrinfo", "socket"]):
-                    backoff_secs = 5 * (attempt + 1)
+                    backoff_secs = 3 * (attempt + 1)
                     print(f"⏳ [Fallback] Backing off {backoff_secs}s before retry due to transient/network limit...")
                     await asyncio.sleep(backoff_secs)
                     continue

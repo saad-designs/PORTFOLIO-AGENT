@@ -112,7 +112,7 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                 has_media: false
             };
             await axios.post('http://127.0.0.1:8000/api/ingest-whatsapp-message', payload, {
-                timeout: 30000
+                timeout: 60000
             });
         }
     } catch (err) {
