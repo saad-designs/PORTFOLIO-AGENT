@@ -9,7 +9,7 @@ from google import genai
 import dateutil.parser
 from portfolio_manager import get_checkpoint, update_checkpoint, get_db_connection, add_pending_signal
 
-client = genai.Client()
+client = genai.Client(http_options={"timeout": 300000})
 
 async def extract_and_analyze_email(raw_email_bytes: bytes) -> str:
     """

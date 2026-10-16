@@ -8,7 +8,7 @@ from ingestion import get_youtube_transcript
 logger = logging.getLogger("HistoricalBackfill")
 
 # Use Flash-Lite for fast, cheap extraction of strategies from massive texts
-extraction_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
+extraction_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite")
 
 def extract_techniques_from_raw_text(raw_text: str, mentor_name: str) -> str:
     """Forces the LLM to discard outdated news and only extract timeless strategies."""

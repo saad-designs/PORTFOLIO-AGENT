@@ -1,3 +1,9 @@
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 import asyncio
 import logging
 import os
@@ -174,7 +180,7 @@ async def _run_youtube_sweep_inner():
             from vector_brain import ingest_knowledge_tool
             import re
             
-            client = genai.Client()
+            client = genai.Client(http_options={"timeout": 300000})
             alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
             
             for mentor, text in transcripts.items():
@@ -199,7 +205,7 @@ async def _run_youtube_sweep_inner():
                 await asyncio.to_thread(add_pending_signal, "YouTube Sweep", {"mentor": mentor, "report": formatted_text})
                     
                 # Store the high-signal structured output in Vector DB instead of rambling text
-                await asyncio.to_thread(ingest_knowledge_tool.invoke, {"input_text_or_url": formatted_text})
+                await ingest_knowledge_tool.ainvoke({"input_text_or_url": formatted_text})
                 
         if failed_mentors:
             alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
@@ -278,8 +284,12 @@ async def run_business_portfolio_sweep():
         await asyncio.to_thread(update_ticker_valuations)
         
         # 1. Macro & Corporate News Scan
+        import inspect
         from news_scraper import fetch_business_news
-        news_feed = await fetch_business_news()
+        if inspect.iscoroutinefunction(fetch_business_news):
+            news_feed = await fetch_business_news()
+        else:
+            news_feed = await asyncio.to_thread(fetch_business_news)
         
         macro_events = [
             {"category": "IPO / Corporate", "headline": "Upcoming sector initial public offerings and regulatory filings."},
@@ -287,7 +297,7 @@ async def run_business_portfolio_sweep():
         ]
         for event in macro_events:
             event_blob = f"Macro Wire [{event['category']}]: {event['headline']} | Date: {datetime.now()}"
-            await asyncio.to_thread(ingest_knowledge_tool.invoke, {"input_text_or_url": event_blob})
+            await ingest_knowledge_tool.ainvoke({"input_text_or_url": event_blob})
         
         # 2. Risk & Rebalancing Engine Audit
         # Logic to evaluate holdings against target maximums (e.g., 20% single-stock cap)
@@ -395,7 +405,7 @@ async def conduct_autonomous_audit(ticker: str, trigger_type: str, current_price
     current_position = f"{pos_row[0]} shares @ Rs. {pos_row[1]}" if pos_row else "0 shares (Not currently held)"
 
     # 2. Vector Search: Pull relevant rules from active_playbook
-    client = genai.Client()
+    client = genai.Client(http_options={"timeout": 300000})
     search_context = f"Evaluating {ticker} at {current_price} for {trigger_type} setup, dividend safety, margin resilience, and sector risks."
     
     embed_res = await asyncio.to_thread(
@@ -1105,7 +1115,7 @@ Format your response as a professional portfolio update, stating clear actions t
 """
         
         # 3. Call Gemini
-        client = genai.Client()
+        client = genai.Client(http_options={"timeout": 300000})
         from ingestion import generate_with_fallback
         final_verdict = await generate_with_fallback(client, [prompt])
         
@@ -1158,8 +1168,8 @@ async def start_scheduled_sweeps():
             logger.info("⚡ Catch-up: Firing missed run_email_sweep.")
             await run_email_sweep()
             
-    # Trigger WhatsApp Catch-up Sweep
-    await run_whatsapp_startup_catchup()
+    # WhatsApp Catch-up Sweep is now handled sequentially by startup_orchestrator in main.py
+    # await run_whatsapp_startup_catchup()
     
     while True:
         now = datetime.now()
@@ -1167,7 +1177,11 @@ async def start_scheduled_sweeps():
         
         # Desk Manager Sweep (Every Hour)
         last_desk_manager_ts = get_last_run("desk_manager_sweep")
-        if now.timestamp() - last_desk_manager_ts >= 3600:
+        if last_desk_manager_ts == 0:
+            # On first boot, mark timestamp so it doesn't stampede against startup orchestrator
+            update_last_run("desk_manager_sweep")
+            last_desk_manager_ts = now.timestamp()
+        elif now.timestamp() - last_desk_manager_ts >= 3600:
             try:
                 await run_news_sweep()
                 await run_youtube_sweep()

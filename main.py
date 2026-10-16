@@ -79,7 +79,7 @@ from typing import Optional
 import re
 import json
 from google import genai
-client = genai.Client()
+client = genai.Client(http_options={"timeout": 300000})
 import agent
 from langgraph.types import Command
 import uuid
@@ -92,6 +92,83 @@ from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsa
 from scheduler_config import scheduler
 import aiohttp
 from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_whatsapp_monitored_chats
+
+async def run_startup_orchestration():
+    """
+    Sequential Startup Orchestrator:
+    Prevents startup stampede and rate-limit exhaustion.
+    1. Waits for WhatsApp Bridge to report READY (or skips cleanly if offline).
+    2. Runs WhatsApp catch-up sweep with sanitized chat IDs (filters out 'XXXX' dummy IDs).
+    3. Runs Business & Portfolio Sweep.
+    4. Waits 10 seconds.
+    5. Runs YouTube catch-up sweep ONCE.
+    """
+    print("🚀 [Startup Orchestrator] Initializing sequential startup sequence...")
+    
+    # --- 1. WhatsApp Bridge Catch-Up ---
+    last_ts = get_whatsapp_checkpoint()
+    raw_chats = get_whatsapp_monitored_chats()
+    # Filter out dummy placeholder chat IDs containing 'xxxx'
+    monitored_chats = [cid for cid in raw_chats if "xxxx" not in str(cid).lower()]
+    
+    if monitored_chats:
+        bridge_ready = False
+        print("📱 [Startup Orchestrator] Polling WhatsApp Bridge (http://127.0.0.1:3000/ping) for READY status...")
+        async with aiohttp.ClientSession() as session:
+            # Poll for up to 30 seconds
+            for attempt in range(6):
+                try:
+                    async with session.get("http://127.0.0.1:3000/ping", timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("status") == "pong" or "ready" in data.get("message", "").lower():
+                                bridge_ready = True
+                                print("✅ [Startup Orchestrator] WhatsApp Bridge is READY.")
+                                break
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+            
+            if bridge_ready:
+                try:
+                    print(f"🔄 [Startup Orchestrator] Executing WhatsApp catch-up for {len(monitored_chats)} monitored chats...")
+                    async with session.post(
+                        "http://127.0.0.1:3000/api/catchup",
+                        json={"since_timestamp": last_ts, "target_chat_ids": monitored_chats},
+                        timeout=aiohttp.ClientTimeout(total=60)
+                    ) as resp:
+                        data = await resp.json()
+                        print(f"✅ [Startup Orchestrator] WhatsApp catch-up complete: {data.get('replayed', 0)} messages replayed.")
+                except Exception as wa_err:
+                    print(f"⚠️ [Startup Orchestrator] WhatsApp catch-up request failed: {wa_err}")
+            else:
+                print("ℹ️ [Startup Orchestrator] WhatsApp Bridge not ready or offline after 30s. Skipping startup catch-up.")
+    else:
+        print("ℹ️ [Startup Orchestrator] No valid monitored WhatsApp chats found in DB.")
+
+    # --- 2. Business & Portfolio Sweep ---
+    try:
+        from schedulers import run_business_portfolio_sweep
+        print("⚖️ [Startup Orchestrator] Running Business & Portfolio Sweep...")
+        await run_business_portfolio_sweep()
+        print("✅ [Startup Orchestrator] Business Sweep completed.")
+    except Exception as bus_err:
+        print(f"⚠️ [Startup Orchestrator] Business Sweep failed: {bus_err}")
+
+    # --- 3. Buffer Sleep (10 seconds) ---
+    print("⏳ [Startup Orchestrator] Waiting 10 seconds before YouTube sweep...")
+    await asyncio.sleep(10)
+
+    # --- 4. YouTube Catch-up Sweep ONCE ---
+    try:
+        from schedulers import run_youtube_sweep
+        print("🕒 [Startup Orchestrator] Running YouTube catch-up sweep...")
+        await run_youtube_sweep()
+        print("✅ [Startup Orchestrator] YouTube catch-up sweep completed.")
+    except Exception as yt_err:
+        print(f"⚠️ [Startup Orchestrator] YouTube sweep failed: {yt_err}")
+
+    print("🎯 [Startup Orchestrator] Sequential startup sequence completed successfully.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -126,32 +203,13 @@ async def lifespan(app: FastAPI):
     # Grab the active event loop
     loop = asyncio.get_running_loop()
     
-    from schedulers import initialize_background_schedulers, run_youtube_sweep
+    from schedulers import initialize_background_schedulers
     # Initialize background intelligence loops
     initialize_background_schedulers(loop)
     print("🚀 Portfolio Agent core running with autonomous background learning.")
     
-    print("🚀 Triggering WhatsApp startup catch-up sweep...")
-    last_ts = get_whatsapp_checkpoint()
-    monitored_chats = get_whatsapp_monitored_chats()
-    
-    if monitored_chats:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "http://127.0.0.1:3000/api/catchup",
-                    json={"since_timestamp": last_ts, "target_chat_ids": monitored_chats}
-                ) as resp:
-                    data = await resp.json()
-                    print(f"✅ WhatsApp startup sweep: Replayed {data.get('replayed', 0)} missed messages.")
-        except Exception as e:
-            print(f"⚠️ WhatsApp catch-up failed: {e}")
-    else:
-        print("ℹ️ No active WhatsApp monitored chats found in DB.")
-
-    print("🚀 Triggering Business Sweep catch-up...")
-    print("🚀 Triggering YouTube catch-up sweep...")
-    await run_youtube_sweep()
+    # Trigger sequential startup orchestration in background task
+    asyncio.create_task(run_startup_orchestration())
     yield
     # Shutdown
     print("🛑 Shutting down Discord bot...", flush=True)
@@ -340,7 +398,7 @@ async def ingest_whatsapp_text(payload: WhatsAppTextPayload):
         """
         
         # Assuming you have your gemini client initialized
-        chat = client.chats.create(model="gemini-1.5-flash")
+        chat = client.chats.create(model="gemini-2.5-flash")
         response = chat.send_message(extraction_prompt)
         
         # 3. Clean and Parse JSON

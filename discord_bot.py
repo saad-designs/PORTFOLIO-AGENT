@@ -43,7 +43,7 @@ import httpx
 from google import genai
 from google.genai import types, errors
 
-client = genai.Client()
+client = genai.Client(http_options={"timeout": 300000})
 
 
 
@@ -671,7 +671,7 @@ def trigger_research(ticker: str = "KMI30") -> str:
     # Pull the latest active rules from Active Playbook
     try:
         from google import genai
-        client = genai.Client()
+        client = genai.Client(http_options={"timeout": 300000})
         
         # 1. Define the semantic context of what you are researching
         research_context = f"Analyzing {ticker} for fundamental valuation, dividend yield, macro sensitivity, and cyclical margin expansion."
@@ -722,7 +722,7 @@ def force_cash_sweep() -> str:
 
 # 2. Bind them to the model
 agent_tools = [trigger_research, force_cash_sweep]
-gemini_client = genai.Client()
+gemini_client = genai.Client(http_options={"timeout": 300000})
 
 @bot.event
 async def on_message(message):
@@ -742,7 +742,7 @@ async def on_message(message):
         )
 
         chat = gemini_client.chats.create(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             config=types.GenerateContentConfig(
                 system_instruction=CORE_DIRECTIVE
             )
@@ -1069,7 +1069,7 @@ TASK:
                 price: float
                 intrinsic: float
             
-            llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
             parser = llm.with_structured_output(OpportunityParser)
             try:
                 parsed_op = parser.invoke(f"Extract the exact ticker, current price, and target/intrinsic price from this thesis:\n{final_text}")

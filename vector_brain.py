@@ -129,7 +129,7 @@ def query_mentor_brain_tool(query: str) -> str:
         
         # Update the LLM used for vector retrieval summarization
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-8b", # Or gemini-1.5-flash
+            model="gemini-2.5-flash",
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
         
@@ -220,7 +220,7 @@ async def evaluate_trade_trigger(trigger_dict: dict) -> str:
         context = await get_market_context(ticker)
         
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-8b",
+            model="gemini-2.5-flash",
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
         structured_llm = llm.with_structured_output(TradeEvaluationSchema)

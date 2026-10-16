@@ -51,8 +51,12 @@ async def run_full_diagnostic():
     # 4. Test RSS Macro News Engine
     print("\n[4/5] Testing Asynchronous Macro Feed...")
     try:
+        import inspect
         from news_scraper import fetch_business_news
-        news = await fetch_business_news()
+        if inspect.iscoroutinefunction(fetch_business_news):
+            news = await fetch_business_news()
+        else:
+            news = await asyncio.to_thread(fetch_business_news)
         print(f"  ✅ Async Feedparser: Pulled {len(news)} characters of macro headlines.")
         print(f"     Preview: {news[:180]}...")
     except Exception as e:

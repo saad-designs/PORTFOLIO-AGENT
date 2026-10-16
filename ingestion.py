@@ -40,7 +40,7 @@ def save_learned_rule(source: str, rule: str):
     from google import genai
     
     try:
-        client = genai.Client()
+        client = genai.Client(http_options={"timeout": 300000})
         
         # Generate the 768-dimensional embedding for the rule
         result = client.models.embed_content(
@@ -201,34 +201,98 @@ from google.genai import types
 
 async def generate_with_fallback(client: genai.Client, contents: list) -> str:
     """
-    Executes Gemini generation prioritizing the most efficient 3.8 architecture.
-    Cascades down to legacy 3.5 models instantly if a 429 quota wall is hit.
+    Executes Gemini generation with model cascade.
+    Retries with exponential backoff on 429/quota or 503/network disconnects,
+    failing fast on 404/invalid model errors to the next model in cascade.
     """
-    models_to_try = [
-        "gemini-1.5-flash",       # Burns your 20 high-tier free requests first
-        "gemini-1.5-flash-8b",    # Takes over the remaining thousands of background sweeps
-        "gemini-1.5-flash"        # Final safety net
-    ]
+    models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite"]
+    last_error = None
     
     for model_name in models_to_try:
-        try:
-            chat = client.chats.create(model=model_name)
-            response = await asyncio.to_thread(
-                chat.send_message,
-                contents
-            )
-            return response.text.strip()
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                chat = client.chats.create(model=model_name)
+                response = await asyncio.to_thread(
+                    chat.send_message,
+                    contents
+                )
+                return response.text.strip()
+            except Exception as e:
+                last_error = e
+                print(f"⚠️ [Fallback] {model_name} (attempt {attempt+1}) failed with: {repr(e)}")
+                error_str = str(e).lower()
+                # Real exponential backoff on rate-limit (429/resource_exhausted) or transient network (503/server disconnected)
+                if any(x in error_str for x in ["429", "resource_exhausted", "quota", "503", "server disconnected", "connection error", "timeout"]):
+                    backoff_secs = 6 * (attempt + 1)
+                    print(f"⏳ [Fallback] Backing off {backoff_secs}s before retry due to transient/rate limit...")
+                    await asyncio.sleep(backoff_secs)
+                    continue
+                else:
+                    # 404 or structural error: break inner retry loop immediately and move to next model
+                    break
+                    
+    raise RuntimeError(f"❌ All Gemini models failed in generate_with_fallback. Last error: {repr(last_error)}")
+
+
+def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") -> str:
+    """
+    Transcribes downloaded YouTube audio using Gemini via Files API.
+    Polls the processing state until ACTIVE (loop time.sleep(3)) and guarantees remote file deletion.
+    """
+    import time
+    if not os.path.exists(audio_file_path):
+        print(f"❌ [Audio Transcribe] Audio file not found: {audio_file_path}")
+        return ""
+
+    raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
+    uploaded_file = None
+    try:
+        print(f"🎙️ [Audio Transcribe] Uploading {audio_file_path} to Gemini...")
+        uploaded_file = client.files.upload(file=audio_file_path)
+        
+        # Poll client.files.get until state is ACTIVE (max 240s)
+        start_time = time.time()
+        while True:
+            uploaded_file = client.files.get(name=uploaded_file.name)
+            if uploaded_file.state.name == "ACTIVE":
+                print("✅ [Audio Transcribe] File state is ACTIVE.")
+                break
+            elif uploaded_file.state.name == "FAILED":
+                raise RuntimeError(f"Audio file processing failed on Google servers: {uploaded_file.error}")
             
-        except Exception as e:
-            error_str = str(e).lower()
-            # Now catches Rate Limits (429), Missing Models (404), and Server Overloads (503/500)
-            if any(x in error_str for x in ["429", "quota", "resource_exhausted", "404", "not_found", "503", "unavailable", "500"]):
-                print(f"⚠️ [Fallback] {model_name} unavailable. Cascading down...")
-                continue 
-            else:
-                raise e
-                
-    raise Exception("❌ CRITICAL: All 3.8 and 3.5 tier background models have exhausted their rate limits.")
+            if time.time() - start_time > 240:
+                raise TimeoutError("Audio file processing exceeded 240-second cap.")
+            time.sleep(3)
+
+        models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+        last_error = None
+        for model in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        uploaded_file,
+                        "Watch and listen to the audio of this video (which may be in Urdu, Hindi, or English). Provide a comprehensive, detailed English transcript and breakdown of everything said, capturing every PSX stock ticker, price target, support/resistance level, and macroeconomic insight."
+                    ]
+                )
+                if response.text and response.text.strip():
+                    print(f"✅ [Audio Transcribe] Transcription successful using {model}.")
+                    return response.text.strip()
+            except Exception as e:
+                last_error = e
+                print(f"⚠️ [Audio Transcribe] {model} failed: {e}")
+                continue
+
+        raise RuntimeError(f"All models failed transcription. Last error: {repr(last_error)}")
+    finally:
+        if uploaded_file:
+            try:
+                client.files.delete(name=uploaded_file.name)
+                print(f"🧹 [Audio Transcribe] Deleted remote file {uploaded_file.name}")
+            except Exception as del_err:
+                print(f"⚠️ [Audio Transcribe] Could not delete remote file: {del_err}")
 
 WHATSAPP_PARTNER_PROMPT = """
 You are my veteran PSX co-investor and portfolio partner. We currently hold: SYS, HUBC, LUCK, FFC, EFERT, MEBL, and MARI.
@@ -268,7 +332,7 @@ async def process_whatsapp_media_payload(file_bytes: bytes, filename: str, mimet
 
     try:
         # Initialize Gemini Client
-        client = genai.Client()
+        client = genai.Client(http_options={"timeout": 300000})
         
         # Upload file for multimodal processing
         uploaded_file = await asyncio.to_thread(

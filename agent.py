@@ -706,9 +706,9 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
 # Primary heavy reasoning model
-primary_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
+primary_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 # High-volume workhorse fallback
-fallback_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-8b")
+fallback_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite")
 
 # Chain with automatic fallback for 503 capacity errors
 llm = primary_llm.with_fallbacks([fallback_llm])
@@ -977,7 +977,7 @@ class TradeEvaluationState(TypedDict):
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 def analyst_node(state: TradeEvaluationState):
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-8b", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
     
     is_macro = state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep'
     
@@ -1031,7 +1031,7 @@ def analyst_node(state: TradeEvaluationState):
         return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
 
 def risk_manager_node(state: TradeEvaluationState):
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-8b", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
     
     prompt = f"""
     You are a strict compliance officer and risk manager.

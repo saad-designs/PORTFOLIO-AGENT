@@ -13,7 +13,7 @@ clean_key = raw_key.strip()
 print(f"Key loaded: {clean_key[:10]}... (Length: {len(clean_key)})")
 
 genai.configure(api_key=clean_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 try:
     print("Pinging Gemini API...")

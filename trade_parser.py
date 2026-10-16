@@ -23,7 +23,7 @@ def extract_trade_intent(message_content: str) -> TradeExecution | None:
     try:
         # Use an active LangChain Gemini instance
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3.5-flash-lite", 
+            model="gemini-2.5-flash-lite", 
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
         

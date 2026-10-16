@@ -159,22 +159,58 @@ def apply_global_rate_limits():
     try:
         from google.genai._api_client import BaseApiClient
         
+        original_init = BaseApiClient.__init__
+        @wraps(original_init)
+        def patched_init(self, *args, **kwargs):
+            # Ensure generous default timeout of at least 300,000 ms (300 seconds)
+            if 'http_options' not in kwargs or kwargs['http_options'] is None:
+                kwargs['http_options'] = {'timeout': 300000}
+            elif isinstance(kwargs['http_options'], dict):
+                if kwargs['http_options'].get('timeout') is None:
+                    kwargs['http_options']['timeout'] = 300000
+                else:
+                    kwargs['http_options']['timeout'] = max(int(kwargs['http_options']['timeout']), 300000)
+            elif hasattr(kwargs['http_options'], 'timeout'):
+                current_t = getattr(kwargs['http_options'], 'timeout')
+                if current_t is None or (isinstance(current_t, (int, float)) and current_t < 300000):
+                    setattr(kwargs['http_options'], 'timeout', 300000)
+            original_init(self, *args, **kwargs)
+        BaseApiClient.__init__ = patched_init
+
         original_async_request_once = BaseApiClient._async_request_once
         original_request_once = BaseApiClient._request_once
         
+        def is_bypass_request(http_request):
+            url_str = str(getattr(http_request, 'url', '')).lower()
+            return any(kw in url_str for kw in ['upload', '/files', 'media', 'download'])
+
         @wraps(original_async_request_once)
-        async def throttled_async_request_once(*args, **kwargs):
+        async def throttled_async_request_once(self, http_request, *args, **kwargs):
+            if hasattr(http_request, 'timeout'):
+                if http_request.timeout is None or (isinstance(http_request.timeout, (int, float)) and http_request.timeout < 300.0):
+                    http_request.timeout = 300.0
+            
+            if is_bypass_request(http_request):
+                return await original_async_request_once(self, http_request, *args, **kwargs)
+
             await limiter.async_acquire()
             try:
-                return await original_async_request_once(*args, **kwargs)
+                return await original_async_request_once(self, http_request, *args, **kwargs)
             finally:
                 limiter.async_release()
                 
         @wraps(original_request_once)
-        def throttled_request_once(*args, **kwargs):
+        def throttled_request_once(self, http_request, *args, **kwargs):
+            if hasattr(http_request, 'timeout'):
+                if http_request.timeout is None or (isinstance(http_request.timeout, (int, float)) and http_request.timeout < 300.0):
+                    http_request.timeout = 300.0
+            
+            if is_bypass_request(http_request):
+                return original_request_once(self, http_request, *args, **kwargs)
+
             limiter.sync_acquire()
             try:
-                return original_request_once(*args, **kwargs)
+                return original_request_once(self, http_request, *args, **kwargs)
             finally:
                 limiter.sync_release()
                 
@@ -183,3 +219,4 @@ def apply_global_rate_limits():
         print("Patched native google.genai HTTP clients successfully.")
     except ImportError:
         pass
+

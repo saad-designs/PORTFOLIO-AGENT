@@ -6,6 +6,7 @@ import re
 import asyncio
 import yt_dlp
 from google import genai
+from google.genai import types
 from googleapiclient.discovery import build
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type, wait_chain, wait_fixed
 from requests.exceptions import Timeout, ConnectionError
@@ -18,7 +19,7 @@ if not raw_key:
     raise ValueError("No API key found in environment variables.")
     
 clean_key = raw_key.strip()
-client = genai.Client(api_key=clean_key)
+client = genai.Client(api_key=clean_key, http_options={"timeout": 300000})
 
 @retry(
     retry=retry_if_exception_type((Timeout, ConnectionError)),
@@ -85,46 +86,56 @@ def get_latest_videos(channel_id, max_results=5):
         print(f"❌ [YouTube API Error in get_latest_videos]: {e}")
         return []
 
-async def get_transcript(video_id):
+def _tier1_native_gemini(video_id: str) -> str:
     """
-    Primary Entry Point (Async)
-    Bypasses captions entirely, extracts audio, and forces Gemini to transcribe.
+    Tier 1 (Primary): Gemini Native Direct YouTube Video/Audio Watching.
+    Passes YouTube URL directly to Gemini without downloading locally.
     """
-    print(f"DIAGNOSTIC: Commencing direct audio extraction & AI transcription for {video_id}")
-    try:
-        # Enforces a strict 60-second timeout. If it hangs, the system forcefully unblocks.
-        return await asyncio.wait_for(_run_audio_pipeline(video_id), timeout=60.0)
-    except asyncio.TimeoutError:
-        print(f"[ERROR] Audio extraction for {video_id} timed out after 60 seconds. System unblocked.")
-        return await _metadata_failsafe(video_id)
-    except Exception as e:
-        print(f"[ERROR] Direct transcription failed: {str(e)}")
-        return await _metadata_failsafe(video_id)
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    content = types.Content(
+        parts=[
+            types.Part(file_data=types.FileData(file_uri=youtube_url, mime_type="video/mp4")),
+            types.Part(text="Watch and listen to the audio of this video (which may be in Urdu, Hindi, or English). Provide a comprehensive, detailed English transcript and breakdown of everything said, capturing every PSX stock ticker, price target, support/resistance level, and macroeconomic insight.")
+        ]
+    )
+    models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    last_err = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=content
+            )
+            if response.text and len(response.text.strip()) > 50:
+                return response.text.strip()
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ [Tier 1] Model {model_name} failed: {e}")
+            continue
+    raise RuntimeError(f"Tier 1 native Gemini failed for {video_id}: {last_err}")
 
-async def _run_audio_pipeline(video_id):
+def _tier2_download_and_transcribe(video_id: str) -> str:
     """
-    Offloads the synchronous yt-dlp download to a background thread.
-    This prevents the download from freezing the main FastAPI event loop.
+    Tier 2 (Fallback 1): Compressed 24kbps Mono Audio via yt-dlp + Gemini File API.
+    Forces 16kHz mono audio so even long videos are compact (~3MB).
     """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _download_and_transcribe, video_id)
-
-def _download_and_transcribe(video_id):
-    """Synchronous audio extraction via yt-dlp."""
+    from ingestion import transcribe_mentor_audio as _transcribe_audio
     cookie_path = os.path.abspath("cookies.txt")
     temp_audio_file = None
     
     ydl_opts = {
-        'format': 'm4a/bestaudio/best',
+        'format': 'worstaudio[ext=m4a]/worstaudio/bestaudio',
         'outtmpl': f'temp_{video_id}.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'm4a',
+            'preferredquality': '24',
         }],
+        'postprocessor_args': ['-ac', '1', '-ar', '16000'],
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'tv']}},
+        'socket_timeout': 30,
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 15,  # CRITICAL: Prevents internal yt-dlp socket deadlocks
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}},
         'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     }
     
@@ -141,79 +152,35 @@ def _download_and_transcribe(video_id):
                 temp_audio_file = file
                 break
                 
-        if temp_audio_file:
-            print(f"DIAGNOSTIC: Audio downloaded successfully. Passing {temp_audio_file} to Gemini...")
-            # Passes to your existing transcription function
-            return transcribe_mentor_audio(temp_audio_file)
+        if temp_audio_file and os.path.exists(temp_audio_file):
+            print(f"🎙️ [Tier 2] Audio downloaded: {temp_audio_file} ({os.path.getsize(temp_audio_file)} bytes). Passing to transcribe_mentor_audio...")
+            return _transcribe_audio(temp_audio_file)
         else:
-            raise Exception("Audio download failed or file not found")
-            
+            raise FileNotFoundError(f"Audio file for {video_id} not found after download.")
     finally:
         # Guarantee cleanup regardless of success or failure
         if temp_audio_file and os.path.exists(temp_audio_file):
-            print(f"DIAGNOSTIC: Cleaning up local temporary file {temp_audio_file}...")
             try:
                 import time
-                time.sleep(1)  # Force OS to release the file handle
+                time.sleep(1)
                 os.remove(temp_audio_file)
+                print(f"🧹 [Tier 2] Cleaned up temporary audio file: {temp_audio_file}")
             except Exception as cleanup_err:
-                print(f"[WARNING] Could not clean up {temp_audio_file}: {cleanup_err}")
+                print(f"⚠️ [Tier 2] Could not clean up {temp_audio_file}: {cleanup_err}")
 
-
-
-@retry(
-    retry=retry_if_exception_type(Exception),
-    wait=wait_chain(*[wait_fixed(300), wait_fixed(900), wait_fixed(1800)]),
-    stop=stop_after_attempt(3)
-)
-def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") -> str:
+def _tier3_metadata_extraction(video_id: str) -> str:
     """
-    Transcribes downloaded YouTube audio using Gemini 3.5 Transcribe.
+    Tier 3 (Fallback 2): Multi-Language Subtitle & Metadata Extraction via yt-dlp.
+    Extracts title, full description, chapters, and auto-generated subtitles.
     """
-    if not os.path.exists(audio_file_path):
-        print(f"[ERROR] Audio file not found: {audio_file_path}")
-        return ""
-
-    print(f"[DIAGNOSTIC] Uploading {audio_file_path} to Gemini 3.5 Transcribe...")
-    
-    try:
-        # 1. Upload the audio payload
-        uploaded_file = client.files.upload(file=audio_file_path)
-        
-        # 2. Call the Generate Content API for transcription
-        chat = client.chats.create(model="gemini-1.5-flash-latest")
-        response = chat.send_message(
-            [uploaded_file, "Accurately transcribe this financial market commentary in Urdu/English."]
-        )
-        
-        # 3. Ruthlessly purge the remote file to prevent cloud storage bloat
-        try:
-            client.files.delete(name=uploaded_file.name)
-        except Exception as del_err:
-            print(f"[WARNING] Could not delete remote file: {del_err}")
-        
-        print("[DIAGNOSTIC] Transcription successful.")
-        
-        # MUST EXPLICITLY RETURN THE STRING
-        return response.text
-
-    except Exception as e:
-        print(f"❌ [DIAGNOSTIC] Fallback transcription failed: {e}")
-        return None
-
-async def _metadata_failsafe(video_id):
-    """Tier 2 Fallback: If audio completely fails or times out, grab the metadata."""
-    print(f"DIAGNOSTIC: Triggering Tier 2 Fallback (Metadata Extraction) for {video_id}...")
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _extract_metadata_sync, video_id)
-
-def _extract_metadata_sync(video_id):
     cookie_path = os.path.abspath("cookies.txt")
     ydl_opts_meta = {
         'skip_download': True,
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 15
+        'socket_timeout': 30,
+        'subtitleslangs': ['ur', 'hi', 'en'],
+        'writeautomaticsub': True,
     }
     if os.path.exists(cookie_path):
         ydl_opts_meta['cookiefile'] = cookie_path
@@ -225,11 +192,73 @@ def _extract_metadata_sync(video_id):
         title = info.get('title', 'Unknown Title')
         description = info.get('description', 'No description available')
         tags = info.get('tags', [])
+        chapters = info.get('chapters', [])
         
-        print("DIAGNOSTIC: Successfully extracted metadata via Tier 2 fallback.")
-        return f"Title: {title}\nDescription: {description}\nTags: {tags}"
+        meta_lines = [
+            f"Title: {title}",
+            f"Description: {description}",
+        ]
+        if chapters:
+            chapter_text = "; ".join([c.get('title', '') for c in chapters if c.get('title')])
+            if chapter_text:
+                meta_lines.append(f"Chapters: {chapter_text}")
+        if tags:
+            meta_lines.append(f"Tags: {tags}")
+            
+        print("📄 [Tier 3] Successfully extracted metadata via Tier 3 fallback.")
+        return "\n".join(meta_lines)
     except Exception as meta_err:
-        print(f"DIAGNOSTIC CRASH (Tier 2 Metadata Fallback): {str(meta_err)}")
+        print(f"❌ [Tier 3] Metadata fallback failed: {meta_err}")
+        return ""
+
+def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") -> str:
+    """Delegates to ingestion.transcribe_mentor_audio."""
+    from ingestion import transcribe_mentor_audio as _transcribe
+    return _transcribe(audio_file_path, mime_type)
+
+async def get_transcript(video_id: str) -> str:
+    """
+    3-Tier Non-Blocking Transcript Pipeline:
+    1. Tier 1: Native Gemini YouTube URL Ingestion (zero local download, 180s timeout)
+    2. Tier 2: Compressed 24kbps Mono Audio via yt-dlp + File API (240s timeout)
+    3. Tier 3: Multi-Language Subtitle & Metadata Extraction Fallback
+    """
+    loop = asyncio.get_running_loop()
+    
+    # --- TIER 1: Native Gemini YouTube URL Ingestion ---
+    try:
+        print(f"🎬 [Tier 1] Attempting native Gemini URL ingestion for {video_id}...")
+        transcript = await asyncio.wait_for(
+            loop.run_in_executor(None, _tier1_native_gemini, video_id),
+            timeout=180.0
+        )
+        if transcript and len(transcript) > 50:
+            print(f"✅ [Tier 1] Successfully transcribed {video_id} directly via Gemini URL ({len(transcript)} chars).")
+            return transcript
+        print(f"⚠️ [Tier 1] Output too short for {video_id} ({len(transcript) if transcript else 0} chars). Escalating to Tier 2...")
+    except Exception as e:
+        print(f"⚠️ [Tier 1] Native Gemini URL ingestion failed for {video_id}: {e}. Escalating to Tier 2...")
+
+    # --- TIER 2: Compressed 24kbps Mono Audio via yt-dlp + File API ---
+    try:
+        print(f"🎙️ [Tier 2] Attempting compressed 24kbps mono audio extraction for {video_id}...")
+        transcript = await asyncio.wait_for(
+            loop.run_in_executor(None, _tier2_download_and_transcribe, video_id),
+            timeout=240.0
+        )
+        if transcript and len(transcript) > 50:
+            print(f"✅ [Tier 2] Successfully transcribed {video_id} via compressed audio ({len(transcript)} chars).")
+            return transcript
+        print(f"⚠️ [Tier 2] Output too short for {video_id}. Escalating to Tier 3...")
+    except Exception as e:
+        print(f"⚠️ [Tier 2] Audio extraction/transcription failed for {video_id}: {e}. Escalating to Tier 3...")
+
+    # --- TIER 3: Multi-Language Subtitle & Metadata Extraction Fallback ---
+    try:
+        print(f"📄 [Tier 3] Extracting metadata fallback for {video_id}...")
+        return await loop.run_in_executor(None, _tier3_metadata_extraction, video_id)
+    except Exception as e:
+        print(f"❌ [Tier 3] Metadata extraction failed for {video_id}: {e}")
         return ""
 
 
@@ -281,7 +310,6 @@ async def fetch_mentor_transcripts(mentor_names: list) -> tuple[dict, list]:
                 
                 transcript = await get_transcript(video_id)
                 if transcript:
-                    # Normalize YouTubeTranscriptApi (list) vs Gemini Audio (str)
                     if isinstance(transcript, list):
                         clean_text = " ".join([entry.get("text", "") for entry in transcript])
                     elif isinstance(transcript, str):
@@ -289,13 +317,15 @@ async def fetch_mentor_transcripts(mentor_names: list) -> tuple[dict, list]:
                     else:
                         clean_text = str(transcript)
 
-                    if len(clean_text) > 100 and not clean_text.startswith("Title: "):
+                    if len(clean_text) >= 50:
                         mentor_transcripts.append(f"[{datetime.fromtimestamp(published_at)}] {clean_text}")
                         highest_timestamp = max(highest_timestamp, published_at)
                     else:
-                        print(f"DIAGNOSTIC: Audio ingestion yielded no speech or only metadata for {name}. Skipping LLM.")
+                        print(f"ℹ️ [YouTube Scraper] Transcript output too short ({len(clean_text)} chars) for {name}. Updating checkpoint anyway.")
+                        highest_timestamp = max(highest_timestamp, published_at)
                 else:
-                    print(f"DIAGNOSTIC: Failed to fetch transcript for {name} ({video_id}).")
+                    print(f"DIAGNOSTIC: Failed to fetch transcript for {name} ({video_id}). Updating checkpoint anyway to avoid loop trap.")
+                    highest_timestamp = max(highest_timestamp, published_at)
             
             if mentor_transcripts:
                 transcripts[name] = "\n\n---\n\n".join(mentor_transcripts)
