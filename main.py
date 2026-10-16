@@ -398,7 +398,7 @@ async def ingest_whatsapp_text(payload: WhatsAppTextPayload):
         """
         
         # Assuming you have your gemini client initialized
-        chat = client.chats.create(model="gemini-2.5-flash")
+        chat = client.chats.create(model="gemini-3.8-flash")
         response = chat.send_message(extraction_prompt)
         
         # 3. Clean and Parse JSON

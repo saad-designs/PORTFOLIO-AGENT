@@ -205,7 +205,7 @@ async def generate_with_fallback(client: genai.Client, contents: list) -> str:
     Retries with exponential backoff on 429/quota or 503/network disconnects,
     failing fast on 404/invalid model errors to the next model in cascade.
     """
-    models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite"]
+    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     last_error = None
     
     for model_name in models_to_try:
@@ -266,7 +266,7 @@ def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") 
                 raise TimeoutError("Audio file processing exceeded 240-second cap.")
             time.sleep(3)
 
-        models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+        models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
         last_error = None
         for model in models_to_try:
             try:

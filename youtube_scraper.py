@@ -98,7 +98,7 @@ def _tier1_native_gemini(video_id: str) -> str:
             types.Part(text="Watch and listen to the audio of this video (which may be in Urdu, Hindi, or English). Provide a comprehensive, detailed English transcript and breakdown of everything said, capturing every PSX stock ticker, price target, support/resistance level, and macroeconomic insight.")
         ]
     )
-    models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     last_err = None
     for model_name in models_to_try:
         try:
@@ -272,6 +272,8 @@ MENTOR_CHANNEL_MAP = {
     "KTrade PK": "UCfXgbAAHzN_VxGJg2agyAYA"
 }
 
+LATEST_SWEEP_TIMESTAMP = 0
+
 async def fetch_mentor_transcripts(mentor_names: list) -> tuple[dict, list]:
     from portfolio_manager import get_checkpoint, update_checkpoint
     from datetime import datetime
@@ -337,9 +339,8 @@ async def fetch_mentor_transcripts(mentor_names: list) -> tuple[dict, list]:
             failed_mentors.append(name)
             continue
             
-    if highest_timestamp > last_timestamp:
-        update_checkpoint("youtube_last_timestamp", highest_timestamp)
-            
+    global LATEST_SWEEP_TIMESTAMP
+    LATEST_SWEEP_TIMESTAMP = highest_timestamp
     return transcripts, failed_mentors
 
 if __name__ == "__main__":

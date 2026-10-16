@@ -742,7 +742,7 @@ async def on_message(message):
         )
 
         chat = gemini_client.chats.create(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',
             config=types.GenerateContentConfig(
                 system_instruction=CORE_DIRECTIVE
             )
@@ -1069,7 +1069,9 @@ TASK:
                 price: float
                 intrinsic: float
             
-            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            p_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            f_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            llm = p_llm.with_fallbacks([f_llm])
             parser = llm.with_structured_output(OpportunityParser)
             try:
                 parsed_op = parser.invoke(f"Extract the exact ticker, current price, and target/intrinsic price from this thesis:\n{final_text}")

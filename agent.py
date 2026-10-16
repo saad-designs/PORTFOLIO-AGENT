@@ -705,13 +705,14 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-# Primary heavy reasoning model
-primary_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-# High-volume workhorse fallback
-fallback_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite")
+# Primary heavy reasoning model with multi-tier fallback cascade
+primary_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
+fallback_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+legacy_primary = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
+legacy_fallback = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
 
-# Chain with automatic fallback for 503 capacity errors
-llm = primary_llm.with_fallbacks([fallback_llm])
+# Chain with automatic fallback
+llm = primary_llm.with_fallbacks([fallback_llm, legacy_primary, legacy_fallback])
 
 # Instantiate the search tool
 search_tool = TavilySearch(name="web_search")
@@ -931,6 +932,9 @@ TONE & PERSONA:
 - Brutally honest, straightforward, and logical.
 - Speak like a real human trader. Zero corporate jargon, zero Wall Street pretension, and no empty fluff.
 - Never act like a people-pleaser. Challenge bad setups with hard data and clear reasoning.
+
+CRITICAL FORMATTING REQUIREMENT:
+- NEVER use Markdown pipe tables (| col | col |) because Discord cannot render them. Format all tables, portfolio allocations, and tactical breakdowns using clean bold bulleted lists instead.
 ''')
 
 
@@ -977,7 +981,7 @@ class TradeEvaluationState(TypedDict):
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 def analyst_node(state: TradeEvaluationState):
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    node_llm = llm
     
     is_macro = state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep'
     
@@ -991,18 +995,24 @@ def analyst_node(state: TradeEvaluationState):
           • Key Themes & Catalysts: 2-3 clean, punchy points breaking down the real economic story (inflation, fuel prices, IMF, political developments, or sectoral moves) and what they mean practically.
           • Desk Verdict: A clear, conversational bottom line on what we are doing with our capital today.
         - Strictly prohibit robotic template phrasing like 'Reviewing the current news feed', 'Market Stance: HOLD', or 'Evaluating the current market environment'.
+        - CRITICAL FORMATTING REQUIREMENT: NEVER use Markdown pipe tables (| col | col |) because Discord cannot render them. Format all tables, portfolio allocations, and tactical breakdowns using clean bold bulleted lists instead.
         
         Market Context: {state.get('rag_context', '')}
         """
         
         @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
         def _invoke_macro_analyst():
-            return llm.invoke(prompt)
+            return node_llm.invoke(prompt)
             
         result = _invoke_macro_analyst()
-        return {"analyst_thesis": result.content, "final_evaluation": {}}
+        raw_text = result.content
+        if isinstance(raw_text, list):
+            thesis_str = "".join([b.get("text", "") for b in raw_text if isinstance(b, dict)])
+        else:
+            thesis_str = str(raw_text)
+        return {"analyst_thesis": thesis_str.strip(), "final_evaluation": {}}
     else:
-        structured_llm = llm.with_structured_output(TradeEvaluationSchema)
+        structured_llm = node_llm.with_structured_output(TradeEvaluationSchema)
         prompt = f"""
         You are a quantitative value-investing risk manager. Analyze the asset's sell or trim trigger.
         You are strictly forbidden from using technical analysis, Moving Averages, RSI, or momentum.
@@ -1021,6 +1031,8 @@ def analyst_node(state: TradeEvaluationState):
         Provide a concise, hard-hitting analytical verdict explaining why the portfolio action is mathematically necessary. Address the risk manager's critique if it exists.
 
         COVERAGE EXPANSION DIRECTIVE: If your analysis reveals that this ticker, or any closely related company in the same sector, represents a strong fundamental prospect that is NOT currently in our active portfolio, explicitly state in your thesis: the calculated target price, your stop-loss level, and your historically grounded fair P/E for that company. Flag it clearly as a WATCHLIST CANDIDATE so the orchestration layer can route it to add_to_watchlist_tool.
+        
+        CRITICAL FORMATTING REQUIREMENT: NEVER use Markdown pipe tables (| col | col |) because Discord cannot render them. Format all tables, portfolio allocations, and tactical breakdowns using clean bold bulleted lists instead.
         """
         
         @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
@@ -1031,7 +1043,7 @@ def analyst_node(state: TradeEvaluationState):
         return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
 
 def risk_manager_node(state: TradeEvaluationState):
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    node_llm = llm
     
     prompt = f"""
     You are a strict compliance officer and risk manager.
@@ -1043,13 +1055,21 @@ def risk_manager_node(state: TradeEvaluationState):
     CRITICAL RULE: You must explicitly REJECT any Analyst thesis that attempts to take profits on a fundamentally sound company trading below its fair value, regardless of the portfolio percentage gain. We do not trim based on static arbitrary percentage gains.
     If the thesis is overly risky, violates rules, or confidence is below 0.8, output a critical critique.
     If it passes all checks, output exactly 'APPROVED'.
+    
+    CRITICAL FORMATTING REQUIREMENT: NEVER use Markdown pipe tables (| col | col |) because Discord cannot render them. Format all tables, portfolio allocations, and tactical breakdowns using clean bold bulleted lists instead.
     """
     
     @retry(wait=wait_random_exponential(multiplier=1, max=10), stop=stop_after_attempt(5))
     def _invoke_risk_manager():
-        return llm.invoke(prompt)
+        return node_llm.invoke(prompt)
         
-    critique = _invoke_risk_manager().content
+    result = _invoke_risk_manager()
+    raw_critique = result.content
+    if isinstance(raw_critique, list):
+        critique_str = "".join([b.get("text", "") for b in raw_critique if isinstance(b, dict)])
+    else:
+        critique_str = str(raw_critique)
+    critique = critique_str.strip()
     iteration = state.get('iteration_count', 0) + 1
     return {"risk_critique": critique, "iteration_count": iteration}
 

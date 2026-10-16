@@ -206,8 +206,27 @@ async def _run_youtube_sweep_inner():
                     
                 # Store the high-signal structured output in Vector DB instead of rambling text
                 await ingest_knowledge_tool.ainvoke({"input_text_or_url": formatted_text})
-                
-        if failed_mentors:
+
+                # Post knowledge brief to Discord research channel
+                if alert_channel:
+                    try:
+                        import discord
+                        embed = discord.Embed(
+                            title=f"🎬 YouTube Knowledge Brief: {mentor}",
+                            description=formatted_text[:4096],
+                            color=3447003
+                        )
+                        await alert_channel.send(embed=embed)
+                    except Exception as discord_err:
+                        print(f"⚠️ [YouTube Sweep] Failed to send Discord embed for {mentor}: {discord_err}")
+
+            # Advance checkpoint only AFTER all transcripts are successfully stored and broadcasted
+            from youtube_scraper import LATEST_SWEEP_TIMESTAMP
+            if LATEST_SWEEP_TIMESTAMP > 0:
+                from portfolio_manager import update_checkpoint
+                update_checkpoint("youtube_last_timestamp", LATEST_SWEEP_TIMESTAMP)
+                print(f"✅ [YouTube Sweep] Watermark checkpoint advanced to {LATEST_SWEEP_TIMESTAMP}.")
+
             alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
             if alert_channel:
                 from discord_bot import send_long_message
@@ -1112,6 +1131,9 @@ async def run_desk_manager_sweep():
 Synthesize these signals into a single, logical decision. Act as the human portfolio manager.
 If a fundamental buy signal conflicts with a macro trim signal, decide which outweighs the other based on logic, and provide a final verdict.
 Format your response as a professional portfolio update, stating clear actions to take.
+
+CRITICAL FORMATTING REQUIREMENT:
+NEVER use Markdown pipe tables (| col | col |) because Discord cannot render them. Format all tables, portfolio allocations, and tactical breakdowns using clean bold bulleted lists instead.
 """
         
         # 3. Call Gemini
