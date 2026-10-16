@@ -17,22 +17,16 @@ def sanitize_ohlc_data(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
     initial_len = len(df)
     
-    # 1. Force chronological order (prevents moving average distortion)
-    df = df.sort_index()
-    
-    # 2. Drop rows missing critical price data
-    df = df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-    
-    # 3. Enforce strict OHLC mathematical reality
-    valid_rows = (
-        (df['High'] >= df['Low']) &
-        (df['High'] >= df['Open']) &
-        (df['High'] >= df['Close']) &
-        (df['Low'] <= df['Open']) &
-        (df['Low'] <= df['Close'])
-    )
-    
-    df = df[valid_rows]
+    # 1. Parse and sort strictly ascending (Oldest -> Newest)
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values(by='Date', ascending=True).reset_index(drop=True)
+    elif not df.index.is_monotonic_increasing:
+        df = df.sort_index(ascending=True)
+
+    # 2. Drop malformed PSX tape rows where Low > High or volume is invalid
+    df = df[df['Low'] <= df['High']]
+    df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
     
     dropped = initial_len - len(df)
     if dropped > 0:

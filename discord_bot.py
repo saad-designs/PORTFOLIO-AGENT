@@ -25,7 +25,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from agent import get_agent
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
 import asyncio
-from youtube_scraper import fetch_mentor_transcripts, get_channel_id, get_latest_video_id, get_transcript
+
 from vector_brain import ingest_knowledge_tool, query_mentor_brain_tool
 from googleapiclient.discovery import build
 import contextvars
@@ -45,137 +45,9 @@ from google.genai import types, errors
 
 client = genai.Client()
 
-def apply_research_sentiment_to_db(llm_output: str):
-    import re
-    import json
-    match = re.search(r"<SENTIMENT_MAPPING>(.*?)</SENTIMENT_MAPPING>", llm_output, re.DOTALL)
-    if not match:
-        print("[RAG Pipeline] No structured sentiment mapping found in output.")
-        return
 
-    try:
-        sentiment_dict = json.loads(match.group(1).strip())
-        from portfolio_manager import get_db_connection
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        for ticker, sentiment in sentiment_dict.items():
-            if sentiment in ["BULLISH", "BEARISH", "NEUTRAL"]:
-                cur.execute(
-                    "UPDATE portfolio_holdings SET research_sentiment = %s, sentiment_updated_at = CURRENT_TIMESTAMP WHERE ticker = %s",
-                    (sentiment, ticker)
-                )
-                print(f"[RAG Pipeline] Updated {ticker} sentiment -> {sentiment}")
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"[RAG Pipeline] Failed to parse and save sentiment: {e}")
 
-async def extract_and_analyze_email(raw_email_bytes: bytes) -> str:
-    """
-    Extracts text, inline images, PDF attachments, and linked downloads
-    from an email and passes them to Gemini Multimodal.
-    """
-    msg = email.message_from_bytes(raw_email_bytes)
-    
-    email_text = ""
-    multimodal_parts = []
-    
-    # 1. Traverse all MIME parts
-    for part in msg.walk():
-        content_type = part.get_content_type()
-        content_disposition = str(part.get("Content-Disposition", ""))
-        payload = part.get_payload(decode=True)
 
-        if not payload:
-            continue
-
-        # Extract plain text / HTML text
-        if content_type == "text/plain":
-            email_text += payload.decode(errors="ignore") + "\n"
-        elif content_type == "text/html":
-            soup = BeautifulSoup(payload.decode(errors="ignore"), "html.parser")
-            email_text += soup.get_text(separator="\n") + "\n"
-            
-            # Find embedded <img> tags or 'Download' links
-            for img in soup.find_all("img"):
-                src = img.get("src")
-                if src and src.startswith("http"):
-                    try:
-                        async with httpx.AsyncClient(timeout=10.0) as http_client:
-                            img_resp = await http_client.get(src)
-                            if img_resp.status_code == 200:
-                                img_mime = img_resp.headers.get("content-type", "image/jpeg").split(";")[0]
-                                multimodal_parts.append(
-                                    types.Part.from_bytes(data=img_resp.content, mime_type=img_mime)
-                                )
-                    except Exception:
-                        pass
-
-            for a in soup.find_all("a", href=True):
-                if "download" in a.text.lower() or a["href"].endswith((".pdf", ".png", ".jpg", ".jpeg")):
-                    try:
-                        async with httpx.AsyncClient(timeout=15.0) as http_client:
-                            link_resp = await http_client.get(a["href"])
-                            if link_resp.status_code == 200:
-                                link_mime = link_resp.headers.get("content-type", "application/pdf").split(";")[0]
-                                multimodal_parts.append(
-                                    types.Part.from_bytes(data=link_resp.content, mime_type=link_mime)
-                                )
-                    except Exception:
-                        pass
-
-        # Extract direct image attachments or inline CIDs
-        elif content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
-            multimodal_parts.append(
-                types.Part.from_bytes(data=payload, mime_type=content_type)
-            )
-
-        # Extract PDF attachments
-        elif content_type == "application/pdf" or "pdf" in content_disposition:
-            multimodal_parts.append(
-                types.Part.from_bytes(data=payload, mime_type="application/pdf")
-            )
-
-    # 2. Construct Multimodal Prompt
-    prompt = f"""
-You are an institutional financial analyst. Extract all relevant market intelligence from this email, including any attached/embedded images, tables, or PDF reports.
-
-Email Body Text:
-{email_text.strip()}
-
-Instructions:
-1. Extract PSX / KSE-100 performance numbers, top gainers, top losers, and volume leaders from tables/charts.
-2. Summarize key macro news, sales desk views, and regulatory updates verbatim without omitting key metrics.
-3. Structure the output into clean, actionable bullet points for Discord.
-"""
-
-    contents = [prompt] + multimodal_parts
-
-    # 3. Call Gemini 3.6 Flash with automated fallback
-    models_to_try = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
-    response = None
-    
-    for model_name in models_to_try:
-        try:
-            chat = client.aio.chats.create(
-                model=model_name,
-                config=types.GenerateContentConfig(
-                    tools=None,
-                    temperature=0.2
-                )
-            )
-            response = await chat.send_message(contents)
-            break
-        except Exception as e:
-            print(f"Model {model_name} failed: {e}. Trying next...")
-            
-    if not response:
-        raise Exception("All fallback models failed.")
-        
-    return response.text
 
 from portfolio_manager import log_trade, get_portfolio_summary, set_target, get_live_price, get_watchlist_summary, scan_shariah_market, sync_portfolio_tool
 
@@ -319,52 +191,41 @@ async def update_psx_tickers():
     url = "https://dps.psx.com.pk/symbols"
     
     try:
-        async with aiohttp.ClientSession() as session:
-            # We add generic headers to prevent basic blocking
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9"
-            }
-            async with session.get(url, headers=headers, timeout=30) as response:
-                if response.status == 200:
-                    try:
-                        data = await response.json(content_type=None) # Disregard content type mismatch
-                        mapping = {}
-                        count = 0
-                        if isinstance(data, list):
-                            for item in data:
-                                name = item.get("name", item.get("companyName", item.get("company_name", "")))
-                                symbol = item.get("symbol", item.get("ticker", ""))
-                                if name and symbol:
-                                    mapping[name] = symbol
-                            DYNAMIC_PSX_TICKER_MAPPING = json.dumps(mapping)
-                            count = len(mapping)
-                        elif isinstance(data, dict):
-                            DYNAMIC_PSX_TICKER_MAPPING = json.dumps(data)
-                            count = len(data)
-                        else:
-                            DYNAMIC_PSX_TICKER_MAPPING = str(data)
-                            count = 1
-                            
-                        if count < 200:
-                            raise ValueError(f"PSX API payload abnormally small ({count} items), assuming cache poisoning risk.")
-                            
-                        print(f"✅ Loaded {count} active PSX tickers into memory.")
-                        # Save to cache
-                        try:
-                            with open('psx_tickers_cache.json', 'w') as f:
-                                f.write(DYNAMIC_PSX_TICKER_MAPPING)
-                        except Exception as cache_err:
-                            print(f"⚠️ Failed to write ticker cache: {cache_err}")
-                    except Exception as e:
-                        print(f"⚠️ Failed to parse ticker JSON: {e}")
-                        raise
-                else:
-                    print(f"⚠️ Failed to fetch tickers, HTTP {response.status}")
-                    raise Exception(f"HTTP {response.status}")
+        from market_data_scraper import fetch_psx_data_robust
+        data = await fetch_psx_data_robust(url, is_json=True)
+        if data:
+            mapping = {}
+            count = 0
+            if isinstance(data, list):
+                for item in data:
+                    name = item.get("name", item.get("companyName", item.get("company_name", "")))
+                    symbol = item.get("symbol", item.get("ticker", ""))
+                    if name and symbol:
+                        mapping[name] = symbol
+                DYNAMIC_PSX_TICKER_MAPPING = json.dumps(mapping)
+                count = len(mapping)
+            elif isinstance(data, dict):
+                DYNAMIC_PSX_TICKER_MAPPING = json.dumps(data)
+                count = len(data)
+            else:
+                DYNAMIC_PSX_TICKER_MAPPING = str(data)
+                count = 1
+                
+            if count < 200:
+                raise ValueError(f"PSX API payload abnormally small ({count} items), assuming cache poisoning risk.")
+                
+            print(f"✅ Loaded {count} active PSX tickers into memory.")
+            # Save to cache
+            try:
+                with open('psx_tickers_cache.json', 'w') as f:
+                    f.write(DYNAMIC_PSX_TICKER_MAPPING)
+            except Exception as cache_err:
+                print(f"⚠️ Failed to write ticker cache: {cache_err}")
+        else:
+            raise Exception("fetch_psx_data_robust returned None")
     except Exception as e:
         print(f"🚨 Ticker Fetch Error: {repr(e)}")
+        import traceback
         traceback.print_exc()
         # Fallback to cache
         try:
@@ -397,22 +258,22 @@ async def midnight_mentor_sweep():
         
         print("Starting Unfiltered Midnight Mentor Sweep...")
         # Offload yt-dlp / transcript fetch
-        transcripts_data = await asyncio.to_thread(fetch_mentor_transcripts, mentors)
+        transcripts_data, failed_mentors = await fetch_mentor_transcripts(mentors)
         
-        if not transcripts_data or len(transcripts_data) < len(mentors):
+        if failed_mentors:
             alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
             if alert_channel:
-                missing = set(mentors) - set(transcripts_data.keys())
-                msg = f"⚠️ **CRITICAL ALERT:** Midnight Sweep experienced a partial or complete failure. YT-DLP might be IP blocked. Failed to process: {', '.join(missing)}."
+                msg = f"⚠️ **PARTIAL SWEEP FAILURE**: The following mentors failed all fallback extraction tiers: {', '.join(failed_mentors)}"
                 await alert_channel.send(msg)
                 
-            if not transcripts_data:
-                print("No new transcripts could be extracted tonight.")
-                return
+        if not transcripts_data:
+            print("No new transcripts could be extracted tonight.")
+            return
 
         # 1. Fetch current portfolio
         def get_portfolio_weights():
-            conn = DB_POOL.getconn()
+            from portfolio_manager import get_db_connection
+            conn = get_db_connection()
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0")
@@ -430,36 +291,15 @@ async def midnight_mentor_sweep():
                 print("Error fetching holdings for sweep:", e)
                 return "Could not fetch holdings due to DB error."
             finally:
-                DB_POOL.putconn(conn)
+                conn.close()
                 
         # Offload DB call
         holdings_str = await asyncio.to_thread(get_portfolio_weights)
 
         # Loop through successful extractions and send them to your LLM agent
         for mentor, text in transcripts_data.items():
-            prompt = f"""
-            You are the Chief Investment Strategist of this portfolio. You do not just summarize information; you analyze it against our existing assets.
-            
-            CURRENT PORTFOLIO HOLDINGS: {holdings_str}
-            
-            Analyze the following transcript from a market mentor ({mentor}). 
-            1. Extract the core macro and strategic insights.
-            2. CRITICAL SYSTEM INTEGRATION: Explicitly state how these insights impact our CURRENT PORTFOLIO HOLDINGS. If they mention a sector we own, highlight it. If their macro view threatens our positions, flag the risk.
-            3. Keep the tone human, candid, and direct. No robotic jargon.
-            
-            Also, extract any specific Pakistani stock/ticker mentions along with suggested buy targets and/or stop losses. 
-            Format the targets strictly as Discord commands at the very end of your response, one per line:
-            !target TICKER TARGET_PRICE STOP_LOSS
-            (If no stop loss is mentioned, use 0)
-            
-            IMPORTANT: Do not guess the ticker. Use the following mapping dictionary to resolve company names to their exact PSX ticker symbols. If the exact ticker is not in this list, do your best to infer the correct 3-5 letter PSX symbol, but NEVER use the full company name in the !target command.
-            {DYNAMIC_PSX_TICKER_MAPPING}
-            
-            Transcript: 
-            {text}
-            
-            OUTPUT DIRECTIVE: You must start your response exactly with the character '* '. Provide only the bulleted list. Any conversational text before the first bullet point is a critical failure.
-            """            
+            from ingestion import SWEEP_FORMAT_PROMPT
+            prompt = SWEEP_FORMAT_PROMPT.format(mentor_name=mentor) + f"\n\nTranscript:\n{text}"
             inputs = {"messages": [HumanMessage(content=prompt)]}
             config = {"configurable": {"thread_id": f"midnight_sweep_{mentor}"}}
             
@@ -476,12 +316,23 @@ async def midnight_mentor_sweep():
                 else:
                     final_reply = str(raw_content)
                 
+                # Split the text at the internal system markers to clean the Discord message
+                discord_friendly_message = final_reply
+                if "EXTRACTED TICKERS" in discord_friendly_message:
+                    discord_friendly_message = discord_friendly_message.split("EXTRACTED TICKERS")[0]
+                if "EXTRACTED TACTICAL RULE" in discord_friendly_message:
+                    discord_friendly_message = discord_friendly_message.split("EXTRACTED TACTICAL RULE")[0]
+                
+                discord_friendly_message = discord_friendly_message.strip()
+                
                 channel = bot.get_channel(RESEARCH_CHANNEL_ID)
                 if channel:
-                    # Discord 2000 char limit slicing for safety
-                    chunk_size = 1900
-                    for i in range(0, len(final_reply), chunk_size):
-                        await channel.send(f"🌙 **Midnight Insight: {mentor}**\n{final_reply[i:i+chunk_size]}")
+                    embed = discord.Embed(
+                        title=f"🌙 Midnight Insight: {mentor}",
+                        description=discord_friendly_message[:4096],
+                        color=16766720 # Gold color
+                    )
+                    await channel.send(embed=embed)
                         
                 print(f"Successfully generated summary for {mentor}")
             except Exception as e:
@@ -696,61 +547,7 @@ async def log_trade_tool(action: str, ticker: str, quantity: int, price: float, 
     except Exception as e:
         return f"Transaction failed during verification phase: {str(e)}"
 
-@tool
-async def fetch_ktrade_emails() -> str:
-    """Fetches unread corporate briefings and research reports from KTrade via the dedicated email inbox."""
-    # Securely load credentials from your .env file
-    EMAIL_USER = os.getenv("EMAIL_USER")
-    EMAIL_PASS = os.getenv("EMAIL_PASS")
-    
-    if not EMAIL_USER or not EMAIL_PASS:
-        return "Tool Execution Error: Email credentials (EMAIL_USER or EMAIL_PASS) are not set in the .env file."
 
-    def do_imap():
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(EMAIL_USER, EMAIL_PASS)
-        mail.select("inbox")
-        
-        # Target specific sender and unread status to prevent data pollution
-        # Note: Change "research@ktrade.pk" to the exact sender address KTrade uses
-        status, messages = mail.search(None, '(UNSEEN FROM "research@ktrade.pk")')
-        
-        if status != "OK" or not messages[0]:
-            mail.logout()
-            return []
-            
-        parts = []
-        for num in messages[0].split():
-            res, msg_data = mail.fetch(num, "(RFC822)")
-            for response_part in msg_data:
-                if isinstance(response_part, tuple):
-                    msg = email.message_from_bytes(response_part[1])
-                    
-                    # Safely decode the subject line
-                    subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
-                        
-                    parts.append((subject, response_part[1]))
-                    
-        mail.logout()
-        return parts
-        
-    try:
-        parts = await asyncio.to_thread(do_imap)
-        if not parts:
-            return "No new unread emails found from KTrade."
-
-        extracted_reports = []
-        for subject, raw_bytes in parts:
-            body = await extract_and_analyze_email(raw_bytes)
-            extracted_reports.append(f"Subject: {subject}\nBody: {body}\n---")
-            
-        return "\n\n".join(extracted_reports)
-        
-    except Exception as e:
-        # Returning string prevents the LangChain graph from crashing due to unhandled IMAP timeouts
-        return f"Tool Execution Error: Failed to fetch emails. Details: {str(e)}"
 
 @tool
 def fetch_watchlist_tool() -> str:
@@ -873,16 +670,36 @@ def trigger_research(ticker: str = "KMI30") -> str:
 
     # Pull the latest active rules from Active Playbook
     try:
+        from google import genai
+        client = genai.Client()
+        
+        # 1. Define the semantic context of what you are researching
+        research_context = f"Analyzing {ticker} for fundamental valuation, dividend yield, macro sensitivity, and cyclical margin expansion."
+        
+        # 2. Embed the context
+        result = client.models.embed_content(
+            model='gemini-embedding-001',
+            contents=research_context,
+            config={'output_dimensionality': 768}
+        )
+        query_embedding = result.embeddings[0].values
+        
+        # 3. Pull the top 5 most semantically relevant rules (threshold 0.5)
         conn = psycopg2.connect(os.getenv("SUPABASE_DB_URL"))
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT source, rule FROM active_playbook ORDER BY created_at DESC LIMIT 5")
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT source, rule FROM match_playbook_rules(%s::vector, 0.5, 5)",
+            (query_embedding,)
+        )
         active_rules = cur.fetchall()
-        if active_rules:
-            rules_formatted = "\n".join([f"- [{r['source']}]: {r['rule']}" for r in active_rules])
-        else:
-            rules_formatted = "Standard value compounding frameworks apply."
         cur.close()
         conn.close()
+        
+        # 4. Format for the LLM
+        if active_rules:
+            rules_formatted = "\n".join([f"- [{r[0]}]: {r[1]}" for r in active_rules])
+        else:
+            rules_formatted = "Standard value compounding frameworks apply."
     except Exception as e:
         rules_formatted = f"Error fetching playbook rules: {e}"
 
@@ -915,14 +732,22 @@ async def on_message(message):
 
     # Direct Mentions or DMs logic for Gemini tool calling
     if bot.user in message.mentions or not message.guild:
+        from agent import get_portfolio_status
+        mock_config = {"configurable": {"discord_user_id": str(message.author.id)}}
+        current_portfolio_state = await get_portfolio_status.ainvoke(mock_config)
+        
+        injected_prompt = (
+            f"CURRENT PORTFOLIO STATE:\n{current_portfolio_state}\n\n"
+            f"USER MESSAGE:\n{message.content}"
+        )
+
         chat = gemini_client.chats.create(
-            model='gemini-3.5-flash',
+            model='gemini-1.5-flash',
             config=types.GenerateContentConfig(
-                system_instruction=CORE_DIRECTIVE,
-                tools=agent_tools
+                system_instruction=CORE_DIRECTIVE
             )
         )
-        response = chat.send_message(message.content)
+        response = chat.send_message(injected_prompt, config=types.GenerateContentConfig(tools=agent_tools))
         await message.channel.send(response.text)
         return
 
@@ -966,47 +791,56 @@ async def on_message(message):
 
     # INSTANT TYPING: Fire this before ANY database or LangGraph operations
     async with message.channel.typing():
-        current_author_id.set(message.author.id)
-
-        # --- Phase 4 Conversational Ledger Parsing ---
-        if message.channel.id == CHANNEL_ID and not message.content.startswith("!"):
-            from trade_parser import extract_trade_intent
-            from valuation_engine import execute_buy_fifo, execute_sell_fifo
-            
-            trade_intent = extract_trade_intent(message.content)
-            if trade_intent:
-                user_id = str(message.author.id)
-                try:
-                    if trade_intent.action == "BUY":
-                        result = execute_buy_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
-                    elif trade_intent.action == "SELL":
-                        result = execute_sell_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
-                    else:
-                        result = {"status": "error", "message": "Unknown trade action."}
-                        
-                    await message.channel.send(result.get("message", "Trade executed."))
-                except Exception as e:
-                    await message.channel.send(f"🚨 Execution Error: {str(e)}")
-                return # Stop execution so it doesn't trigger the main agent
-        # ---------------------------------------------
-
-        # Trigger the agent to think, execute tools, and generate a response
         try:
-            image_data = None
-            if message.attachments:
-                attachment = message.attachments[0]
+            current_author_id.set(message.author.id)
+
+            # --- Phase 4 Conversational Ledger Parsing ---
+            if message.channel.id == CHANNEL_ID and not message.content.startswith("!"):
+                from trade_parser import extract_trade_intent
+                from valuation_engine import execute_buy_fifo, execute_sell_fifo
+                
+                trade_intent = extract_trade_intent(message.content)
+                if trade_intent:
+                    user_id = str(message.author.id)
+                    try:
+                        if trade_intent.action == "BUY":
+                            result = execute_buy_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
+                        elif trade_intent.action == "SELL":
+                            result = execute_sell_fifo(user_id, trade_intent.ticker, trade_intent.shares, trade_intent.price)
+                        else:
+                            result = {"status": "error", "message": "Unknown trade action."}
+                            
+                        await message.channel.send(result.get("message", "Trade executed."))
+                    except Exception as e:
+                        await message.channel.send(f"🚨 Execution Error: {str(e)}")
+                    return # Stop execution so it doesn't trigger the main agent
+            # ---------------------------------------------
+
+            # Trigger the agent to think, execute tools, and generate a response
+            from agent import get_portfolio_status
+            mock_config = {"configurable": {"discord_user_id": str(message.author.id)}}
+            current_portfolio_state = await get_portfolio_status.ainvoke(mock_config)
+            
+            base_text = message.content or "Analyze these images against our portfolio and mentor rules."
+            injected_prompt = (
+                f"CURRENT PORTFOLIO STATE:\n{current_portfolio_state}\n\n"
+                f"USER MESSAGE:\n{base_text}"
+            )
+            
+            content = []
+            has_images = False
+            for attachment in message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
                     image_bytes = await attachment.read()
                     image_b64 = base64.b64encode(image_bytes).decode('utf-8')
                     image_data = f"data:{attachment.content_type};base64,{image_b64}"
+                    content.append({"type": "image_url", "image_url": {"url": image_data}})
+                    has_images = True
 
-            if image_data:
-                content = [
-                    {"type": "text", "text": message.content or "Analyze this image against our portfolio and mentor rules."},
-                    {"type": "image_url", "image_url": {"url": image_data}}
-                ]
+            if has_images:
+                content.insert(0, {"type": "text", "text": injected_prompt})
             else:
-                content = message.content
+                content = injected_prompt
 
             # We use ainvoke so it doesn't block the discord async loop
             # Route the channel ID directly into the existing PostgresSaver in agent.py
@@ -1069,6 +903,7 @@ async def on_message(message):
             # Send the response back seamlessly
             if final_text:
                 await send_long_message(message.channel, final_text)
+
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1300,62 +1135,7 @@ TASK:
     except Exception as e:
         print(f"🔴 SCANNER ERROR: {e}")
 
-from psx_watchdog import fetch_latest_psx_announcements
 
-@tasks.loop(minutes=15) # Check for new filings every 15 minutes during market hours
-async def psx_filing_watchdog():
-    try:
-        import os
-        from agent import get_agent, DYNAMIC_KMI30_TICKERS
-        
-        # 1. Fetch new filings off the main thread
-        new_filings = await asyncio.to_thread(fetch_latest_psx_announcements)
-        
-        if not new_filings:
-            return
-
-        channel_id_str = os.getenv("ADMIN_CHANNEL_ID")
-        if not channel_id_str:
-            return
-            
-        channel = bot.get_channel(int(channel_id_str))
-        agent_app = await get_agent()
-
-        for filing in new_filings:
-            ticker = filing['symbol'].upper()
-            
-            # 2. Strict Filter: Only process if it is in our KMI-30 dynamic memory
-            if len(DYNAMIC_KMI30_TICKERS) > 0 and ticker not in DYNAMIC_KMI30_TICKERS:
-                continue
-                
-            print(f"📄 Processing new PSX Filing for {ticker}...")
-            
-            # 3. AI Impact Analysis
-            prompt = f"""
-            You are a quantitative researcher. The Pakistan Stock Exchange just published a live corporate filing for {ticker}.
-            
-            Filing Title: {filing['title']}
-            Time: {filing['date']} at {filing['time']}
-            
-            Analyze the title of this disclosure. Does this sound like a material event (e.g., earnings result, dividend, board shakeup, acquisition)? 
-            If it is just routine corporate noise (e.g., "Loss of Share Certificate"), output exactly: IGNORE.
-            If it is material, give me a brutal 2-sentence breakdown of what this likely means for the stock's fundamental valuation.
-            """
-            
-            state = {"messages": [("user", prompt)]}
-            verdict = await agent_app.ainvoke(state, {"configurable": {"thread_id": f"filing_{ticker}_{filing['time']}"}})
-            
-            raw_content = verdict["messages"][-1].content
-            final_text = " ".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in raw_content]).strip() if isinstance(raw_content, list) else str(raw_content).strip()
-
-            # 4. Route to Discord if material
-            if "IGNORE" not in final_text.upper():
-                await channel.send(f"🚨 **NEW OFFICIAL PSX FILING: {ticker}** 🚨\n**Title:** `{filing['title']}`")
-                from discord_bot import send_long_message 
-                await send_long_message(channel, final_text)
-
-    except Exception as e:
-        print(f"🔴 PSX FILING WATCHDOG ERROR: {e}")
 
 import yfinance as yf
 from datetime import datetime
@@ -1510,9 +1290,9 @@ async def test_youtube(ctx, *, mentor_name: str):
     
     try:
         # The function expects a list, so we wrap the single string in brackets
-        transcripts_data = fetch_mentor_transcripts([mentor_name])
+        transcripts_data, failed_mentors = await fetch_mentor_transcripts([mentor_name])
         
-        if not transcripts_data or mentor_name not in transcripts_data:
+        if failed_mentors or not transcripts_data or mentor_name not in transcripts_data:
             await ctx.send(f"❌ **Failed.** No transcript extracted for {mentor_name}. Check your Render logs for API errors.")
             return
             
@@ -1572,28 +1352,20 @@ async def run_business_portfolio_sweep():
 
     # 2. The Master Prompt: Forces scraping, database ingestion, and strict formatting
     prompt = f"""
-    Execute your daily market sweep with the following strict sequence. 
+You are a ruthless, cynical senior equity analyst managing a proprietary PSX portfolio.
+Review the market data, news, and our current portfolio holdings (SYS, HUBC, LUCK, FFC, EFERT, MEBL, MARI).
 
-    {portfolio_context}
+Write a sharp, aggressive End-of-Day Desk Note.
+NO robotic headers, NO numbered lists (1, 2, 3), and NO corporate fluff. 
+Format exactly like this:
 
-    STEP 1: SCRAPE & INGEST
-    - Use your search and scraping tools to find the latest macroeconomic updates, PSX notices, and new insights from InvestKaar, ARN, Jawad Hafeez, and Sarmaaya Financials over the last 24 hours.
-    - IMMEDIATELY use your `ingest_knowledge_tool` to permanently save the core strategic metrics and macro facts you just found into your Vector Brain. Do not skip this step.
+**⚡ End-of-Day Desk Note**
+Write 2-3 punchy sentences on the macro reality today. What actually moved the needle? Is it noise or a structural shift?
 
-    STEP 2: GENERATE THE BRIEFING
-    After the data is saved, format your final output EXACTLY like the structure below. Keep it compact, insightful, and brutally logical.
+**🎯 Portfolio Impact & Action**
+Call out ONLY the holdings that matter today. Are we bleeding on SYS? Is MEBL carrying the weight? Give me the brutal truth and state the desk's immediate action (e.g., hold cash, buy the dip, cut losers).
 
-    # Institutional Business Sweep — {datetime.now().strftime('%A, %B %d, %Y')}
-    Good evening. Here is your scheduled market intelligence sweep.
-
-    ## 1. The 24-Hour Reality Check
-    [Provide a concise update on new videos, strategic shifts, or macro news. If none, state that the analysis remains anchored to previous data.]
-
-    ## 2. Macro Metrics & Surprises
-    [Bullet points on critical macro data, e.g., trade deficits, services surplus, or sector impacts. Use bold headers for each bullet like "**The Headline Illusion:**" or "**The Market Impact:**"]
-
-    ## 3. Sarmaaya Financials & PSX Data
-    [List upcoming corporate board meetings for tracking, formal PSX notices, or holiday alerts. Analyze the Portfolio Context provided above and evaluate any immediate risks.]
+{portfolio_context}
     """
     
     try:
@@ -1689,178 +1461,7 @@ def clean_email_body(msg) -> str:
 
     return body
 
-async def run_email_sweep():
-    print("📧 [Email Sweep] Checking inbox...")
-    # 0 = Monday, 4 = Friday, 5 = Saturday, 6 = Sunday
-    if datetime.now(pkt_tz).weekday() >= 5:
-        return
-        
-    try:
-        EMAIL_USER = os.getenv("EMAIL_USER")
-        EMAIL_PASS = os.getenv("EMAIL_PASS")
-        
-        if not EMAIL_USER or not EMAIL_PASS:
-            print("📧 [Email Sweep] Missing EMAIL_USER or EMAIL_PASS in .env")
-            return
-            
-        print("📧 [Email Sweep] Authenticating with IMAP...")
-        
-        def fetch_emails():
-            mail = imaplib.IMAP4_SSL("imap.gmail.com")
-            mail.login(EMAIL_USER, EMAIL_PASS)
-            mail.select("inbox")
-            status, data = mail.search(None, '(UNSEEN)')
-            
-            if status != "OK" or not data[0]:
-                mail.logout()
-                return []
-                
-            msg_nums = data[0].split()
-            print(f"📧 [Email Sweep] Found {len(msg_nums)} unread emails. Evaluating filters...")
-            
-            ingested_reports = []
-            
-            for num in msg_nums:
-                res, msg_data = mail.fetch(num, "(RFC822)")
-                for response_part in msg_data:
-                    if isinstance(response_part, tuple):
-                        msg = email.message_from_bytes(response_part[1])
-                        
-                        subject_header = decode_header(msg.get("Subject", ""))[0]
-                        subject = subject_header[0]
-                        encoding = subject_header[1]
-                        if isinstance(subject, bytes):
-                            subject = subject.decode(encoding or "utf-8", errors="ignore")
-                        
-                        sender = msg.get("From", "").lower()
-                        
-                        is_valid_sender = any(domain in sender for domain in INSTITUTIONAL_DOMAINS)
-                        is_valid_subject = any(kw in subject.lower() for kw in RESEARCH_KEYWORDS)
-                        
-                        if is_valid_sender or is_valid_subject:
-                            print(f"📧 [Email Sweep] Processing institutional report: '{subject}' from {sender}")
-                            ingested_reports.append((subject, sender, response_part[1]))
-                        else:
-                            print(f"📧 [Email Sweep] Skipping non-research email: '{subject}'")
-                            
-            mail.logout()
-            return ingested_reports
-
-        # 1. Run the blocking network call in a separate thread
-        ingested_reports = await asyncio.to_thread(fetch_emails)
-        
-        # 2. Halt execution if no new data is found
-        if not ingested_reports:
-            print("📧 [Email Sweep] 0 new research emails found. Inbox is clear.")
-            return 
-            
-        print("📧 [Email Sweep] Sending data to LLM for summarization...")
-        
-        final_messages = []
-        for subject, sender, raw_bytes in ingested_reports:
-            body_text = await extract_and_analyze_email(raw_bytes)
-            
-            prompt = (
-                f"Institutional Research Email Received.\n"
-                f"Subject: {subject}\n"
-                f"Sender: {sender}\n\n"
-                f"Content:\n{body_text[:12000]}\n\n"
-                f"Extract the core market outlook, key target stocks mentioned, and economic triggers.\n"
-                f"At the very end of your response, output a strict machine-readable sentiment tag for every ticker mentioned in this exact format:\n"
-                f"<SENTIMENT_MAPPING>\n"
-                f'{{"SYS": "BEARISH", "HUBC": "BULLISH", "POL": "BULLISH", "NBP": "BEARISH", "DGKC": "BULLISH", "SAZEW": "NEUTRAL"}}\n'
-                f"</SENTIMENT_MAPPING>\n"
-                f"Rules for sentiment: Use ONLY \"BULLISH\", \"BEARISH\", or \"NEUTRAL\"."
-            )
-            max_retries = 3
-            
-            for attempt in range(max_retries):
-                try:
-                    chat = client.aio.chats.create(
-                        model="gemini-3.5-flash",
-                        config=types.GenerateContentConfig(
-                            tools=None,
-                            temperature=0.2
-                        )
-                    )
-                    response = await chat.send_message(prompt)
-                    break 
-                except errors.ServerError as e:
-                    if "503" in str(e):
-                        print(f"⚠️ Gemini API Overloaded. Retrying in 10 seconds... ({attempt+1}/{max_retries})")
-                        await asyncio.sleep(10)
-                    else:
-                        print(f"❌ Unhandled API Error: {e}")
-                        break
-            else:
-                print(f"❌ Failed to process email after {max_retries} attempts. Skipping.")
-                continue
-            
-            raw_output = response.text
-            if isinstance(raw_output, list):
-                final_text = "".join(
-                    block.get("text", "") for block in raw_output 
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
-            else:
-                final_text = str(raw_output)
-            final_messages.append(f"📄 **{subject}**\n{final_text}")
-            apply_research_sentiment_to_db(final_text)
-        
-        print("📧 [Email Sweep] Summarization complete. Sending to Discord.")
-        
-        channel = bot.get_channel(RESEARCH_CHANNEL_ID)
-        header = "📬 **Institutional Email Briefing**\n\n"
-        full_content = header + "\n\n---\n\n".join(final_messages)
-        
-        # 4. Apply your existing structure-aware chunking loop
-        chunk_size = 1900
-        in_code_block = False
-        for idx in range(0, len(full_content), chunk_size):
-            chunk = full_content[idx:idx + chunk_size]
-            if in_code_block:
-                chunk = "```text\n" + chunk
-            
-            backtick_count = chunk.count("```")
-            if backtick_count % 2 != 0:
-                in_code_block = not in_code_block
-                if in_code_block:
-                    chunk += "\n```"
-            await channel.send(chunk)
-            
-        print("📧 [Email Sweep] Email sweep finished successfully.")
-            
-    except Exception as e:
-        import traceback
-        print(f"❌ [Email Sweep Error]: {e}")
-        traceback.print_exc()
-
-
-
-async def start_scheduled_sweeps():
-    await bot.wait_until_ready()
-    print("⏳ Started central temporal bucket scheduler...")
-    while True:
-        now = datetime.now(pkt_tz)
-        current_time = now.strftime("%H:%M")
-        
-        # 1. YouTube Knowledge Sweep (12:00 AM)
-        if current_time == "00:00":
-            print("🕒 Triggering YouTube Knowledge Sweep (00:00)...")
-            sweep_youtube_transcripts()
-            
-        # 2. Email Sweeps (12:00 PM and 4:00 PM)
-        elif current_time in ["12:00", "16:00"]:
-            print(f"🕒 Triggering Email Sweep ({current_time})...")
-            await run_email_sweep()
-            
-        # 3. Business & Portfolio Sweep (6:00 PM)
-        elif current_time == "18:00":
-            print("🕒 Triggering Business & Portfolio Sweep (18:00)...")
-            await run_business_portfolio_sweep()
-            
-        # Check every 60 seconds to prevent tight CPU looping
-        await asyncio.sleep(60)
+from email_scraper import run_email_sweep
 
 _booted = False
 
@@ -1881,17 +1482,7 @@ async def on_ready():
     else:
         print("⚠️ Bot reconnected to Discord WebSocket. Skipping redundant boot sequence.")
     
-    current_date = datetime.now().date()
-    for task_name, task_func in [
-        ("midnight_mentor_sweep", midnight_mentor_sweep),
-        ("dividend_watchdog", dividend_watchdog),
-        ("run_business_portfolio_sweep", run_business_portfolio_sweep),
-        ("run_email_sweep", run_email_sweep)
-    ]:
-        last_run_timestamp = get_last_run(task_name)
-        if last_run_timestamp == 0 or datetime.fromtimestamp(last_run_timestamp).date() < current_date:
-            print(f"⚠️ Missed task detected! Running {task_name} catch-up...")
-            await task_func()
+
 
     bot.loop.create_task(start_scheduled_sweeps())
 
@@ -1994,6 +1585,16 @@ import psutil
 
 BOT_START_TIME = time.time()
 
+async def get_whatsapp_bridge_status():
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            # The bridge is running locally on port 3000
+            async with session.get("http://127.0.0.1:3000/api/trigger-sweep", timeout=5) as response:
+                return "🟢 WhatsApp Bridge: Online"
+    except Exception:
+        return "🔴 WhatsApp Bridge: Offline/Unreachable"
+
 @tasks.loop(hours=12)
 async def system_heartbeat():
     try:
@@ -2014,7 +1615,8 @@ async def system_heartbeat():
         except Exception:
             mem_str = "OK"
             
-        msg = f"🟢 [SYSTEM HEARTBEAT] Dedicated Node Online. Memory {mem_str}. Uptime: {uptime_hours} hours."
+        bridge_status = await get_whatsapp_bridge_status()
+        msg = f"🟢 [SYSTEM HEARTBEAT] Dedicated Node Online. Memory {mem_str}. Uptime: {uptime_hours} hours.\n{bridge_status}"
         await channel.send(msg)
     except Exception as e:
         print(f"Heartbeat Error: {e}")

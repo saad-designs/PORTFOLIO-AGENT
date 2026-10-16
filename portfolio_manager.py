@@ -26,6 +26,37 @@ from cachetools import cached, TTLCache
 load_dotenv()
 DATABASE_URL = os.getenv("SUPABASE_DB_URL")
 
+try:
+    from supabase import create_client, Client
+    supabase_url: str = os.getenv("SUPABASE_URL")
+    supabase_key: str = os.getenv("SUPABASE_KEY")
+    supabase: Client = create_client(supabase_url, supabase_key)
+except ImportError:
+    supabase = None
+    print("Warning: supabase-py not installed.")
+
+import aiohttp
+import json
+
+DISCORD_BRIEFS_WEBHOOK = os.getenv("DISCORD_BRIEFS_WEBHOOK") # Add to your .env
+
+async def send_learning_brief(source: str, title: str, summary: str):
+    """Fires an educational summary to Discord without triggering trading logic."""
+    if not DISCORD_BRIEFS_WEBHOOK:
+        return
+        
+    payload = {
+        "embeds": [{
+            "title": f"📚 {source} Intelligence: {title}",
+            "description": summary,
+            "color": 3447003, # Blue for informational
+            "footer": {"text": "Agent Ingestion Pipeline"}
+        }]
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        await session.post(DISCORD_BRIEFS_WEBHOOK, json=payload)
+
 def get_db_connection(db_url=None):
     if not PSYCOPG2_AVAILABLE or psycopg2 is None:
         raise RuntimeError(
@@ -35,6 +66,99 @@ def get_db_connection(db_url=None):
     
     conn_str = db_url if db_url else DATABASE_URL
     return psycopg2.connect(conn_str)
+
+def get_whatsapp_checkpoint() -> int:
+    """Returns the unix timestamp of the last analyzed WhatsApp message."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'whatsapp_last_timestamp'")
+        res = cur.fetchone()
+        if res:
+            return int(res[0])
+        return 0
+    except Exception as e:
+        print(f"[ERROR] fetching whatsapp checkpoint: {e}")
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def update_whatsapp_checkpoint(timestamp: int):
+    """Advances the WhatsApp watermark forward."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO agent_checkpoints (key, value, updated_at)
+            VALUES ('whatsapp_last_timestamp', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+        """, (str(timestamp),))
+        conn.commit()
+    except Exception as e:
+        print(f"[ERROR] updating whatsapp checkpoint: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
+def get_checkpoint(task_key: str) -> int:
+    """Fetches the Unix timestamp watermark for a specific ingestion pipeline."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = %s", (task_key,))
+        res = cur.fetchone()
+        if res:
+            raw_val = res[0]
+            if isinstance(raw_val, dict):
+                if 'value' in raw_val:
+                    return int(raw_val['value'])
+                return raw_val
+            try:
+                return int(raw_val)
+            except (ValueError, TypeError):
+                return raw_val
+        return 0
+    except Exception as e:
+        print(f"[ERROR] fetching checkpoint {task_key}: {e}")
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def update_checkpoint(task_key: str, timestamp: int):
+    """Advances the watermark forward after successful ingestion."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO agent_checkpoints (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+        """, (task_key, str(timestamp)))
+        conn.commit()
+    except Exception as e:
+        print(f"[ERROR] updating checkpoint {task_key}: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
+def get_whatsapp_monitored_chats() -> list[str]:
+    """Dynamically fetches active mentor WhatsApp IDs from the database."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT chat_id FROM whatsapp_monitored_chats WHERE is_active = TRUE")
+        res = cur.fetchall()
+        return [r[0] for r in res]
+    except Exception as e:
+        print(f"[ERROR] fetching monitored chats: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
 
 def sanitize_price(raw_price) -> float:
     """Strips commas and handles raw API strings to prevent PnL hallucinations."""
@@ -55,10 +179,12 @@ def get_live_price(ticker: str) -> float:
     """Scrapes the live current price from the PSX Data Portal."""
     try:
         url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
-        # We use a user-agent to bypass basic security blocks
-        headers = {'User-Agent': 'Mozilla/5.0'} 
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        from market_data_scraper import fetch_psx_data_robust_sync
+        html_data = fetch_psx_data_robust_sync(url, is_json=False)
+        if not html_data:
+            return 0.0
+            
+        soup = BeautifulSoup(html_data, 'html.parser')
         
         # The PSX Data Portal stores the live price inside the 'quote__close' class
         price_div = soup.find('div', class_='quote__close')
@@ -74,9 +200,12 @@ def get_live_price_and_change(ticker: str) -> tuple[float, float]:
     """Scrapes the live current price and daily percentage change from the PSX Data Portal."""
     try:
         url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
-        headers = {'User-Agent': 'Mozilla/5.0'} 
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        from market_data_scraper import fetch_psx_data_robust_sync
+        html_data = fetch_psx_data_robust_sync(url, is_json=False)
+        if not html_data:
+            return 0.0, 0.0
+            
+        soup = BeautifulSoup(html_data, 'html.parser')
         
         price = 0.0
         change_pct = 0.0
@@ -239,6 +368,29 @@ def get_portfolio_summary() -> str:
     except Exception as e:
         import traceback
         return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
+
+def add_pending_signal(source: str, payload: dict) -> bool:
+    """Inserts a pending signal into the Supabase pending_signals table."""
+    try:
+        import json
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO pending_signals (source, signal_payload)
+            VALUES (%s, %s)
+            """,
+            (source, json.dumps(payload))
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        import traceback
+        print(f"Error adding pending signal: {e}\n{traceback.format_exc()}")
+        return False
+
 
 def get_watchlist_summary() -> str:
     try:
@@ -759,10 +911,12 @@ def _scrape_psx_pe(ticker: str) -> float | None:
     """
     try:
         url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
+        from market_data_scraper import fetch_psx_data_robust_sync
+        html_data = fetch_psx_data_robust_sync(url, is_json=False)
+        if not html_data:
+            return None
+            
+        soup = BeautifulSoup(html_data, "html.parser")
 
         # Sanity check: verify the DOM still has the expected structure at all.
         # If stats_label divs are absent entirely, the PSX UI has changed.
@@ -910,10 +1064,9 @@ def get_fundamentals(ticker: str) -> dict:
     # Option A: Fetch EPS, ROIC, and Dividend Yield from the PSX DPS internal JSON API endpoint
     try:
         url = f"https://dps.psx.com.pk/api/company/{ticker.upper()}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
+        from market_data_scraper import fetch_psx_data_robust_sync
+        data = fetch_psx_data_robust_sync(url, is_json=True)
+        if data:
             if 'eps' in data:
                 result['eps'] = float(data['eps'])
             if 'roic' in data:

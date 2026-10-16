@@ -215,7 +215,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatResult
-from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_tavily import TavilySearch
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 import psycopg
@@ -239,29 +239,23 @@ async def update_kmi30_tickers():
     url = "https://dps.psx.com.pk/api/index_weightages/KMI30"
     
     try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*"
-            }
-            async with session.get(url, headers=headers, timeout=20) as response:
-                if response.status == 200:
-                    data = await response.json(content_type=None)
-                    
-                    # Parse the JSON array to extract ticker symbols
-                    tickers = [item.get('symbol') for item in data if item.get('symbol')]
-                    
-                    if len(tickers) >= 30:
-                        DYNAMIC_KMI30_TICKERS = tickers
-                        # Write the fail-safe cache
-                        with open('kmi30_cache.json', 'w') as f:
-                            json.dump(tickers, f)
-                        print(f"✅ Loaded {len(tickers)} KMI-30 tickers into active memory.")
-                        return
-                    else:
-                        print(f"⚠️ PSX API returned only {len(tickers)} KMI-30 tickers. Suspected API truncation. Triggering cache fallback.")
-                else:
-                    print(f"⚠️ PSX API HTTP {response.status}. Triggering cache fallback.")
+        from market_data_scraper import fetch_psx_data_robust
+        data = await fetch_psx_data_robust(url, is_json=True)
+        if data:
+            # Parse the JSON array to extract ticker symbols
+            tickers = [item.get('symbol') for item in data if item.get('symbol')]
+            
+            if len(tickers) >= 30:
+                DYNAMIC_KMI30_TICKERS = tickers
+                # Write the fail-safe cache
+                with open('kmi30_cache.json', 'w') as f:
+                    json.dump(tickers, f)
+                print(f"✅ Loaded {len(tickers)} KMI-30 tickers into active memory.")
+                return
+            else:
+                print(f"⚠️ PSX API returned only {len(tickers)} KMI-30 tickers. Suspected API truncation. Triggering cache fallback.")
+        else:
+            print("⚠️ PSX API returned no data. Triggering cache fallback.")
     except Exception as e:
         print(f"🚨 KMI-30 Fetch Error: {str(e)}")
         
@@ -376,50 +370,31 @@ def get_portfolio_status(config: RunnableConfig) -> str:
         cur.close()
         conn.close()
 
-        report = ["📊 **Live PSX Portfolio Status**\n"]
-        total_invested = 0
-        total_current_value = 0
+        total_invested_equity = 0.0
+        holdings_list = []
 
         if not holdings and liquid_cash == 0.0:
             return "Data Unavailable. The portfolio and cash ledger are currently empty."
 
         for row in holdings:
             ticker = row['ticker'].upper()
-            qty = clean_float(row['shares'])
-            avg_price = clean_float(row['avg_buy_price'])
+            qty = float(row['shares'])
+            avg_price = float(row['avg_buy_price'])
         
             invested = qty * avg_price
-            total_invested += invested
+            total_invested_equity += invested
+            holdings_list.append(f"{ticker}: {qty} shares @ Rs. {avg_price:.2f}")
 
-            q, resolved_ticker = fetch_quote_with_fallback(ticker)
-            if q is None:
-                report.append(f"- **{ticker}**: {qty} shares @ Rs. {avg_price:.2f} (Live data unavailable)")
-                continue
-            
-            data = q.iloc[0].to_dict() if isinstance(q, pd.DataFrame) else q.to_dict()
-            raw_price = data.get('price', data.get('current', data.get('close', 0)))
-            live_price = clean_float(raw_price)
-        
-            current_value = qty * live_price
-            total_current_value += current_value
-            pnl = current_value - invested
-            pnl_percent = (pnl / invested) * 100 if invested > 0 else 0
+        total_portfolio_value = liquid_cash + total_invested_equity
 
-            report.append(f"- **{resolved_ticker}**: {qty:.0f} shares | Avg: Rs. {avg_price:.2f} | Live: Rs. {live_price:.2f} | P/L: Rs. {pnl:.2f} ({pnl_percent:.2f}%)")
-
-        total_pnl = total_current_value - total_invested
-        total_pnl_percent = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
-    
-        true_total_value = total_current_value + liquid_cash
-
-        report.append("\n**Summary:**")
-        report.append(f"- Liquid Cash (Buying Power): Rs. {liquid_cash:.2f}")
-        report.append(f"- Total Invested (Equities): Rs. {total_invested:.2f}")
-        report.append(f"- Equities Current Value: Rs. {total_current_value:.2f}")
-        report.append(f"- Equities P/L: Rs. {total_pnl:.2f} ({total_pnl_percent:.2f}%)")
-        report.append(f"- **True Total Portfolio Value**: Rs. {true_total_value:.2f}")
-
-        return "\n".join(report)
+        return (
+            f"STRICT SYSTEM STATE:\n"
+            f"- Liquid Buying Power: Rs. {liquid_cash:,.2f}\n"
+            f"- Total Invested Equity: Rs. {total_invested_equity:,.2f}\n"
+            f"- Total Portfolio Value: Rs. {total_portfolio_value:,.2f}\n"
+            f"- Current Holdings: {', '.join(holdings_list)}\n\n"
+            f"CRITICAL DIRECTIVE: You must quote these exact Rs. values in your analysis. Do not add, subtract, or recalculate portfolio totals."
+        )
     except Exception as e:
         import traceback
         return f"System Error: Could not calculate portfolio status. Details: {str(e)}\n{traceback.format_exc()}"
@@ -731,15 +706,15 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
 # Primary heavy reasoning model
-primary_llm = ChatGoogleGenerativeAI(model="gemini-3.7-flash")
+primary_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
 # High-volume workhorse fallback
-fallback_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
+fallback_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-8b")
 
 # Chain with automatic fallback for 503 capacity errors
 llm = primary_llm.with_fallbacks([fallback_llm])
 
 # Instantiate the search tool
-search_tool = DuckDuckGoSearchRun(name="web_search")
+search_tool = TavilySearch(name="web_search")
 
 class AddToWatchlistSchema(BaseModel):
     ticker: str = Field(description="The PSX ticker symbol to add to the coverage universe, e.g., 'ENGRO'")
@@ -1002,7 +977,7 @@ class TradeEvaluationState(TypedDict):
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 def analyst_node(state: TradeEvaluationState):
-    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-8b", google_api_key=os.getenv("GOOGLE_API_KEY"))
     
     is_macro = state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep'
     
@@ -1056,7 +1031,7 @@ def analyst_node(state: TradeEvaluationState):
         return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
 
 def risk_manager_node(state: TradeEvaluationState):
-    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-8b", google_api_key=os.getenv("GOOGLE_API_KEY"))
     
     prompt = f"""
     You are a strict compliance officer and risk manager.

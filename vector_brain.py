@@ -3,7 +3,7 @@ import re
 from langchain.tools import tool
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_scraper import get_transcript
 from dotenv import load_dotenv
 from tenacity import retry, wait_exponential, stop_after_attempt
 from pydantic import BaseModel, Field
@@ -28,10 +28,12 @@ async def execute_live_web_search(query: str):
     def _sync_search():
         results = []
         try:
-            # v8.1.1 syntax uses the standard DDGS context manager
-            with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=3):
-                    results.append(r)
+            tool = get_web_search_tool()
+            if tool:
+                res = tool.invoke(query)
+                results.append(res)
+            else:
+                print("Web search failed: Tavily tool not available.")
         except Exception as e:
             print(f"Web search failed: {e}")
         return results
@@ -67,7 +69,7 @@ vector_db = PGVector(
 )
 
 @tool
-def ingest_knowledge_tool(input_text_or_url: str) -> str:
+async def ingest_knowledge_tool(input_text_or_url: str) -> str:
     """Ingests raw financial text, articles, or YouTube URLs into the Vector Brain. Use this autonomously when the user shares knowledge."""
     try:
         content_to_embed = input_text_or_url
@@ -79,9 +81,11 @@ def ingest_knowledge_tool(input_text_or_url: str) -> str:
             video_id = youtube_match.group(1)
             source_id = f"youtube_{video_id}"
             try:
-                # Multi-language extraction logic
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ur', 'en', 'en-US', 'hi'])
-                content_to_embed = " ".join([item['text'] for item in transcript_list])
+                # Direct async audio extraction
+                transcript = await get_transcript(video_id)
+                if not transcript:
+                    return "Error: Could not retrieve transcript for this video."
+                content_to_embed = transcript
             except Exception as e:
                 # Tool-level exception trapping
                 return f"Error: Could not retrieve captions for this video. Captions may be disabled. ({str(e)})"
@@ -125,7 +129,7 @@ def query_mentor_brain_tool(query: str) -> str:
         
         # Update the LLM used for vector retrieval summarization
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3.5-flash-lite", # Or gemini-3.7-flash
+            model="gemini-1.5-flash-8b", # Or gemini-1.5-flash
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
         
@@ -216,14 +220,33 @@ async def evaluate_trade_trigger(trigger_dict: dict) -> str:
         context = await get_market_context(ticker)
         
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3.5-flash-lite",
+            model="gemini-1.5-flash-8b",
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
         structured_llm = llm.with_structured_output(TradeEvaluationSchema)
         
         prompt = f"""You are a long-term value investor. You hold compounding businesses indefinitely. You NEVER trim or sell a stock simply because it is in profit. You only recommend a TRIM or SELL if the asset has exceeded its fundamental target price, if the core business thesis is broken, or to clear extreme concentration risk.
-        A quantitative portfolio trigger has fired: {trigger_dict}. Here is the latest market context for {ticker}: {context}. 
-        Analyze this context, evaluate the quantitative metrics, defend against risks, and provide a brutally objective verdict on whether to execute the algorithmic trim, or override it and hold due to market conditions."""
+
+### ASSET CLASSIFICATION MANDATE (CRITICAL)
+Before evaluating any contextual news or macroeconomic data for a trim/sell decision, you MUST classify the target asset into its correct structural category:
+
+1. YIELD ANCHORS (e.g., HUBC, FFC, EFERT, KAPCO): 
+   - Purpose: Held strictly for double-digit dividend cash flow and portfolio stabilization.
+   - Trimming Rules: DO NOT recommend trimming or selling based on generic "macro-overvaluation," high P/E multiples, or broad market pullbacks. 
+   - Sell Triggers: ONLY recommend trimming if there is a verified, structural threat to their cash flow generation (e.g., sovereign default on circular debt, forced PPA renegotiations, or slashed capacity payments).
+
+2. GROWTH / ALPHA (e.g., SYS):
+   - Purpose: Capital appreciation and compounding.
+   - Trimming Rules: Highly sensitive to multiple compression. Trimming is acceptable if growth decelerates or extreme overvaluation occurs relative to forward earnings.
+
+3. CYCLICALS (e.g., LUCK):
+   - Purpose: Macro-economic leverage.
+   - Trimming Rules: Sensitive to interest rates, taxation, and domestic dispatch data. Trimming is acceptable at cycle peaks.
+
+DIRECTIVE: If the ticker being evaluated is a YIELD ANCHOR and the negative context is merely "overvaluation" or "market noise," you must IGNORE the noise and explicitly rule: "NO ACTION - Asset is a Yield Anchor insulated by dividend cash flow."
+
+A quantitative portfolio trigger has fired: {trigger_dict}. Here is the latest market context for {ticker}: {context}. 
+Analyze this context, evaluate the quantitative metrics, defend against risks, and provide a brutally objective verdict on whether to execute the algorithmic trim, or override it and hold due to market conditions."""
         
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _invoke_llm():

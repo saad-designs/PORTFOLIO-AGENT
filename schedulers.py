@@ -144,8 +144,16 @@ async def run_weekly_fundamentals_sweep():
         logger.info("✅ [SCHEDULER] Weekly Fundamentals Sweep completed.")
     except Exception as e:
         logger.error(f"Failed Weekly Fundamentals Sweep: {e}")
+SWEEP_LOCK = asyncio.Lock()
 
 async def run_youtube_sweep():
+    if SWEEP_LOCK.locked():
+        print("⚠️ [YouTube Sweep] Sweep already in progress. Skipping duplicate execution.")
+        return
+    async with SWEEP_LOCK:
+        await _run_youtube_sweep_inner()
+
+async def _run_youtube_sweep_inner():
     """
     12:00 AM: YouTube Knowledge Sweep
     Extracts playlist transcripts, processes summaries, and logs them into memory.
@@ -157,27 +165,23 @@ async def run_youtube_sweep():
         
         # 300 seconds (5 minutes) absolute maximum execution time
         # asyncio.to_thread prevents a synchronous scraper from freezing your entire async bot
-        transcripts = await asyncio.wait_for(asyncio.to_thread(fetch_mentor_transcripts, mentors), timeout=300.0)
+        transcripts, failed_mentors = await asyncio.wait_for(fetch_mentor_transcripts(mentors), timeout=300.0)
         
+
         if transcripts:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from ingestion import SWEEP_FORMAT_PROMPT, save_learned_rule
+            from google import genai
+            from ingestion import SWEEP_FORMAT_PROMPT, save_learned_rule, generate_with_fallback
             from vector_brain import ingest_knowledge_tool
             import re
             
-            llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+            client = genai.Client()
             alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
             
             for mentor, text in transcripts.items():
-                prompt = SWEEP_FORMAT_PROMPT + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
-                response = await asyncio.to_thread(llm.invoke, prompt)
-                
-                # Handle potential list response from Gemini content
-                formatted_text = response.content
-                if isinstance(formatted_text, list):
-                    formatted_text = "".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in formatted_text])
-                else:
-                    formatted_text = str(formatted_text)
+                print("DIAGNOSTIC: Sleeping for 65 seconds to clear Gemini RPM and Token limits...")
+                await asyncio.sleep(65)
+                prompt = SWEEP_FORMAT_PROMPT.format(mentor_name=mentor) + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
+                formatted_text = await generate_with_fallback(client, [prompt])
                 
                 # Extract rule if it exists
                 try:
@@ -190,12 +194,21 @@ async def run_youtube_sweep():
                 except Exception as e:
                     print(f"⚠️ [YouTube Sweep] Error extracting rule for {mentor}: {e}")
                 
-                # Post structured sweep to Discord
-                if alert_channel:
-                    await send_long_message(alert_channel, f"🎥 **Knowledge Ingestion Report:**\n{formatted_text}")
+                # Post structured sweep to pending_signals table
+                from portfolio_manager import add_pending_signal
+                await asyncio.to_thread(add_pending_signal, "YouTube Sweep", {"mentor": mentor, "report": formatted_text})
                     
                 # Store the high-signal structured output in Vector DB instead of rambling text
                 await asyncio.to_thread(ingest_knowledge_tool.invoke, {"input_text_or_url": formatted_text})
+                
+        if failed_mentors:
+            alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
+            if alert_channel:
+                from discord_bot import send_long_message
+                await send_long_message(
+                    alert_channel,
+                    f"⚠️ **PARTIAL SWEEP FAILURE**: The following mentors failed all fallback extraction tiers: {', '.join(failed_mentors)}"
+                )
                 
         print("✅ [YouTube Sweep] Knowledge ingestion complete.")
     except asyncio.TimeoutError:
@@ -203,25 +216,55 @@ async def run_youtube_sweep():
     except Exception as e:
         print(f"⚠️ [YouTube Sweep] Error: {e}")
 
-async def run_email_sweep():
-    """
-    12:00 PM & 4:00 PM: Email Sweeps
-    Processes incoming portfolio notes or correspondence.
-    """
-    logger.info(f"📧 [{datetime.now().strftime('%H:%M')}] Initializing Email Sweep...")
-    try:
-        # Placeholder for incoming portfolio notes or correspondence parsing
-        set_last_run_date("email_sweep", datetime.now().strftime("%Y-%m-%d"))
-        logger.info(f"✅ [{datetime.now().strftime('%H:%M')}] Email Sweep successfully processed incoming notes.")
-    except Exception as e:
-        error_msg = f"❌ [Email Sweep Error]: {str(e)}"
-        logger.error(error_msg)
+from email_scraper import run_email_sweep
+from news_scraper import run_news_sweep
+
+async def psx_filing_watchdog():
+    from psx_watchdog import fetch_latest_psx_announcements
+    from portfolio_manager import add_pending_signal, update_checkpoint, get_checkpoint
+    from agent import get_agent, DYNAMIC_KMI30_TICKERS
+    import asyncio
+
+    new_filings = await asyncio.to_thread(fetch_latest_psx_announcements)
+    if not new_filings:
+        return
+
+    agent_app = await get_agent()
+    highest_ts = get_checkpoint('psx_last_timestamp')
+
+    for filing in new_filings:
+        ticker = filing['symbol'].upper()
+        if len(DYNAMIC_KMI30_TICKERS) > 0 and ticker not in DYNAMIC_KMI30_TICKERS:
+            highest_ts = max(highest_ts, filing['timestamp'])
+            continue
+            
+        logger.info(f"📄 Processing new PSX Filing for {ticker}...")
         
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            tb_str = traceback.format_exc()
-            discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (Email)**\n```python\n{tb_str[-1900:]}\n```"
-            await alert_channel.send(discord_msg)
+        prompt = f"""
+        You are a quantitative researcher. The Pakistan Stock Exchange just published a live corporate filing for {ticker}.
+        
+        Filing Title: {filing['title']}
+        Time: {filing['date']} at {filing['time']}
+        
+        Analyze the title of this disclosure. Does this sound like a material event (e.g., earnings result, dividend, board shakeup, acquisition)? 
+        If it is just routine corporate noise (e.g., "Loss of Share Certificate"), output exactly: IGNORE.
+        If it is material, give me a brutal 2-sentence breakdown of what this likely means for the stock's fundamental valuation.
+        """
+        
+        state = {"messages": [("user", prompt)]}
+        verdict = await agent_app.ainvoke(state, {"configurable": {"thread_id": f"filing_{ticker}_{filing['time']}"}})
+        
+        raw_content = verdict["messages"][-1].content
+        final_text = " ".join([item.get("text", "") if isinstance(item, dict) else str(item) for item in raw_content]).strip() if isinstance(raw_content, list) else str(raw_content).strip()
+
+        if "IGNORE" not in final_text.upper():
+            await asyncio.to_thread(add_pending_signal, "PSX Filing", {"ticker": ticker, "title": filing['title'], "analysis": final_text})
+            
+        highest_ts = max(highest_ts, filing['timestamp'])
+
+    # Advance checkpoint strictly at the end of the execution loop
+    if highest_ts > get_checkpoint('psx_last_timestamp'):
+        update_checkpoint('psx_last_timestamp', highest_ts)
 
 async def run_business_portfolio_sweep():
     """
@@ -276,10 +319,9 @@ async def run_business_portfolio_sweep():
         with open("memory_cache/proactive_thought.txt", "w", encoding="utf-8") as f:
             f.write(f"Proactive thought generated at {datetime.now()}:\n{ai_verdict}")
             
-        # Send alert
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            await send_long_message(alert_channel, ai_verdict)
+        # Send alert to pending_signals table
+        from portfolio_manager import add_pending_signal
+        await asyncio.to_thread(add_pending_signal, "Business & Portfolio Sweep", {"verdict": ai_verdict})
             
         logger.info(f"✅ [{datetime.now().strftime('%H:%M')}] Business & Portfolio Sweep calculations and checks complete.")
     except Exception as e:
@@ -292,6 +334,240 @@ async def run_business_portfolio_sweep():
             discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (Business)**\n```python\n{tb_str[-1900:]}\n```"
             await alert_channel.send(discord_msg)
 
+# In-memory cache to prevent Discord alert spam
+# Format: {"LUCK_STOP_LOSS": datetime.datetime(...)}
+ASYMMETRIC_ALERT_COOLDOWNS = {}
+COOLDOWN_HOURS = 24
+
+AUDIT_PROMPT_TEMPLATE = """
+You are a senior hedge fund portfolio manager and quantitative risk auditor for our PSX portfolio.
+We hold: SYS, HUBC, LUCK, FFC, EFERT, MEBL, and MARI.
+
+A price threshold trigger just fired for **{ticker}**.
+- Live Price: Rs. {current_price}
+- Trigger Type: {trigger_type}
+- Trigger Price Reference: Rs. {reference_price}
+- Current Portfolio Position: {current_position}
+
+### Retrieved Tactical Rules (from our Active Playbook):
+{retrieved_rules}
+
+### Recent Institutional Intelligence & Sentiment:
+{institutional_intelligence}
+
+---
+CRITICAL TASK:
+Evaluate whether this price action represents a genuine asymmetric opportunity or a dangerous value trap/falling knife. 
+Analyze recent corporate earnings, margin stability, gas/feedstock tariffs, circular debt dynamics, and interest rate sensitivity.
+
+Determine whether to EXECUTE or ABORT.
+If you confirm the trade, set "verdict": "EXECUTE". If the business fundamentals are deteriorating or it's a value trap, set "verdict": "ABORT".
+
+Respond strictly with a JSON object inside ```json blocks with this exact schema:
+{{
+  "verdict": "EXECUTE" | "ABORT",
+  "reasoning_summary": "Brief 1-sentence explanation of why we execute or abort.",
+  "fundamental_points": [
+    "Point 1 on core cash generator / margins",
+    "Point 2 on sector catalysts or macro insulation",
+    "Point 3 on valuation / moat"
+  ],
+  "strategic_thesis": "2-3 sentences tying the trade together."
+}}
+"""
+
+async def conduct_autonomous_audit(ticker: str, trigger_type: str, current_price: float, reference_price: float):
+    """
+    Assembles database context, runs vector search for playbook rules, 
+    and passes the payload to Gemini for evaluation.
+    """
+    from portfolio_manager import get_db_connection
+    from google import genai
+    import json
+    import asyncio
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # 1. Fetch Current Portfolio Position
+    cur.execute("SELECT shares, avg_buy_price FROM portfolio_holdings WHERE ticker = %s", (ticker,))
+    pos_row = cur.fetchone()
+    current_position = f"{pos_row[0]} shares @ Rs. {pos_row[1]}" if pos_row else "0 shares (Not currently held)"
+
+    # 2. Vector Search: Pull relevant rules from active_playbook
+    client = genai.Client()
+    search_context = f"Evaluating {ticker} at {current_price} for {trigger_type} setup, dividend safety, margin resilience, and sector risks."
+    
+    embed_res = await asyncio.to_thread(
+        client.models.embed_content,
+        model='gemini-embedding-001',
+        contents=search_context,
+        config={'output_dimensionality': 768}
+    )
+    query_vector = embed_res.embeddings[0].values
+
+    cur.execute(
+        "SELECT source, rule FROM match_playbook_rules(%s::vector, 0.45, 4)",
+        (query_vector,)
+    )
+    rules = cur.fetchall()
+    retrieved_rules = "\n".join([f"- [{r[0]}]: {r[1]}" for r in rules]) if rules else "No specific playbook rules matched."
+
+    # 3. Pull Recent Institutional Sentiment / News from Supabase
+    cur.execute("""
+        SELECT source, subject, sentiment, summary, created_at 
+        FROM institutional_reports 
+        WHERE ticker = %s OR ticker = 'PSX' 
+        ORDER BY created_at DESC LIMIT 3
+    """, (ticker,))
+    intel_rows = cur.fetchall()
+    intelligence = "\n".join([f"- [{r[4].strftime('%Y-%m-%d')}] {r[0]} ({r[2]}): {r[3]}" for r in intel_rows]) if intel_rows else "No recent institutional notes logged."
+
+    cur.close()
+    conn.close()
+
+    # 4. Formulate Prompt and Run through Fallback Pipeline
+    prompt = AUDIT_PROMPT_TEMPLATE.format(
+        ticker=ticker,
+        current_price=current_price,
+        trigger_type=trigger_type,
+        reference_price=reference_price,
+        current_position=current_position,
+        retrieved_rules=retrieved_rules,
+        institutional_intelligence=intelligence
+    )
+
+    from ingestion import generate_with_fallback
+    raw_response = await generate_with_fallback(client, [prompt])
+    
+    # 5. Parse JSON output
+    try:
+        clean_json = raw_response.split("```json")[1].split("```")[0].strip()
+        return json.loads(clean_json)
+    except Exception as e:
+        print(f"❌ Failed to parse audit JSON for {ticker}: {e}")
+        return {"verdict": "ABORT", "reasoning_summary": "LLM response parsing failure."}
+
+
+async def evaluate_asymmetric_triggers(live_prices: dict, send_long_message_func):
+    """
+    Watches the live PSX tape, triggers deep research on threshold breaches,
+    and only outputs verified execution directives.
+    """
+    from portfolio_manager import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Join targets with holdings so the bot knows if you actually own shares
+    cur.execute("""
+        SELECT w.ticker, w.entry_zone, w.target_price, w.stop_loss, COALESCE(p.shares, 0) as shares
+        FROM watchlist_targets w
+        LEFT JOIN portfolio_holdings p ON w.ticker = p.ticker
+        WHERE w.is_active = TRUE
+    """)
+    active_targets = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    now = datetime.now()
+
+    for ticker, entry, target, stop_loss, shares in active_targets:
+
+        if ticker not in live_prices:
+            continue
+
+        # Force all values to standard floats to prevent Decimal collisions
+        current_price = float(live_prices[ticker])
+        entry = float(entry) if entry is not None else None
+        target = float(target) if target is not None else None
+        stop_loss = float(stop_loss) if stop_loss is not None else None
+        shares = int(shares) if shares is not None else 0
+
+        trigger_type = None
+        ref_price = None
+
+        # Determine if a technical trigger threshold is touched
+        # EXIT ALERTS (Require shares > 0)
+        if shares > 0 and stop_loss and current_price <= stop_loss:
+            trigger_type = "STOP_LOSS_RISK"
+            ref_price = stop_loss
+        elif shares > 0 and target and current_price >= target:
+            trigger_type = "TAKE_PROFIT"
+            ref_price = target
+            
+        # ENTRY ALERTS (Do not require shares)
+        elif entry and current_price <= entry:
+            trigger_type = "ACCUMULATION_ENTRY"
+            ref_price = entry
+
+        if not trigger_type:
+            continue
+
+        # Check 24-hour alert cooldown
+        alert_key = f"{ticker}_{trigger_type}"
+        last_fired = ASYMMETRIC_ALERT_COOLDOWNS.get(alert_key)
+        if last_fired and (now - last_fired) < timedelta(hours=COOLDOWN_HOURS):
+            continue
+
+        print(f"🔍 Technical trigger activated for {ticker} ({trigger_type}). Launching autonomous research audit...")
+
+        # Run the full research and validation pipeline
+        audit_result = await conduct_autonomous_audit(ticker, trigger_type, current_price, ref_price)
+
+        if audit_result.get("verdict") != "EXECUTE":
+            print(f"🛑 Trade for {ticker} rejected by audit: {audit_result.get('reasoning_summary')}")
+            ASYMMETRIC_ALERT_COOLDOWNS[alert_key] = now
+            continue
+
+        # --- DETERMINISTIC MATH ENGINE ---
+        # 1. Calculate Risk/Reward Payoff
+        risk = current_price - stop_loss if stop_loss else 0
+        reward = target - current_price if target else 0
+        payoff_ratio = round(reward / risk, 2) if risk > 0 else 0.0
+
+        # 2. Strict Position Sizing (Capped at Rs. 10,000 accumulation tranche)
+        from portfolio_manager import get_db_connection
+        conn_cash = get_db_connection()
+        cursor_cash = conn_cash.cursor()
+        cursor_cash.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        cash_res = cursor_cash.fetchone()
+        actual_cash_balance = float(cash_res[0]) if cash_res else 0.0
+        cursor_cash.close()
+        conn_cash.close()
+
+        target_allocation_rupees = 10000.00
+        max_investment = min(target_allocation_rupees, actual_cash_balance)
+        recommended_shares = int(max_investment // current_price) if current_price > 0 else 0
+        actual_deployment = round(recommended_shares * current_price, 2)
+
+        # 3. Format the verified signal
+        points_formatted = "\n".join([f"{i+1}. {pt}" for i, pt in enumerate(audit_result.get("fundamental_points", []))])
+
+        message = (
+            f"🚨 **AUTONOMOUS RESEARCH OPPORTUNITY DETECTED** 🚨\n"
+            f"Extracting quantitative parameters...\n\n"
+            f"🎯 **QUANTITATIVE EXECUTION DIRECTIVE: {ticker}**\n"
+            f"• **Entry:** Rs. {current_price} | **Target:** Rs. {target} | **Stop-Loss:** Rs. {stop_loss}\n"
+            f"• **Payoff Ratio:** {payoff_ratio}x\n"
+            f"• **Recommended Action:** BUY **{recommended_shares} shares** (Rs. {actual_deployment})\n"
+            f"----------------------------------------------------\n\n"
+            f"**Fundamental Analysis & Value Trap Filter**\n"
+            f"{points_formatted}\n\n"
+            f"**Trade Recommendation**\n"
+            f"• **Candidate:** {ticker}\n"
+            f"• **Action:** BUY\n"
+            f"• **Entry Zone:** Rs. {entry} (Triggered at Rs. {current_price})\n"
+            f"• **Intrinsic Target:** Rs. {target}\n"
+            f"• **Stop-Loss:** Rs. {stop_loss}\n\n"
+            f"**Strategic Thesis**\n"
+            f"{audit_result.get('strategic_thesis', '')}"
+        )
+
+        from portfolio_manager import add_pending_signal
+        await asyncio.to_thread(add_pending_signal, "Asymmetric Trigger", {"ticker": ticker, "message": message, "verdict": "EXECUTE"})
+        ASYMMETRIC_ALERT_COOLDOWNS[alert_key] = now
+        print(f"✅ High-conviction execution directive dispatched for {ticker}.")
+
+
 async def run_intraday_price_loop():
     """
     Periodic 10-minute loop during market hours to evaluate profit and rebalancing triggers,
@@ -299,6 +575,29 @@ async def run_intraday_price_loop():
     """
     logger.info(f"🔄 [{datetime.now().strftime('%H:%M')}] Initializing Intraday Price & Alert Loop...")
     try:
+        from portfolio_manager import get_db_connection
+        from market_data_scraper import fetch_live_price
+        
+        # --- 0. ASYMMETRIC ALERT ENGINE ---
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ticker FROM watchlist_targets")
+        target_tickers = [row[0] for row in cursor.fetchall()]
+        cursor.execute("SELECT ticker FROM portfolio_holdings WHERE shares > 0")
+        holding_tickers = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        
+        all_tickers = set(target_tickers + holding_tickers)
+        live_prices = {}
+        
+        for t in all_tickers:
+            price = await asyncio.to_thread(fetch_live_price, t)
+            if price and price > 0:
+                live_prices[t] = price
+                
+        await evaluate_asymmetric_triggers(live_prices, send_long_message)
+
         # --- 1. EXIT & EXHAUSTION EVALUATOR ---
         from risk_engine import evaluate_exit_and_exhaustion
         from agent import fetch_stocks_with_fallback
@@ -410,6 +709,12 @@ async def run_intraday_price_loop():
             from utils import normalize_ticker
             ticker = normalize_ticker(alert["ticker"])
             alert_type = alert["type"]
+            
+            YIELD_ANCHORS = {"HUBC", "FFC", "EFERT", "KAPCO"}
+            if ticker in YIELD_ANCHORS and alert_type == "MACRO_OVERVALUATION":
+                # Skip valuation trims for income compounders entirely
+                continue
+                
             cooldown_key = f"{ticker}_{alert_type}"
             
             last_alert_time = alert_cooldowns.get(cooldown_key, 0)
@@ -502,10 +807,8 @@ async def run_intraday_price_loop():
                 msg += f"**Est. New Balance:** Rs. {alert.get('new_cash_balance', 0):,.2f}\n\n"
                 msg += f"🧠 **AI Contextual Verdict (Multi-Agent):**\n{parsed_rationale}\n"
             
-            if alert_channel:
-                await alert_channel.send(msg)
-            else:
-                print(f"=== PORTFOLIO ALERT (Console Fallback) ===\n{msg}")
+            from portfolio_manager import add_pending_signal
+            await asyncio.to_thread(add_pending_signal, "Intraday Sweep", {"ticker": ticker, "type": alert_type, "message": msg, "action": ai_action})
             
     except Exception as e:
         error_msg = f"❌ [Intraday Loop Error]: {str(e)}"
@@ -730,6 +1033,101 @@ async def run_cash_deployment_sweep():
         if channel:
             await send_long_message(channel, payload)
 
+import aiohttp
+import asyncio
+
+async def run_whatsapp_startup_catchup():
+    print("📱 Waiting for WhatsApp Bridge Chromium engine to boot...")
+    timeout = aiohttp.ClientTimeout(total=5)
+    sweep_timeout = aiohttp.ClientTimeout(total=120)
+    
+    async with aiohttp.ClientSession() as session:
+        # Poll every 5 seconds for a maximum of 60 seconds
+        for attempt in range(12):
+            try:
+                async with session.get("http://127.0.0.1:3000/ping", timeout=timeout) as health_check:
+                    if health_check.status == 200:
+                        print("🏓 WhatsApp Bridge is READY. Executing catch-up...")
+                        
+                        # Trigger the actual sweep now that it is authenticated
+                        async with session.get("http://127.0.0.1:3000/api/trigger-sweep", timeout=sweep_timeout) as response:
+                            if response.status == 200:
+                                print("✅ WhatsApp startup sweep completed successfully.")
+                            else:
+                                print(f"⚠️ WhatsApp bridge sweep failed with status {response.status}")
+                        
+                        return # <-- THIS MUST BE UN-INDENTED to align with the 'if'. Exit the polling loop entirely.
+                        
+                    elif health_check.status == 503:
+                        # Express is running, but Chromium is still loading. Wait 5 seconds.
+                        await asyncio.sleep(5)
+            except aiohttp.ClientConnectorError:
+                # Express hasn't even bound to port 3000 yet. Wait 5 seconds.
+                await asyncio.sleep(5)
+            except Exception:
+                await asyncio.sleep(5)
+                
+        print("⚠️ WhatsApp Bridge failed to authenticate after 60 seconds. Skipping catch-up.")
+
+async def run_desk_manager_sweep():
+    logger.info("👔 [DESK MANAGER] Initializing hourly signal synthesis...")
+    try:
+        from portfolio_manager import get_db_connection
+        import json
+        from google import genai
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Fetch pending signals
+        cur.execute("SELECT id, source, signal_payload FROM pending_signals WHERE status = 'pending'")
+        signals = cur.fetchall()
+        
+        if not signals:
+            cur.close()
+            conn.close()
+            return
+            
+        logger.info(f"👔 [DESK MANAGER] Processing {len(signals)} pending signals.")
+        
+        # 2. Format signals into a single prompt
+        prompt = "You are the central Portfolio Manager (Desk Manager). Review the following conflicting or independent signals from our background scanners:\n\n"
+        
+        signal_ids = []
+        for sig_id, source, payload in signals:
+            signal_ids.append(sig_id)
+            prompt += f"--- SIGNAL FROM: {source} ---\n{json.dumps(payload, indent=2)}\n\n"
+            
+        prompt += """
+Synthesize these signals into a single, logical decision. Act as the human portfolio manager.
+If a fundamental buy signal conflicts with a macro trim signal, decide which outweighs the other based on logic, and provide a final verdict.
+Format your response as a professional portfolio update, stating clear actions to take.
+"""
+        
+        # 3. Call Gemini
+        client = genai.Client()
+        from ingestion import generate_with_fallback
+        final_verdict = await generate_with_fallback(client, [prompt])
+        
+        # 4. Send to Discord
+        alert_channel = bot.get_channel(PROSPECT_CHANNEL_ID)
+        if alert_channel:
+            await send_long_message(alert_channel, f"👔 **DESK MANAGER SYNTHESIS:**\n\n{final_verdict}")
+        else:
+            print(f"👔 DESK MANAGER FALLBACK: {final_verdict}")
+            
+        # 5. Mark as processed
+        cur.execute("UPDATE pending_signals SET status = 'processed' WHERE id = ANY(%s)", (signal_ids,))
+        conn.commit()
+        
+        cur.close()
+        conn.close()
+        logger.info("✅ [DESK MANAGER] Synthesis complete and signals marked as processed.")
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"❌ [DESK MANAGER Error]: {e}\n{traceback.format_exc()}")
+
 async def start_scheduled_sweeps():
     """
     Async background scheduler loop grouping tasks into distinct temporal buckets.
@@ -760,9 +1158,23 @@ async def start_scheduled_sweeps():
             logger.info("⚡ Catch-up: Firing missed run_email_sweep.")
             await run_email_sweep()
             
+    # Trigger WhatsApp Catch-up Sweep
+    await run_whatsapp_startup_catchup()
+    
     while True:
         now = datetime.now()
         current_date = now.date()
+        
+        # Desk Manager Sweep (Every Hour)
+        last_desk_manager_ts = get_last_run("desk_manager_sweep")
+        if now.timestamp() - last_desk_manager_ts >= 3600:
+            try:
+                await run_news_sweep()
+                await run_youtube_sweep()
+            except Exception as e:
+                logger.error(f"❌ [Scheduler Error] {e}")
+            await run_desk_manager_sweep()
+            update_last_run("desk_manager_sweep")
         
         def should_run(task_name, target_hour):
             last_timestamp = get_last_run(task_name)
@@ -785,7 +1197,7 @@ async def start_scheduled_sweeps():
 
         # 0. Monthly Macro Sync (2nd of every month at 10:00)
         if current_date.day == 2 and should_run("monthly_macro_sync", 10):
-            await run_monthly_macro_sync()
+            # await run_monthly_macro_sync()
             update_last_run("monthly_macro_sync")
             
         # 0.5. Weekly Fundamentals Sweep (Sunday at 02:00)
@@ -794,9 +1206,7 @@ async def start_scheduled_sweeps():
             update_last_run("weekly_fundamentals")
 
         # 1. YouTube Knowledge Sweep (12:00 AM)
-        if should_run("youtube", 0):
-            await run_youtube_sweep()
-            update_last_run("youtube")
+        # Replaced by discord_bot's midnight_mentor_sweep catch-up
             
         # 2. Email Sweeps (12:00 PM and 4:00 PM)
         if should_run("email_noon", 12):
@@ -844,6 +1254,7 @@ async def start_scheduled_sweeps():
                 last_intraday_ts = get_last_run("intraday_loop")
                 if now.timestamp() - last_intraday_ts >= 600: # 600 seconds = 10 minutes
                     await run_intraday_price_loop()
+                    await psx_filing_watchdog()
                     update_last_run("intraday_loop")
                     
                 last_tech_ts = get_last_run("technical_scanner")

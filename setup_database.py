@@ -96,6 +96,23 @@ def create_tables():
         """)
         print("✅ Created/Verified 'active_playbook' table.")
 
+        # 7. Create Institutional Reports Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS institutional_reports (
+            id BIGSERIAL PRIMARY KEY,
+            source TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            subject TEXT,
+            sentiment TEXT DEFAULT 'NEUTRAL',
+            summary TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        """)
+        cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_inst_reports_ticker ON institutional_reports(ticker, created_at DESC);
+        """)
+        print("✅ Created/Verified 'institutional_reports' table.")
+
         # Commit changes and close the connection
         conn.commit()
         cursor.close()

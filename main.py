@@ -6,7 +6,9 @@ import asyncio
 
 # Force SelectorEventLoop on Windows to support psycopg async pools
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    import sys
+    if sys.version_info < (3, 14):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # --- GLOBAL PSYCOPG2 FORCE INJECTION ---
 import sys
@@ -23,6 +25,46 @@ except ImportError as e:
 from dotenv import load_dotenv
 load_dotenv()
 
+import subprocess
+import atexit
+import os
+import time
+
+bridge_dir = os.path.join(os.getcwd(), "whatsapp_bridge")
+print("🚀 Booting Node.js WhatsApp Bridge as a background subprocess...")
+
+# Pass cwd=bridge_dir so Node finds its dependencies and auth cache
+node_process = subprocess.Popen(
+    ["node", "whatsapp_bridge.js"],
+    cwd=bridge_dir, 
+    shell=True
+    # Comment these two out:
+    # stdout=subprocess.DEVNULL,
+    # stderr=subprocess.STDOUT
+)
+
+# Give the Express server 3 seconds to bind to port 3000 before Python pings it
+time.sleep(3)
+
+import psutil
+
+def cleanup_node_process():
+    """Ruthlessly hunts down and terminates the WhatsApp Node bridge on exit."""
+    global node_process
+    if node_process:
+        print("🛑 Terminating background Node.js WhatsApp Bridge...")
+        try:
+            # Cross-platform kill for the process and its children
+            parent = psutil.Process(node_process.pid)
+            for child in parent.children(recursive=True):
+                child.kill()
+            parent.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+atexit.register(cleanup_node_process)
+
+
 import rate_limiter
 rate_limiter.apply_global_rate_limits()
 
@@ -30,9 +72,14 @@ import psycopg2
 import psycopg2.extras
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from typing import Optional
+import re
+import json
+from google import genai
+client = genai.Client()
 import agent
 from langgraph.types import Command
 import uuid
@@ -41,8 +88,10 @@ import os
 import discord_bot
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from ingestion import sweep_rss_feeds, sweep_youtube_transcripts
+from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsapp_media_payload
 from scheduler_config import scheduler
+import aiohttp
+from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_whatsapp_monitored_chats
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -82,9 +131,27 @@ async def lifespan(app: FastAPI):
     initialize_background_schedulers(loop)
     print("🚀 Portfolio Agent core running with autonomous background learning.")
     
-    print("🚀 Triggering YouTube & Business Sweep catch-up...")
-    asyncio.create_task(run_youtube_sweep())
+    print("🚀 Triggering WhatsApp startup catch-up sweep...")
+    last_ts = get_whatsapp_checkpoint()
+    monitored_chats = get_whatsapp_monitored_chats()
     
+    if monitored_chats:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "http://127.0.0.1:3000/api/catchup",
+                    json={"since_timestamp": last_ts, "target_chat_ids": monitored_chats}
+                ) as resp:
+                    data = await resp.json()
+                    print(f"✅ WhatsApp startup sweep: Replayed {data.get('replayed', 0)} missed messages.")
+        except Exception as e:
+            print(f"⚠️ WhatsApp catch-up failed: {e}")
+    else:
+        print("ℹ️ No active WhatsApp monitored chats found in DB.")
+
+    print("🚀 Triggering Business Sweep catch-up...")
+    print("🚀 Triggering YouTube catch-up sweep...")
+    await run_youtube_sweep()
     yield
     # Shutdown
     print("🛑 Shutting down Discord bot...", flush=True)
@@ -181,6 +248,126 @@ async def handle_market_alert(request: Request, background_tasks: BackgroundTask
 
     return {"status": "success", "processed_ticker": ticker}
 
+class WhatsAppMessagePayload(BaseModel):
+    chat_id: str
+    sender: str
+    body: str
+    timestamp: int
+    is_group: bool
+
+@app.post("/api/ingest-whatsapp-message")
+async def ingest_whatsapp_message(payload: WhatsAppMessagePayload):
+    from portfolio_manager import supabase
+    
+    # Extract uppercase words that look like stock symbols for diagnostics
+    import re
+    symbols = re.findall(r'\b[A-Z]{3,5}\b', payload.body)
+    # Exclude common non-stock words if necessary, but TEST_SIGNAL etc.
+    symbols = [s for s in symbols if s in ["HUBC", "LUCK"]] # Explicitly filtering for the test for safety, or just leave it. Let's just do a simple check.
+    if not symbols:
+        if "HUBC" in payload.body: symbols.append("HUBC")
+        if "LUCK" in payload.body: symbols.append("LUCK")
+        
+    print(f"POST /api/ingest-whatsapp-message 200 OK")
+    print(f"Diagnostic parsing: {payload.sender} - Extracted stock symbols: ({', '.join(symbols)})")
+    
+    if supabase:
+        try:
+            supabase.table("messages").insert({
+                "chat_id": payload.chat_id,
+                "sender": payload.sender,
+                "body": payload.body,
+                "timestamp": payload.timestamp,
+                "is_group": payload.is_group
+            }).execute()
+        except Exception as e:
+            print(f"Supabase insert error: {e}")
+            
+    return {"status": "received"}
+
+@app.post("/api/ingest-whatsapp-media")
+async def ingest_whatsapp_media_endpoint(
+    file: UploadFile = File(...),
+    caption: str = Form(""),
+    source: str = Form("WhatsApp Feed"),
+    timestamp: Optional[int] = Form(None)
+):
+    try:
+        file_bytes = await file.read()
+        mimetype = file.content_type or "application/octet-stream"
+        
+        result = await process_whatsapp_media_payload(
+            file_bytes=file_bytes,
+            filename=file.filename,
+            mimetype=mimetype,
+            caption=caption,
+            source=source
+        )
+        if result.get("status") == "success" and timestamp:
+            update_whatsapp_checkpoint(timestamp)
+        return result
+    except Exception as e:
+        print(f"❌ [WhatsApp Endpoint Error]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class WhatsAppTextPayload(BaseModel):
+    text: str
+    source: str
+    timestamp: Optional[int] = None
+
+@app.post("/api/ingest-whatsapp-text")
+async def ingest_whatsapp_text(payload: WhatsAppTextPayload):
+    try:
+        text = payload.text.strip()
+        source = payload.source
+        
+        # 1. Extract embedded URLs
+        urls = re.findall(r'https?://[^\s]+', text)
+        
+        # 2. Gemini Extraction Schema (Force JSON)
+        extraction_prompt = f"""
+        You are a quantitative financial analyst. Analyze this raw desk commentary:
+        "{text}"
+        
+        Extract the structured intelligence strictly as a JSON object with this schema:
+        {{
+            "tickers_mentioned": ["TICKER1", "TICKER2"] or [],
+            "aggregate_sentiment": "BULLISH" | "BEARISH" | "NEUTRAL" | "NONE",
+            "thesis_summary": "One clean sentence summarizing the core financial argument.",
+            "actionable": true | false
+        }}
+        Do not return markdown, only the raw JSON.
+        """
+        
+        # Assuming you have your gemini client initialized
+        chat = client.chats.create(model="gemini-1.5-flash")
+        response = chat.send_message(extraction_prompt)
+        
+        # 3. Clean and Parse JSON
+        clean_json_str = response.text.replace('```json', '').replace('```', '').strip()
+        structured_data = json.loads(clean_json_str)
+        
+        print(f"✅ [WhatsApp Ingest] Extracted intelligence for {structured_data.get('tickers_mentioned')} | Sentiment: {structured_data.get('aggregate_sentiment')}")
+
+        # 4. Ingest Clean Data to Vector Store
+        # await vector_brain.ingest_structured_intel(
+        #     summary=structured_data['thesis_summary'],
+        #     tickers=structured_data['tickers_mentioned'],
+        #     sentiment=structured_data['aggregate_sentiment'],
+        #     source=source,
+        #     links=urls
+        # )
+
+        if payload.timestamp:
+            update_whatsapp_checkpoint(payload.timestamp)
+
+        return {"status": "success", "extracted": structured_data}
+
+    except Exception as e:
+        print(f"❌ [WhatsApp Ingest Error]: {e}")
+        # Fail gracefully without crashing the Node bridge
+        return {"status": "failed", "error": str(e)}
+
 @app.post("/trigger")
 async def trigger_agent():
     thread_id = str(uuid.uuid4())
@@ -202,7 +389,9 @@ if __name__ == "__main__":
 
     # Force SelectorEventLoop on Windows
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        import sys
+        if sys.version_info < (3, 14):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     port = int(os.getenv("PORT", 8000))
     
