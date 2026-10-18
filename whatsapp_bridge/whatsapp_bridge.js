@@ -11,9 +11,9 @@ const client = new Client({
         dataPath: './.wwebjs_auth'
     }),
     puppeteer: {
-        headless: true, // Reverted to true for silent background operation
+        headless: true, // Silent background operation
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        protocolTimeout: 300000 // Forces the browser to wait for WhatsApp to load
+        protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
     }
 });
 
@@ -31,16 +31,34 @@ client.on('code', (code) => {
     console.log('======================================================\n');
 });
 
-// Monitored KTrade Group IDs
-const KTRADE_CHAT_IDS = [
+// STRICT WHITELIST: Only the two authentic KTrade group IDs
+const ALLOWED_KTRADE_CHATS = new Set([
     '120363405626670375@g.us', // KTrade - E Trader Assistance 6
     '120363404462896702@g.us'  // KTrade - E Trader Assistance 6 (Secondary)
-];
+]);
+
+const CHAT_NAMES = {
+    '120363405626670375@g.us': 'KTrade - E Trader Assistance 6',
+    '120363404462896702@g.us': 'KTrade - E Trader Assistance 6 (Secondary)'
+};
+
+function getSerializedId(raw) {
+    if (!raw) return '';
+    if (typeof raw === 'string') return raw;
+    if (raw._serialized) return raw._serialized;
+    return String(raw);
+}
 
 // Unified forwarder for multimodal media (images, PDFs, voice notes) and text intelligence
 async function forwardMessageToPython(msg, chatName, chatId) {
     try {
-        const targetChatId = chatId || (msg.from ? (msg.from._serialized || msg.from) : '') || '120363405626670375@g.us';
+        const targetChatId = chatId || getSerializedId(msg.from) || '';
+        
+        // STRICT GATE: Never forward non-whitelisted chats under any circumstances
+        if (!ALLOWED_KTRADE_CHATS.has(targetChatId)) {
+            return;
+        }
+
         const sender = msg.author || msg.from || 'KTrade';
         const timestamp = msg.timestamp || Math.floor(Date.now() / 1000);
 
@@ -49,7 +67,13 @@ async function forwardMessageToPython(msg, chatName, chatId) {
             try {
                 media = await msg.downloadMedia();
             } catch (dlErr) {
-                console.warn(`⚠️ [WhatsApp Bridge] Attachment download threw for msg ${msg.id?.id || 'unknown'}: ${dlErr.message}`);
+                console.warn(`⚠️ [WhatsApp Bridge] Attachment download attempt 1 threw for msg ${msg.id?.id || 'unknown'} (${dlErr.message || dlErr}). Waiting 1500ms to hydrate...`);
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                try {
+                    media = await msg.downloadMedia();
+                } catch (retryErr) {
+                    console.warn(`⚠️ [WhatsApp Bridge] Attachment download retry failed: ${retryErr.message || retryErr}`);
+                }
             }
 
             if (media && media.data) {
@@ -84,7 +108,7 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                         await axios.post('http://127.0.0.1:8000/api/ingest-whatsapp-message', payload, {
                             maxContentLength: 50 * 1024 * 1024,
                             maxBodyLength: 50 * 1024 * 1024,
-                            timeout: 120000
+                            timeout: 15000
                         });
                         return;
                     } else {
@@ -94,7 +118,10 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                     console.log(`ℹ️ [WhatsApp Bridge] Skipping unsupported media type (${mime})`);
                 }
             } else {
-                console.warn(`⚠️ [WhatsApp Bridge] Media data empty for message ID: ${msg.id?.id || 'unknown'}`);
+                if (!msg.body || msg.body.trim().length === 0) {
+                    console.log(`ℹ️ [WhatsApp Bridge] Media unavailable and message body empty. Cleanly skipping msg ${msg.id?.id || 'unknown'}.`);
+                    return;
+                }
             }
         }
 
@@ -112,7 +139,7 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                 has_media: false
             };
             await axios.post('http://127.0.0.1:8000/api/ingest-whatsapp-message', payload, {
-                timeout: 60000
+                timeout: 15000
             });
         }
     } catch (err) {
@@ -136,7 +163,7 @@ app.get('/ping', (req, res) => {
     }
 });
 
-// List all group chats with their serialized @g.us IDs
+// List all group chats with their serialized @g.us IDs (diagnostic)
 app.get('/chats', async (req, res) => {
     try {
         if (!client || !isClientReady) {
@@ -151,7 +178,8 @@ app.get('/chats', async (req, res) => {
                 .map(c => ({
                     name: c.name || 'Unnamed Group',
                     id: c.id._serialized,
-                    unreadCount: c.unreadCount || 0
+                    unreadCount: c.unreadCount || 0,
+                    isWhitelisted: ALLOWED_KTRADE_CHATS.has(c.id._serialized)
                 }));
         } catch (getChatsErr) {
             console.warn(`⚠️ [WhatsApp Bridge] Standard client.getChats() threw (${getChatsErr.message || getChatsErr}). Using direct DOM evaluation fallback...`);
@@ -194,7 +222,7 @@ app.get('/chats', async (req, res) => {
     }
 });
 
-// Start local API sweep endpoint
+// Start local API sweep endpoint (strictly whitelisted to KTrade)
 app.get('/api/trigger-sweep', async (req, res) => {
     console.log('🔄 [WhatsApp Bridge] Python requested startup catch-up sweep...');
     try {
@@ -205,8 +233,7 @@ app.get('/api/trigger-sweep', async (req, res) => {
         const chats = await client.getChats().catch(() => []);
         const ktradeChats = chats.filter(c => {
             const id = c.id?._serialized || '';
-            const name = c.name || '';
-            return KTRADE_CHAT_IDS.includes(id) || name.includes('KTrade');
+            return ALLOWED_KTRADE_CHATS.has(id);
         });
 
         if (ktradeChats.length === 0) {
@@ -214,10 +241,12 @@ app.get('/api/trigger-sweep', async (req, res) => {
         }
 
         for (const ktradeChat of ktradeChats) {
+            const chatId = ktradeChat.id?._serialized;
+            const chatName = CHAT_NAMES[chatId] || ktradeChat.name || 'KTrade';
             const messages = await ktradeChat.fetchMessages({ limit: 50 }).catch(() => []);
             for (const msg of messages) {
                 try {
-                    await forwardMessageToPython(msg, ktradeChat.name || 'KTrade', ktradeChat.id?._serialized);
+                    await forwardMessageToPython(msg, chatName, chatId);
                 } catch (err) {
                     console.warn(`⚠️ [WhatsApp Bridge] Sweep skipped message: ${err.message}`);
                 }
@@ -234,15 +263,18 @@ app.get('/api/trigger-sweep', async (req, res) => {
 // Hardened catchup endpoint with Store fallback and multimodal media replay
 app.post('/api/catchup', async (req, res) => {
     const { since_timestamp, target_chat_ids } = req.body;
-    const chatIdsToScan = (target_chat_ids && target_chat_ids.length > 0) ? target_chat_ids : KTRADE_CHAT_IDS;
-    console.log(`🔄 [WhatsApp Bridge] Catching up on messages since timestamp: ${since_timestamp || 0} for ${chatIdsToScan.length} chats...`);
+    const rawIds = (target_chat_ids && target_chat_ids.length > 0) ? target_chat_ids : Array.from(ALLOWED_KTRADE_CHATS);
+    // STRICT GATE: Only allow whitelisted KTrade IDs
+    const chatIdsToScan = rawIds.filter(id => ALLOWED_KTRADE_CHATS.has(id));
+
+    console.log(`🔄 [WhatsApp Bridge] Catching up on messages since timestamp: ${since_timestamp || 0} for ${chatIdsToScan.length} whitelisted KTrade chats...`);
 
     let processedCount = 0;
 
     for (const chatId of chatIdsToScan) {
         try {
             let handled = false;
-            let chatName = 'KTrade - E Trader Assistance 6';
+            let chatName = CHAT_NAMES[chatId] || 'KTrade';
 
             // Attempt 1: Standard client.getChatById
             try {
@@ -359,48 +391,42 @@ app.post('/api/catchup', async (req, res) => {
 // START EXPRESS IMMEDIATELY
 app.listen(3000, () => console.log('⚙️  [WhatsApp Bridge] Local API listening on port 3000. Waiting for Chrome...'));
 
-// Live Event Listener (harden to accept audio, ptt, images, and match KTrade group IDs directly)
+// Live Event Listener strictly gated to ALLOWED_KTRADE_CHATS
 client.on('message_create', async (msg) => {
-    const allowedTypes = ['chat', 'image', 'document', 'audio', 'ptt', 'video', 'voice'];
-    if (!allowedTypes.includes(msg.type) && !msg.hasMedia) {
+    // 1. Determine actual chat ID
+    const fromId = getSerializedId(msg.from);
+    const toId = getSerializedId(msg.to);
+    const chatId = msg.fromMe ? toId : fromId;
+
+    // STRICT GATE: If !ALLOWED_KTRADE_CHATS.has(chatId), RETURN IMMEDIATELY.
+    // Never process @c.us private DMs, @lid messages, @newsletter channels, or any other @g.us group!
+    if (!ALLOWED_KTRADE_CHATS.has(chatId)) {
         return;
     }
+
     if (msg.isStatus) {
         return;
     }
 
+    const allowedTypes = ['chat', 'image', 'document', 'audio', 'ptt', 'video', 'voice'];
+    if (!allowedTypes.includes(msg.type) && !msg.hasMedia) {
+        return;
+    }
+
     try {
-        const fromId = msg.from ? (msg.from._serialized || msg.from) : '';
-        const toId = msg.to ? (msg.to._serialized || msg.to) : '';
-
-        // Check if message is from/to a monitored KTrade chat ID directly
-        const isDirectMatch = KTRADE_CHAT_IDS.includes(fromId) || KTRADE_CHAT_IDS.includes(toId);
-
-        let chat = null;
-        let chatName = 'KTrade - E Trader Assistance 6';
+        let chatName = CHAT_NAMES[chatId] || 'KTrade';
         try {
-            chat = await msg.getChat();
-            if (chat) chatName = chat.name || chatName;
+            const chat = await msg.getChat();
+            if (chat && chat.name) chatName = chat.name;
         } catch (getChatErr) {
-            // Suppress expected getChat error when Store changes, fall back to direct ID match
+            // Keep default chatName from CHAT_NAMES map
         }
 
-        const isNameMatch = chatName && chatName.includes('KTrade');
-        if (!isDirectMatch && !isNameMatch) {
-            return;
-        }
-
-        const effectiveChatId = isDirectMatch ? (KTRADE_CHAT_IDS.includes(fromId) ? fromId : toId) : (chat?.id?._serialized || fromId);
-        console.log(`[Diagnostic] Live KTrade Message! Chat: "${chatName}", ID: ${effectiveChatId}, Type: ${msg.type}, Media: ${msg.hasMedia}`);
-
-        await forwardMessageToPython(msg, chatName, effectiveChatId);
+        console.log(`[Diagnostic] Live KTrade Message! Chat: "${chatName}", ID: ${chatId}, Type: ${msg.type}, Media: ${msg.hasMedia}`);
+        await forwardMessageToPython(msg, chatName, chatId);
     } catch (err) {
-        const errorMsg = err.message || err;
-        if (errorMsg !== 'r') {
-            console.warn(`⚠️ [WhatsApp Bridge] Live event skipped: ${errorMsg}`);
-        }
+        console.warn(`⚠️ [WhatsApp Bridge] Live event skipped: ${err.message || err}`);
     }
 });
 
 client.initialize();
-

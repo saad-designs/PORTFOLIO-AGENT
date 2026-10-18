@@ -1069,9 +1069,8 @@ TASK:
                 price: float
                 intrinsic: float
             
-            p_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-            f_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
-            llm = p_llm.with_fallbacks([f_llm])
+            from model_router import get_langchain_llm, TASK_FAST_INGESTION
+            llm = get_langchain_llm(TASK_FAST_INGESTION)
             parser = llm.with_structured_output(OpportunityParser)
             try:
                 parsed_op = parser.invoke(f"Extract the exact ticker, current price, and target/intrinsic price from this thesis:\n{final_text}")

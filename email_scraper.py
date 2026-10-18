@@ -99,8 +99,8 @@ State clearly if this supports holding, dumping, or accumulating. Keep it blunt.
         gemini_payload = [EMAIL_PARTNER_PROMPT] + uploaded_files + [f"Subject: {subject}\nBody: {email_text}"]
         
         # 5. Call Gemini via fallback wrapper
-        from ingestion import generate_with_fallback
-        response_text = await generate_with_fallback(client, gemini_payload)
+        from model_router import generate_with_fallback, TASK_FAST_INGESTION
+        response_text = await generate_with_fallback(client, gemini_payload, task=TASK_FAST_INGESTION)
 
         import re
         import json

@@ -21,9 +21,8 @@ def extract_trade_intent(message_content: str) -> TradeExecution | None:
     Returns None if the message is not a trade intent.
     """
     try:
-        p_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        f_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        llm = p_llm.with_fallbacks([f_llm])
+        from model_router import get_langchain_llm, TASK_FAST_INGESTION
+        llm = get_langchain_llm(TASK_FAST_INGESTION)
         
         # We instruct the model strictly about its extraction task
         parser = llm.with_structured_output(TradeExecution)

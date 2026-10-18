@@ -705,14 +705,10 @@ def execute_trade_tool(ticker: str, action: str) -> str:
     
     return f"Trade signal registered for {ticker} ({action}). Awaiting human execution."
 
-# Primary heavy reasoning model with multi-tier fallback cascade
-primary_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-fallback_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
-legacy_primary = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-legacy_fallback = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
+from model_router import get_langchain_llm, TASK_DEEP_REASONING, TASK_FAST_INGESTION
 
-# Chain with automatic fallback
-llm = primary_llm.with_fallbacks([fallback_llm, legacy_primary, legacy_fallback])
+# Primary heavy reasoning model with task-specific routing & quota circuit breaker
+llm = get_langchain_llm(TASK_DEEP_REASONING)
 
 # Instantiate the search tool
 search_tool = TavilySearch(name="web_search")
@@ -981,7 +977,7 @@ class TradeEvaluationState(TypedDict):
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 def analyst_node(state: TradeEvaluationState):
-    node_llm = llm
+    node_llm = get_langchain_llm(TASK_DEEP_REASONING)
     
     is_macro = state.get('ticker') == 'MACRO_SWEEP' or state.get('trigger_type') == 'macro_news_sweep'
     
@@ -1043,7 +1039,7 @@ def analyst_node(state: TradeEvaluationState):
         return {"analyst_thesis": result.model_dump_json(), "final_evaluation": result.model_dump()}
 
 def risk_manager_node(state: TradeEvaluationState):
-    node_llm = llm
+    node_llm = get_langchain_llm(TASK_DEEP_REASONING)
     
     prompt = f"""
     You are a strict compliance officer and risk manager.

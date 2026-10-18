@@ -127,9 +127,8 @@ def query_mentor_brain_tool(query: str) -> str:
             
         context = "\n\n".join([doc.page_content for doc in results])
         
-        p_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        f_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        llm = p_llm.with_fallbacks([f_llm])
+        from model_router import get_langchain_llm, TASK_FAST_INGESTION
+        llm = get_langchain_llm(TASK_FAST_INGESTION)
         
         prompt = f"""
         You are a highly analytical, conversational trading assistant. You speak like a real human mentor.
@@ -217,9 +216,8 @@ async def evaluate_trade_trigger(trigger_dict: dict) -> str:
         
         context = await get_market_context(ticker)
         
-        p_llm = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        f_llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        llm = p_llm.with_fallbacks([f_llm])
+        from model_router import get_langchain_llm, TASK_FAST_INGESTION
+        llm = get_langchain_llm(TASK_FAST_INGESTION)
         structured_llm = llm.with_structured_output(TradeEvaluationSchema)
         
         prompt = f"""You are a long-term value investor. You hold compounding businesses indefinitely. You NEVER trim or sell a stock simply because it is in profit. You only recommend a TRIM or SELL if the asset has exceeded its fundamental target price, if the core business thesis is broken, or to clear extreme concentration risk.

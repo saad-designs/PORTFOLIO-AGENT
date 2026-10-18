@@ -176,7 +176,8 @@ async def _run_youtube_sweep_inner():
 
         if transcripts:
             from google import genai
-            from ingestion import SWEEP_FORMAT_PROMPT, save_learned_rule, generate_with_fallback
+            from ingestion import SWEEP_FORMAT_PROMPT, save_learned_rule
+            from model_router import generate_with_fallback, TASK_FAST_INGESTION
             from vector_brain import ingest_knowledge_tool
             import re
             
@@ -187,7 +188,7 @@ async def _run_youtube_sweep_inner():
                 print("DIAGNOSTIC: Sleeping for 65 seconds to clear Gemini RPM and Token limits...")
                 await asyncio.sleep(65)
                 prompt = SWEEP_FORMAT_PROMPT.format(mentor_name=mentor) + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
-                formatted_text = await generate_with_fallback(client, [prompt])
+                formatted_text = await generate_with_fallback(client, [prompt], task=TASK_FAST_INGESTION)
                 
                 # Extract rule if it exists
                 try:
@@ -466,8 +467,8 @@ async def conduct_autonomous_audit(ticker: str, trigger_type: str, current_price
         institutional_intelligence=intelligence
     )
 
-    from ingestion import generate_with_fallback
-    raw_response = await generate_with_fallback(client, [prompt])
+    from model_router import generate_with_fallback, TASK_FAST_INGESTION
+    raw_response = await generate_with_fallback(client, [prompt], task=TASK_FAST_INGESTION)
     
     # 5. Parse JSON output
     try:
@@ -1138,8 +1139,8 @@ NEVER use Markdown pipe tables (| col | col |) because Discord cannot render the
         
         # 3. Call Gemini
         client = genai.Client(http_options={"timeout": 300000})
-        from ingestion import generate_with_fallback
-        final_verdict = await generate_with_fallback(client, [prompt])
+        from model_router import generate_with_fallback, TASK_DEEP_REASONING
+        final_verdict = await generate_with_fallback(client, [prompt], task=TASK_DEEP_REASONING)
         
         # 4. Send to Discord
         alert_channel = bot.get_channel(PROSPECT_CHANNEL_ID)

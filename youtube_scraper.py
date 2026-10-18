@@ -98,7 +98,8 @@ def _tier1_native_gemini(video_id: str) -> str:
             types.Part(text="Watch and listen to the audio of this video (which may be in Urdu, Hindi, or English). Provide a comprehensive, detailed English transcript and breakdown of everything said, capturing every PSX stock ticker, price target, support/resistance level, and macroeconomic insight.")
         ]
     )
-    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    from model_router import get_candidate_models, record_model_error, TASK_FAST_INGESTION
+    models_to_try = get_candidate_models(TASK_FAST_INGESTION)
     last_err = None
     for model_name in models_to_try:
         try:
@@ -110,6 +111,7 @@ def _tier1_native_gemini(video_id: str) -> str:
                 return response.text.strip()
         except Exception as e:
             last_err = e
+            record_model_error(model_name, e)
             print(f"⚠️ [Tier 1] Model {model_name} failed: {e}")
             continue
     raise RuntimeError(f"Tier 1 native Gemini failed for {video_id}: {last_err}")
@@ -124,7 +126,7 @@ def _tier2_download_and_transcribe(video_id: str) -> str:
     temp_audio_file = None
     
     ydl_opts = {
-        'format': 'worstaudio[ext=m4a]/worstaudio/bestaudio',
+        'format': 'bestaudio/best',
         'outtmpl': f'temp_{video_id}.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -283,8 +285,13 @@ async def fetch_mentor_transcripts(mentor_names: list) -> tuple[dict, list]:
     
     last_timestamp = get_checkpoint("youtube_last_timestamp")
     highest_timestamp = last_timestamp
+    total_processed_videos = 0
+    MAX_VIDEOS_PER_SWEEP = 2
     
     for name in mentor_names:
+        if total_processed_videos >= MAX_VIDEOS_PER_SWEEP:
+            print(f"🛑 [YouTube Scraper] Reached max cap of {MAX_VIDEOS_PER_SWEEP} new videos for this sweep. Halting mentor loop.")
+            break
         print(f"\n--- Processing Mentor: {name} ---")
         try:
             channel_id = MENTOR_CHANNEL_MAP.get(name)
@@ -307,10 +314,14 @@ async def fetch_mentor_transcripts(mentor_names: list) -> tuple[dict, list]:
                 
             mentor_transcripts = []
             for video in new_videos:
+                if total_processed_videos >= MAX_VIDEOS_PER_SWEEP:
+                    print(f"🛑 [YouTube Scraper] Reached max cap of {MAX_VIDEOS_PER_SWEEP} videos. Stopping video loop.")
+                    break
                 video_id = video["video_id"]
                 published_at = video["published_at"]
                 
                 transcript = await get_transcript(video_id)
+                total_processed_videos += 1
                 if transcript:
                     if isinstance(transcript, list):
                         clean_text = " ".join([entry.get("text", "") for entry in transcript])

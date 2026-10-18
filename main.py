@@ -15,7 +15,6 @@ import sys
 try:
     import psycopg2
     import psycopg2.extras
-    # Force it into sys.modules globally so any file can access it
     sys.modules['psycopg2'] = psycopg2
     sys.modules['psycopg2.extras'] = psycopg2.extras
 except ImportError as e:
@@ -25,26 +24,30 @@ except ImportError as e:
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- API KEY ENVIRONMENT SANITIZATION ---
+# Prevent Google GenAI and LangChain from spamming duplicate key warning
+import os
+if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
+    os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
+os.environ.pop("GEMINI_API_KEY", None)
+
 import subprocess
 import atexit
-import os
 import time
+import base64
+import uuid
+import json
+import re
 
 bridge_dir = os.path.join(os.getcwd(), "whatsapp_bridge")
-print("🚀 Booting Node.js WhatsApp Bridge as a background subprocess...")
+print("🚀 Booting Node.js WhatsApp Bridge concurrently in background...")
 
-# Pass cwd=bridge_dir so Node finds its dependencies and auth cache
+# Fast non-blocking boot (removed 3s sleep)
 node_process = subprocess.Popen(
     ["node", "whatsapp_bridge.js"],
     cwd=bridge_dir, 
     shell=True
-    # Comment these two out:
-    # stdout=subprocess.DEVNULL,
-    # stderr=subprocess.STDOUT
 )
-
-# Give the Express server 3 seconds to bind to port 3000 before Python pings it
-time.sleep(3)
 
 import psutil
 
@@ -54,7 +57,6 @@ def cleanup_node_process():
     if node_process:
         print("🛑 Terminating background Node.js WhatsApp Bridge...")
         try:
-            # Cross-platform kill for the process and its children
             parent = psutil.Process(node_process.pid)
             for child in parent.children(recursive=True):
                 child.kill()
@@ -64,114 +66,200 @@ def cleanup_node_process():
 
 atexit.register(cleanup_node_process)
 
-
 import rate_limiter
 rate_limiter.apply_global_rate_limits()
-
-import psycopg2
-import psycopg2.extras
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from typing import Optional
-import re
-import json
-if not os.getenv("GEMINI_API_KEY") and os.getenv("GOOGLE_API_KEY"):
-    os.environ["GEMINI_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+
 from google import genai
-raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+raw_key = os.getenv("GOOGLE_API_KEY")
 client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
+
 import agent
 from langgraph.types import Command
-import uuid
-import os
-
 import discord_bot
-import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsapp_media_payload, process_whatsapp_text_payload
 from scheduler_config import scheduler
 import aiohttp
-from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_whatsapp_monitored_chats
+from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_checkpoint, update_checkpoint
+from model_router import is_financial_or_signal_text
+
+# Whitelisted KTrade group IDs
+ALLOWED_KTRADE_CHATS = [
+    "120363405626670375@g.us",
+    "120363404462896702@g.us"
+]
+
+# --- ASYNC NON-BLOCKING INGESTION QUEUE ---
+whatsapp_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+
+async def whatsapp_queue_worker():
+    """
+    Sequential background consumer for WhatsApp incoming payloads.
+    Guarantees fast HTTP returns (<5ms) to Express and applies pre-LLM noise filtering.
+    """
+    print("🚀 [WhatsApp Queue Worker] Ingestion queue consumer online.")
+    while True:
+        try:
+            payload = await whatsapp_queue.get()
+            try:
+                chat_id = payload.chat_id or "KTrade"
+                sender = payload.sender or "KTrade"
+                body = payload.body or ""
+                source = payload.source or "KTrade"
+                timestamp = payload.timestamp or int(time.time())
+
+                # Supabase message archival
+                from portfolio_manager import supabase
+                if supabase:
+                    try:
+                        supabase.table("messages").insert({
+                            "chat_id": chat_id,
+                            "sender": sender,
+                            "body": body[:500] if body else f"[{payload.filename or 'Media Attachment'}]",
+                            "timestamp": timestamp,
+                            "is_group": payload.is_group
+                        }).execute()
+                    except Exception:
+                        pass
+
+                # 1. Multimodal media payload
+                if payload.has_media and payload.media_base64:
+                    try:
+                        file_bytes = base64.b64decode(payload.media_base64)
+                        mimetype = payload.mime_type or "image/png"
+                        filename = payload.filename or "media_attachment"
+                        print(f"📥 [WhatsApp Worker] Processing multimodal: {filename} ({mimetype}, {len(file_bytes)} bytes) from {source}")
+                        await process_whatsapp_media_payload(
+                            file_bytes=file_bytes,
+                            filename=filename,
+                            mimetype=mimetype,
+                            caption=body,
+                            source=source,
+                            timestamp=timestamp
+                        )
+                    except Exception as media_err:
+                        print(f"❌ [WhatsApp Worker] Multimodal processing failed: {media_err}")
+
+                # 2. Text intelligence payload with pre-LLM noise filter
+                elif body and len(body.strip()) > 0:
+                    clean_text = body.strip()
+                    # Zero-Cost Pre-LLM Noise Filter (Filters chitchat < 30 chars with no tickers or financial keywords)
+                    if not is_financial_or_signal_text(clean_text, has_media=False):
+                        print(f"ℹ️ [Noise Filter] 0ms bypass on short non-financial commentary (< 30 chars, no tickers/keywords): '{clean_text}'")
+                        if timestamp:
+                            update_whatsapp_checkpoint(timestamp)
+                    else:
+                        print(f"📥 [WhatsApp Worker] Processing text intel ({len(clean_text)} chars) from {source}...")
+                        await process_whatsapp_text_payload(
+                            text=clean_text,
+                            source=source,
+                            timestamp=timestamp
+                        )
+
+            except Exception as item_err:
+                print(f"❌ [WhatsApp Worker] Error handling message item: {item_err}")
+            finally:
+                whatsapp_queue.task_done()
+        except asyncio.CancelledError:
+            break
+        except Exception as q_err:
+            print(f"❌ [WhatsApp Worker] Queue loop error: {q_err}")
+            await asyncio.sleep(1)
+
+async def poll_and_catchup_whatsapp():
+    """
+    Polls WhatsApp Bridge /ping every 5s up to 90s in non-blocking background.
+    Triggers catch-up sweep as soon as bridge reports READY.
+    """
+    last_ts = get_whatsapp_checkpoint()
+    bridge_ready = False
+    print("📱 [Startup Orchestrator] Polling WhatsApp Bridge (http://127.0.0.1:3000/ping) in background (up to 90s)...")
+
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(18):  # 18 * 5s = 90s
+            try:
+                async with session.get("http://127.0.0.1:3000/ping", timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("status") == "pong" or "ready" in data.get("message", "").lower():
+                            bridge_ready = True
+                            print("✅ [Startup Orchestrator] WhatsApp Bridge is READY.")
+                            break
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+        if bridge_ready:
+            try:
+                print(f"🔄 [Startup Orchestrator] Executing WhatsApp catch-up for {len(ALLOWED_KTRADE_CHATS)} KTrade chats...")
+                async with session.post(
+                    "http://127.0.0.1:3000/api/catchup",
+                    json={"since_timestamp": last_ts, "target_chat_ids": ALLOWED_KTRADE_CHATS},
+                    timeout=aiohttp.ClientTimeout(total=120)
+                ) as resp:
+                    data = await resp.json()
+                    print(f"✅ [Startup Orchestrator] WhatsApp catch-up complete: {data.get('replayed', 0)} messages replayed.")
+            except Exception as wa_err:
+                print(f"⚠️ [Startup Orchestrator] WhatsApp catch-up request failed: {wa_err}")
+        else:
+            print("ℹ️ [Startup Orchestrator] WhatsApp Bridge still initializing after 90s. Bridge will process live messages on connect.")
 
 async def run_startup_orchestration():
     """
-    Sequential Startup Orchestrator:
-    Prevents startup stampede and rate-limit exhaustion.
-    1. Waits for WhatsApp Bridge to report READY (or skips cleanly if offline).
-    2. Runs WhatsApp catch-up sweep with sanitized chat IDs (filters out 'XXXX' dummy IDs).
-    3. Runs Business & Portfolio Sweep.
-    4. Waits 10 seconds.
-    5. Runs YouTube catch-up sweep ONCE.
+    Sequential Startup Orchestrator with Lazily Staggered Checks:
+    Prevents boot stampede and quota exhaustion.
+    1. WhatsApp polling & catch-up runs in background as soon as bridge is ready.
+    2. At t+30s: Business Sweep runs ONLY IF last sweep was > 4 hours ago.
+    3. At t+90s: YouTube Sweep runs ONLY IF last sweep was > 6 hours ago.
     """
-    print("🚀 [Startup Orchestrator] Initializing sequential startup sequence...")
-    
-    # --- 1. WhatsApp Bridge Catch-Up ---
-    last_ts = get_whatsapp_checkpoint()
-    raw_chats = get_whatsapp_monitored_chats()
-    # Filter out dummy placeholder chat IDs containing 'xxxx'
-    monitored_chats = [cid for cid in raw_chats if "xxxx" not in str(cid).lower()]
-    
-    if monitored_chats:
-        bridge_ready = False
-        print("📱 [Startup Orchestrator] Polling WhatsApp Bridge (http://127.0.0.1:3000/ping) for READY status...")
-        async with aiohttp.ClientSession() as session:
-            # Poll for up to 30 seconds
-            for attempt in range(6):
-                try:
-                    async with session.get("http://127.0.0.1:3000/ping", timeout=aiohttp.ClientTimeout(total=4)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("status") == "pong" or "ready" in data.get("message", "").lower():
-                                bridge_ready = True
-                                print("✅ [Startup Orchestrator] WhatsApp Bridge is READY.")
-                                break
-                except Exception:
-                    pass
-                await asyncio.sleep(5)
-            
-            if bridge_ready:
-                try:
-                    print(f"🔄 [Startup Orchestrator] Executing WhatsApp catch-up for {len(monitored_chats)} monitored chats...")
-                    async with session.post(
-                        "http://127.0.0.1:3000/api/catchup",
-                        json={"since_timestamp": last_ts, "target_chat_ids": monitored_chats},
-                        timeout=aiohttp.ClientTimeout(total=120)
-                    ) as resp:
-                        data = await resp.json()
-                        print(f"✅ [Startup Orchestrator] WhatsApp catch-up complete: {data.get('replayed', 0)} messages replayed.")
-                except Exception as wa_err:
-                    print(f"⚠️ [Startup Orchestrator] WhatsApp catch-up request failed: {wa_err}")
-            else:
-                print("ℹ️ [Startup Orchestrator] WhatsApp Bridge not ready or offline after 30s. Skipping startup catch-up.")
+    print("🚀 [Startup Orchestrator] Initializing non-blocking startup sequences...")
+
+    # 1. Non-blocking WhatsApp Bridge polling task
+    asyncio.create_task(poll_and_catchup_whatsapp())
+
+    # 2. Lazily staggered Business & Portfolio Sweep at t+30s
+    await asyncio.sleep(30)
+    now = int(time.time())
+    last_business_sweep = get_checkpoint("business_sweep_last_timestamp")
+    # 4 hours = 14400s
+    if (now - last_business_sweep) > (4 * 3600):
+        print(f"⚖️ [Startup Orchestrator] Last Business Sweep was {now - last_business_sweep}s ago (>4h). Running Business & Portfolio Sweep...")
+        try:
+            from schedulers import run_business_portfolio_sweep
+            await run_business_portfolio_sweep()
+            update_checkpoint("business_sweep_last_timestamp", now)
+            print("✅ [Startup Orchestrator] Business Sweep completed.")
+        except Exception as bus_err:
+            print(f"⚠️ [Startup Orchestrator] Business Sweep failed: {bus_err}")
     else:
-        print("ℹ️ [Startup Orchestrator] No valid monitored WhatsApp chats found in DB.")
+        mins_ago = int((now - last_business_sweep) / 60)
+        print(f"ℹ️ [Startup Orchestrator] Skipping Business Sweep on boot: last run was {mins_ago}m ago (<4h).")
 
-    # --- 2. Business & Portfolio Sweep ---
-    try:
-        from schedulers import run_business_portfolio_sweep
-        print("⚖️ [Startup Orchestrator] Running Business & Portfolio Sweep...")
-        await run_business_portfolio_sweep()
-        print("✅ [Startup Orchestrator] Business Sweep completed.")
-    except Exception as bus_err:
-        print(f"⚠️ [Startup Orchestrator] Business Sweep failed: {bus_err}")
+    # 3. Lazily staggered YouTube Sweep at t+90s (60s after business sweep check)
+    await asyncio.sleep(60)
+    now = int(time.time())
+    last_youtube_sweep = get_checkpoint("youtube_last_timestamp")
+    # 6 hours = 21600s
+    if (now - last_youtube_sweep) > (6 * 3600):
+        print(f"🕒 [Startup Orchestrator] Last YouTube Sweep was {now - last_youtube_sweep}s ago (>6h). Running YouTube catch-up sweep (capped at 2 videos)...")
+        try:
+            from schedulers import run_youtube_sweep
+            await run_youtube_sweep()
+            update_checkpoint("youtube_last_timestamp", now)
+            print("✅ [Startup Orchestrator] YouTube catch-up sweep completed.")
+        except Exception as yt_err:
+            print(f"⚠️ [Startup Orchestrator] YouTube sweep failed: {yt_err}")
+    else:
+        mins_ago = int((now - last_youtube_sweep) / 60)
+        print(f"ℹ️ [Startup Orchestrator] Skipping YouTube Sweep on boot: last run was {mins_ago}m ago (<6h).")
 
-    # --- 3. Buffer Sleep (10 seconds) ---
-    print("⏳ [Startup Orchestrator] Waiting 10 seconds before YouTube sweep...")
-    await asyncio.sleep(10)
-
-    # --- 4. YouTube Catch-up Sweep ONCE ---
-    try:
-        from schedulers import run_youtube_sweep
-        print("🕒 [Startup Orchestrator] Running YouTube catch-up sweep...")
-        await run_youtube_sweep()
-        print("✅ [Startup Orchestrator] YouTube catch-up sweep completed.")
-    except Exception as yt_err:
-        print(f"⚠️ [Startup Orchestrator] YouTube sweep failed: {yt_err}")
-
-    print("🎯 [Startup Orchestrator] Sequential startup sequence completed successfully.")
+    print("🎯 [Startup Orchestrator] Staggered startup checks fully initialized.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -184,9 +272,11 @@ async def lifespan(app: FastAPI):
         print("❌ CRITICAL: DISCORD_TOKEN is missing from environment variables!", flush=True)
     else:
         print("🚀 Starting Discord bot in background task...", flush=True)
-        # Start Discord bot concurrently without blocking Uvicorn
         asyncio.create_task(discord_bot.bot.start(token))
-        
+
+    # Start WhatsApp ingestion queue worker
+    asyncio.create_task(whatsapp_queue_worker())
+
     scheduler.add_job(
         sweep_rss_feeds, 
         'interval', 
@@ -203,11 +293,8 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     
-    # Grab the active event loop
     loop = asyncio.get_running_loop()
-    
     from schedulers import initialize_background_schedulers
-    # Initialize background intelligence loops
     initialize_background_schedulers(loop)
     print("🚀 Portfolio Agent core running with autonomous background learning.")
     
@@ -221,7 +308,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# A dedicated, microscopic endpoint for cron-job.org
+# Microscopic health endpoint
 @app.get("/ping", response_class=PlainTextResponse)
 @app.head("/ping", response_class=PlainTextResponse)
 async def ping():
@@ -247,12 +334,10 @@ async def process_webhook_alert(ticker: str, signal: str, price: float):
     import traceback
     
     print(f"⚡ [Webhook Task] Background worker started for {ticker}...")
-    
     try:
         from discord_bot import bot, send_long_message
-        from agent import get_agent  # FIX: Import the async getter, not the empty variable
+        from agent import get_agent
         
-        # 1. Verify Channel Access
         channel_id_str = os.getenv("ALERT_CHANNEL_ID") or os.getenv("ADMIN_CHANNEL_ID")
         if not channel_id_str:
             print("❌ [Webhook Task] ERROR: ALERT_CHANNEL_ID or ADMIN_CHANNEL_ID is not set!")
@@ -266,18 +351,13 @@ async def process_webhook_alert(ticker: str, signal: str, price: float):
         print(f"✅ [Webhook Task] Channel found. Sending initial Discord alert...")
         await channel.send(f"🚨 **Real-Time Webhook Triggered:** `{ticker}` hit signal `{signal}` at price `Rs. {price}`. Initiating instant DCF valuation sweep...")
 
-        # 2. Force AI Execution
-        print(f"🧠 [Webhook Task] Waking up LangGraph agent for {ticker}...")
         prompt = f"Market Alert: {ticker} triggered a {signal} signal at Rs. {price}. Run a calculate_dcf_valuation for {ticker} and give me a strict tactical verdict comparing fair value to the current price."
         initial_state = {"messages": [("user", prompt)]}
         
-        # FIX: Ensure the graph is compiled and fetched before invoking
         agent_app = await get_agent()
-        
         config = {"configurable": {"thread_id": f"webhook_alert_{ticker}"}}
         ai_verdict = await agent_app.ainvoke(initial_state, config)
         
-        # 3. Route Output
         print(f"✅ [Webhook Task] Agent analysis complete. Pushing to Discord...")
         await send_long_message(channel, ai_verdict)
         print(f"🚀 [Webhook Task] Webhook pipeline fully complete for {ticker}.")
@@ -301,12 +381,7 @@ async def handle_market_alert(request: Request, background_tasks: BackgroundTask
     if not ticker:
         raise HTTPException(status_code=400, detail="Ticker symbol missing")
 
-
-    # Trigger agent background workflow using BackgroundTasks wrapped in our dispatcher
-    thread_id = str(uuid.uuid4())
-    
     background_tasks.add_task(process_webhook_alert, ticker, signal_type, price)
-
     return {"status": "success", "processed_ticker": ticker}
 
 class WhatsAppMessagePayload(BaseModel):
@@ -323,58 +398,16 @@ class WhatsAppMessagePayload(BaseModel):
 
 @app.post("/api/ingest-whatsapp-message")
 async def ingest_whatsapp_message(payload: WhatsAppMessagePayload):
-    import base64
-    from portfolio_manager import supabase
-    
-    chat_id = payload.chat_id or "KTrade"
-    sender = payload.sender or "KTrade"
-    body = payload.body or ""
-    source = payload.source or "KTrade"
-    timestamp = payload.timestamp or int(time.time())
-
-    # Optional archival to Supabase messages table
-    if supabase:
-        try:
-            supabase.table("messages").insert({
-                "chat_id": chat_id,
-                "sender": sender,
-                "body": body[:500] if body else f"[{payload.filename or 'Media Attachment'}]",
-                "timestamp": timestamp,
-                "is_group": payload.is_group
-            }).execute()
-        except Exception:
-            pass
-
-    # 1. Multimodal payload (image charts, PDF research, or voice notes)
-    if payload.has_media and payload.media_base64:
-        try:
-            file_bytes = base64.b64decode(payload.media_base64)
-            mimetype = payload.mime_type or "image/png"
-            filename = payload.filename or "media_attachment"
-            print(f"📥 [WhatsApp Webhook] Multimodal Ingestion: {filename} ({mimetype}, {len(file_bytes)} bytes) from {source}")
-            result = await process_whatsapp_media_payload(
-                file_bytes=file_bytes,
-                filename=filename,
-                mimetype=mimetype,
-                caption=body,
-                source=source,
-                timestamp=timestamp
-            )
-            return {"status": "success", "multimodal": True, "result": result}
-        except Exception as e:
-            print(f"❌ [WhatsApp Webhook] Multimodal processing failed: {e}")
-            return {"status": "error", "error": str(e)}
-
-    # 2. Plain text intelligence payload
-    elif body and len(body.strip()) > 0:
-        result = await process_whatsapp_text_payload(
-            text=body.strip(),
-            source=source,
-            timestamp=timestamp
-        )
-        return {"status": "success", "multimodal": False, "result": result}
-
-    return {"status": "ignored", "reason": "empty body and no media"}
+    """
+    Non-blocking endpoint: puts incoming payload into in-memory queue
+    and returns {"status": "queued"} in < 5ms.
+    """
+    try:
+        whatsapp_queue.put_nowait(payload)
+        return {"status": "queued"}
+    except asyncio.QueueFull:
+        print("⚠️ [WhatsApp Endpoint] Queue full. Dropping message to protect service.")
+        return {"status": "dropped", "reason": "queue_full"}
 
 @app.post("/api/ingest-whatsapp-media")
 async def ingest_whatsapp_media_endpoint(
@@ -424,10 +457,7 @@ async def trigger_agent():
     initial_state = {"tickers": ["SYS", "HBL", "LUCK"]}
     
     await app.state.graph.ainvoke(initial_state, config=config)
-    
-    # Trigger the bot to send the interactive ExecutionView card
     await discord_bot.send_alert(thread_id, "Buy signal detected for SYS at optimal execution price. KMI-30 Compliant.")
-    
     return {"thread_id": thread_id, "status": "started", "message": "Awaiting human approval"}
 
 if __name__ == "__main__":
@@ -436,17 +466,11 @@ if __name__ == "__main__":
     import os
     import sys
 
-    # Force SelectorEventLoop on Windows
     if sys.platform == "win32":
-        import sys
         if sys.version_info < (3, 14):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     port = int(os.getenv("PORT", 8000))
-    
-    # Build the Uvicorn config, but DO NOT use uvicorn.run()
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
-    
-    # We manually create the event loop and serve the app inside it
     asyncio.run(server.serve())

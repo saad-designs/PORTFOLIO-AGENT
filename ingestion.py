@@ -198,48 +198,14 @@ import uuid
 import asyncio
 from google import genai
 from google.genai import types
-
-async def generate_with_fallback(client: genai.Client, contents: list) -> str:
-    """
-    Executes Gemini generation with model cascade.
-    Retries on transient network disconnects or RPM limits,
-    failing fast on daily quota exhaustion or 404s to the next model in cascade.
-    """
-    models_to_try = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
-    last_error = None
-    
-    for model_name in models_to_try:
-        max_attempts = 2
-        for attempt in range(max_attempts):
-            try:
-                chat = client.chats.create(model=model_name)
-                response = await asyncio.to_thread(
-                    chat.send_message,
-                    contents
-                )
-                return response.text.strip()
-            except Exception as e:
-                last_error = e
-                print(f"⚠️ [Fallback] {model_name} (attempt {attempt+1}) failed with: {repr(e)}")
-                error_str = str(e).lower()
-
-                # If daily quota / free-tier per-day limit is exhausted, fail fast to next model immediately!
-                if any(x in error_str for x in ["perday", "daily", "freetier", "free_tier_requests", "limit: 20", "quotaid"]):
-                    print(f"⚠️ [Fallback] {model_name} daily quota exhausted. Switching immediately to next model...")
-                    break
-
-                # Real exponential backoff on transient rate-limit (RPM) or network errors
-                if any(x in error_str for x in ["429", "resource_exhausted", "quota", "503", "server disconnected", "connection error", "timeout", "connecterror", "getaddrinfo", "socket"]):
-                    backoff_secs = 3 * (attempt + 1)
-                    print(f"⏳ [Fallback] Backing off {backoff_secs}s before retry due to transient/network limit...")
-                    await asyncio.sleep(backoff_secs)
-                    continue
-                else:
-                    # 404 or structural error: break inner retry loop immediately and move to next model
-                    break
-                    
-    raise RuntimeError(f"❌ All Gemini models failed in generate_with_fallback. Last error: {repr(last_error)}")
-
+from model_router import (
+    generate_with_fallback,
+    get_candidate_models,
+    record_model_error,
+    is_financial_or_signal_text,
+    TASK_FAST_INGESTION,
+    TASK_DEEP_REASONING
+)
 
 def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") -> str:
     """
@@ -272,7 +238,7 @@ def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") 
                 raise TimeoutError("Audio file processing exceeded 240-second cap.")
             time.sleep(3)
 
-        models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        models_to_try = get_candidate_models(TASK_FAST_INGESTION)
         last_error = None
         for model in models_to_try:
             try:
@@ -288,6 +254,7 @@ def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") 
                     return response.text.strip()
             except Exception as e:
                 last_error = e
+                record_model_error(model, e)
                 print(f"⚠️ [Audio Transcribe] {model} failed: {e}")
                 continue
 
@@ -430,7 +397,7 @@ async def process_whatsapp_media_payload(
         print(f"🧠 [Multimodal] Passing {filename} ({mimetype}, {len(file_bytes)} bytes) directly via Part.from_bytes to Gemini...")
         media_part = types.Part.from_bytes(data=file_bytes, mime_type=mimetype)
         contents = [media_part, prompt_text]
-        analysis_text = await generate_with_fallback(client, contents)
+        analysis_text = await generate_with_fallback(client, contents, task=TASK_FAST_INGESTION)
     except Exception as inline_err:
         print(f"⚠️ [Multimodal] Inline Part.from_bytes threw ({inline_err}). Falling back to Files API upload...")
         temp_filename = f"temp_wa_{uuid.uuid4().hex[:8]}_{filename}"
@@ -443,7 +410,7 @@ async def process_whatsapp_media_payload(
                 config=types.UploadFileConfig(mime_type=mimetype)
             )
             try:
-                analysis_text = await generate_with_fallback(client, [uploaded_file, prompt_text])
+                analysis_text = await generate_with_fallback(client, [uploaded_file, prompt_text], task=TASK_FAST_INGESTION)
             finally:
                 try:
                     client.files.delete(name=uploaded_file.name)
@@ -569,6 +536,13 @@ async def process_whatsapp_text_payload(text: str, source: str = "KTrade", times
     raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
 
+    # Zero-Cost Pre-LLM Noise Filter (Filters chitchat < 30 chars with no tickers or financial keywords)
+    if not is_financial_or_signal_text(text, has_media=False):
+        print(f"ℹ️ [Noise Filter] Ignored short non-financial commentary (<30 chars, no tickers/keywords): '{text}'")
+        if timestamp:
+            update_whatsapp_checkpoint(timestamp)
+        return {"status": "ignored", "reason": "chitchat_noise_filter"}
+
     extraction_prompt = f"""
     You are an elite quantitative PSX financial analyst. Analyze this KTrade WhatsApp commentary:
     "{text}"
@@ -585,7 +559,7 @@ async def process_whatsapp_text_payload(text: str, source: str = "KTrade", times
     Do not return markdown, only the raw JSON.
     """
 
-    analysis_json_str = await generate_with_fallback(client, [extraction_prompt])
+    analysis_json_str = await generate_with_fallback(client, [extraction_prompt], task=TASK_FAST_INGESTION)
     clean_json_str = analysis_json_str.replace('```json', '').replace('```', '').strip()
     try:
         structured_data = json.loads(clean_json_str)
