@@ -98,8 +98,8 @@ def _tier1_native_gemini(video_id: str) -> str:
             types.Part(text="Watch and listen to the audio of this video (which may be in Urdu, Hindi, or English). Provide a comprehensive, detailed English transcript and breakdown of everything said, capturing every PSX stock ticker, price target, support/resistance level, and macroeconomic insight.")
         ]
     )
-    from model_router import get_candidate_models, record_model_error, TASK_FAST_INGESTION
-    models_to_try = get_candidate_models(TASK_FAST_INGESTION)
+    from model_router import get_candidate_models, record_model_error, TASK_MULTIMODAL
+    models_to_try = get_candidate_models(TASK_MULTIMODAL)
     last_err = None
     for model_name in models_to_try:
         try:

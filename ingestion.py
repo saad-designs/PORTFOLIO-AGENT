@@ -204,18 +204,28 @@ from model_router import (
     record_model_error,
     is_financial_or_signal_text,
     TASK_FAST_INGESTION,
-    TASK_DEEP_REASONING
+    TASK_DEEP_REASONING,
+    TASK_MULTIMODAL
 )
 
 def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") -> str:
     """
-    Transcribes downloaded YouTube audio using Gemini via Files API.
-    Polls the processing state until ACTIVE (loop time.sleep(3)) and guarantees remote file deletion.
+    Transcribes downloaded YouTube audio using Groq whisper-large-v3-turbo first.
+    Falls back to Gemini File API if Groq fails or is unconfigured.
     """
     import time
     if not os.path.exists(audio_file_path):
         print(f"❌ [Audio Transcribe] Audio file not found: {audio_file_path}")
         return ""
+
+    # 1. Primary: Dedicated Groq Whisper Large V3 Turbo (Fast, free, 0 Gemini quota)
+    from model_router import transcribe_audio_groq
+    groq_text = transcribe_audio_groq(audio_file_path, filename=os.path.basename(audio_file_path), mime_type=mime_type)
+    if groq_text and len(groq_text.strip()) > 0:
+        print(f"✅ [Audio Transcribe] Successfully transcribed audio via Groq Whisper ({len(groq_text)} chars).")
+        return groq_text.strip()
+
+    print("ℹ️ [Audio Transcribe] Groq Whisper unavailable. Falling back to Gemini Files API...")
 
     raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
@@ -238,7 +248,7 @@ def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") 
                 raise TimeoutError("Audio file processing exceeded 240-second cap.")
             time.sleep(3)
 
-        models_to_try = get_candidate_models(TASK_FAST_INGESTION)
+        models_to_try = get_candidate_models(TASK_MULTIMODAL)
         last_error = None
         for model in models_to_try:
             try:
@@ -392,36 +402,58 @@ async def process_whatsapp_media_payload(
     prompt_text = prompt_template.format(caption=caption or "N/A", source=source or "KTrade WhatsApp")
 
     analysis_text = ""
-    # 1. Primary Extraction: Direct inline Part.from_bytes
-    try:
-        print(f"🧠 [Multimodal] Passing {filename} ({mimetype}, {len(file_bytes)} bytes) directly via Part.from_bytes to Gemini...")
-        media_part = types.Part.from_bytes(data=file_bytes, mime_type=mimetype)
-        contents = [media_part, prompt_text]
-        analysis_text = await generate_with_fallback(client, contents, task=TASK_FAST_INGESTION)
-    except Exception as inline_err:
-        print(f"⚠️ [Multimodal] Inline Part.from_bytes threw ({inline_err}). Falling back to Files API upload...")
-        temp_filename = f"temp_wa_{uuid.uuid4().hex[:8]}_{filename}"
+
+    # Primary Audio Route: Transcribe voice note via Groq Whisper Turbo (0 Gemini quota)
+    if media_category == "Voice Note / Audio":
         try:
-            with open(temp_filename, "wb") as f:
-                f.write(file_bytes)
-            uploaded_file = await asyncio.to_thread(
-                client.files.upload,
-                file=temp_filename,
-                config=types.UploadFileConfig(mime_type=mimetype)
-            )
+            from model_router import transcribe_audio_groq
+            print(f"🎙️ [WhatsApp Audio] Transcribing voice note ({filename}, {len(file_bytes)} bytes) via Groq Whisper...")
+            groq_voice_text = transcribe_audio_groq(file_bytes, filename=filename, mime_type=mimetype)
+            if groq_voice_text and len(groq_voice_text.strip()) > 5:
+                print(f"✅ [WhatsApp Audio] Voice note transcribed via Groq ({len(groq_voice_text)} chars). Analyzing commentary...")
+                voice_prompt = (
+                    f"You are an elite quantitative PSX financial analyst. Analyze this KTrade voice note transcript:\n\n"
+                    f"\"{groq_voice_text.strip()}\"\n\n"
+                    f"User Caption: {caption or 'N/A'}\n"
+                    f"Source: {source}\n\n"
+                    f"Provide a comprehensive, detailed breakdown of all PSX stock tickers, price targets, buy/sell recommendations, and macro commentary."
+                )
+                analysis_text = await generate_with_fallback(client, [voice_prompt], task=TASK_FAST_INGESTION)
+        except Exception as groq_audio_err:
+            print(f"⚠️ [WhatsApp Audio] Groq voice note transcription threw: {groq_audio_err}. Falling back to Gemini...")
+
+    # If not audio or Groq audio transcription failed, use Gemini multimodal
+    if not analysis_text:
+        # 1. Primary Extraction: Direct inline Part.from_bytes
+        try:
+            print(f"🧠 [Multimodal] Passing {filename} ({mimetype}, {len(file_bytes)} bytes) directly via Part.from_bytes to Gemini...")
+            media_part = types.Part.from_bytes(data=file_bytes, mime_type=mimetype)
+            contents = [media_part, prompt_text]
+            analysis_text = await generate_with_fallback(client, contents, task=TASK_MULTIMODAL)
+        except Exception as inline_err:
+            print(f"⚠️ [Multimodal] Inline Part.from_bytes threw ({inline_err}). Falling back to Files API upload...")
+            temp_filename = f"temp_wa_{uuid.uuid4().hex[:8]}_{filename}"
             try:
-                analysis_text = await generate_with_fallback(client, [uploaded_file, prompt_text], task=TASK_FAST_INGESTION)
+                with open(temp_filename, "wb") as f:
+                    f.write(file_bytes)
+                uploaded_file = await asyncio.to_thread(
+                    client.files.upload,
+                    file=temp_filename,
+                    config=types.UploadFileConfig(mime_type=mimetype)
+                )
+                try:
+                    analysis_text = await generate_with_fallback(client, [uploaded_file, prompt_text], task=TASK_MULTIMODAL)
+                finally:
+                    try:
+                        client.files.delete(name=uploaded_file.name)
+                    except Exception:
+                        pass
             finally:
-                try:
-                    client.files.delete(name=uploaded_file.name)
-                except Exception:
-                    pass
-        finally:
-            if os.path.exists(temp_filename):
-                try:
-                    os.remove(temp_filename)
-                except Exception:
-                    pass
+                if os.path.exists(temp_filename):
+                    try:
+                        os.remove(temp_filename)
+                    except Exception:
+                        pass
 
     if not analysis_text:
         return {"status": "failed", "error": "Multimodal analysis returned empty text."}

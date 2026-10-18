@@ -12,79 +12,105 @@ load_dotenv()
 conn = get_db_connection()
 cur = conn.cursor()
 
-print("🔍 Inspecting junk rows in Supabase database...")
+print("🔍 Inspecting junk & synthetic rows in database...")
 
-# 1. messages via Supabase client if table exists
-try:
-    if supabase:
-        print("Checking messages table via Supabase client...")
-        for junk_id in ['120363428147373878@g.us', '923246764769@c.us', '120363041996231812@g.us']:
-            res = supabase.table("messages").delete().eq("chat_id", junk_id).execute()
-            print(f"Purged {junk_id} from Supabase messages: {len(res.data) if res and res.data else 0}")
-except Exception as e:
-    print(f"Supabase messages table check: {e}")
+# 1. messages
+cur.execute("""
+    SELECT count(*)
+    FROM messages
+    WHERE body ILIKE '%520%'
+       OR body ILIKE '%SYS buy target 520 stop 480%'
+       OR chat_id IN ('120363428147373878@g.us', '923246764769@c.us', '120363041996231812@g.us')
+       OR chat_id LIKE '%@lid'
+       OR chat_id LIKE '%@newsletter'
+       OR chat_id LIKE '%@c.us';
+""")
+cnt_msgs = cur.fetchone()[0]
+print(f"Messages to delete: {cnt_msgs}")
 
 # 2. institutional_reports
 cur.execute("""
-    SELECT count(*), array_agg(DISTINCT source)
+    SELECT count(*)
     FROM institutional_reports
-    WHERE source ILIKE '%120363428147373878%'
+    WHERE subject ILIKE '%520%'
+       OR summary ILIKE '%520%'
+       OR source ILIKE '%120363428147373878%'
        OR source ILIKE '%923246764769%'
        OR source ILIKE '%120363041996231812%'
        OR source ILIKE '%@lid%'
        OR source ILIKE '%@newsletter%'
        OR source ILIKE '%@c.us%';
 """)
-res_inst = cur.fetchone()
-print(f"Institutional reports matching junk: {res_inst[0]} (sources: {res_inst[1]})")
+cnt_inst = cur.fetchone()[0]
+print(f"Institutional reports to delete: {cnt_inst}")
 
 # 3. active_playbook
 cur.execute("""
-    SELECT count(*), array_agg(DISTINCT source)
+    SELECT count(*)
     FROM active_playbook
-    WHERE source ILIKE '%120363428147373878%'
+    WHERE rule ILIKE '%520%'
+       OR source ILIKE '%TestDesk%'
+       OR source ILIKE '%120363428147373878%'
        OR source ILIKE '%923246764769%'
        OR source ILIKE '%120363041996231812%'
        OR source ILIKE '%@lid%'
        OR source ILIKE '%@newsletter%'
        OR source ILIKE '%@c.us%';
 """)
-res_play = cur.fetchone()
-print(f"Active playbook rules matching junk: {res_play[0]} (sources: {res_play[1]})")
+cnt_play = cur.fetchone()[0]
+print(f"Active playbook rules to delete: {cnt_play}")
 
 # 4. langchain_pg_embedding
 cur.execute("""
     SELECT count(*)
     FROM langchain_pg_embedding
-    WHERE document ILIKE '%120363428147373878%'
+    WHERE document ILIKE '%520%'
+       OR document ILIKE '%TestDesk%'
+       OR document ILIKE '%SYS buy target 520 stop 480%'
+       OR document ILIKE '%120363428147373878%'
        OR document ILIKE '%923246764769%'
        OR document ILIKE '%120363041996231812%'
        OR document ILIKE '%@lid%'
        OR document ILIKE '%@newsletter%'
        OR document ILIKE '%@c.us%';
 """)
-res_emb = cur.fetchone()
-print(f"Embeddings matching junk: {res_emb[0]}")
+cnt_emb = cur.fetchone()[0]
+print(f"Embeddings to delete: {cnt_emb}")
 
 # 5. pending_signals
 cur.execute("""
     SELECT count(*)
     FROM pending_signals
-    WHERE signal_payload::text ILIKE '%120363428147373878%'
+    WHERE signal_payload::text ILIKE '%520%'
+       OR signal_payload::text ILIKE '%SYS buy target 520 stop 480%'
+       OR signal_payload::text ILIKE '%120363428147373878%'
        OR signal_payload::text ILIKE '%923246764769%'
        OR signal_payload::text ILIKE '%120363041996231812%'
        OR signal_payload::text ILIKE '%@lid%'
        OR signal_payload::text ILIKE '%@newsletter%'
        OR signal_payload::text ILIKE '%@c.us%';
 """)
-res_sig = cur.fetchone()
-print(f"Pending signals matching junk: {res_sig[0]}")
+cnt_sig = cur.fetchone()[0]
+print(f"Pending signals to delete: {cnt_sig}")
 
 print("\n🗑️ Executing PURGE...")
 
 cur.execute("""
+    DELETE FROM messages
+    WHERE body ILIKE '%520%'
+       OR body ILIKE '%SYS buy target 520 stop 480%'
+       OR chat_id IN ('120363428147373878@g.us', '923246764769@c.us', '120363041996231812@g.us')
+       OR chat_id LIKE '%@lid'
+       OR chat_id LIKE '%@newsletter'
+       OR chat_id LIKE '%@c.us';
+""")
+del_msgs = cur.rowcount
+
+cur.execute("""
     DELETE FROM institutional_reports
-    WHERE source ILIKE '%120363428147373878%'
+    WHERE subject ILIKE '%520%'
+       OR summary ILIKE '%520%'
+       OR source ILIKE '%120363428147373878%'
        OR source ILIKE '%923246764769%'
        OR source ILIKE '%120363041996231812%'
        OR source ILIKE '%@lid%'
@@ -95,7 +121,9 @@ del_inst = cur.rowcount
 
 cur.execute("""
     DELETE FROM active_playbook
-    WHERE source ILIKE '%120363428147373878%'
+    WHERE rule ILIKE '%520%'
+       OR source ILIKE '%TestDesk%'
+       OR source ILIKE '%120363428147373878%'
        OR source ILIKE '%923246764769%'
        OR source ILIKE '%120363041996231812%'
        OR source ILIKE '%@lid%'
@@ -106,7 +134,10 @@ del_play = cur.rowcount
 
 cur.execute("""
     DELETE FROM langchain_pg_embedding
-    WHERE document ILIKE '%120363428147373878%'
+    WHERE document ILIKE '%520%'
+       OR document ILIKE '%TestDesk%'
+       OR document ILIKE '%SYS buy target 520 stop 480%'
+       OR document ILIKE '%120363428147373878%'
        OR document ILIKE '%923246764769%'
        OR document ILIKE '%120363041996231812%'
        OR document ILIKE '%@lid%'
@@ -117,7 +148,9 @@ del_emb = cur.rowcount
 
 cur.execute("""
     DELETE FROM pending_signals
-    WHERE signal_payload::text ILIKE '%120363428147373878%'
+    WHERE signal_payload::text ILIKE '%520%'
+       OR signal_payload::text ILIKE '%SYS buy target 520 stop 480%'
+       OR signal_payload::text ILIKE '%120363428147373878%'
        OR signal_payload::text ILIKE '%923246764769%'
        OR signal_payload::text ILIKE '%120363041996231812%'
        OR signal_payload::text ILIKE '%@lid%'
@@ -130,4 +163,4 @@ conn.commit()
 cur.close()
 conn.close()
 
-print(f"\n✅ PURGE COMPLETE:\n- Institutional Reports: {del_inst}\n- Active Playbook: {del_play}\n- Embeddings: {del_emb}\n- Pending Signals: {del_sig}")
+print(f"\n✅ PURGE COMPLETE:\n- Messages: {del_msgs}\n- Institutional Reports: {del_inst}\n- Active Playbook: {del_play}\n- Embeddings: {del_emb}\n- Pending Signals: {del_sig}")

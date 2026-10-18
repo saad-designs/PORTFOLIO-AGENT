@@ -1,7 +1,6 @@
 import os
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
-from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 
 load_dotenv()

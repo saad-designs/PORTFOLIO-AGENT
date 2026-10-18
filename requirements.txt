@@ -16,6 +16,7 @@ youtube-transcript-api>=0.6.2
 duckduckgo-search>=6.2.12
 langchain-community>=0.2.16
 langchain-groq>=0.1.9
+groq>=0.37.0
 matplotlib>=3.9.2
 pandas>=2.2.0
 mplfinance==0.12.10b0
