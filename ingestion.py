@@ -225,9 +225,11 @@ def transcribe_mentor_audio(audio_file_path: str, mime_type: str = "audio/mp4") 
         print(f"✅ [Audio Transcribe] Successfully transcribed audio via Groq Whisper ({len(groq_text)} chars).")
         return groq_text.strip()
 
-    print("ℹ️ [Audio Transcribe] Groq Whisper unavailable. Falling back to Gemini Files API...")
+    if os.getenv("GROQ_API_KEY"):
+        print("ℹ️ [Audio Transcribe] Groq Whisper unavailable. Falling back to Gemini Files API...")
 
-    raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    from model_router import get_active_google_api_key
+    raw_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
     client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
     uploaded_file = None
     try:
@@ -379,8 +381,9 @@ async def process_whatsapp_media_payload(
     import uuid
     from google import genai
     from google.genai import types
+    from model_router import get_active_google_api_key
 
-    raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    raw_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
     client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
 
     mime = (mimetype or "").lower()
@@ -564,8 +567,9 @@ async def process_whatsapp_text_payload(text: str, source: str = "KTrade", times
     import json
     from google import genai
     from portfolio_manager import update_whatsapp_checkpoint
+    from model_router import get_active_google_api_key
 
-    raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    raw_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
     client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
 
     # Zero-Cost Pre-LLM Noise Filter (Filters chitchat < 30 chars with no tickers or financial keywords)

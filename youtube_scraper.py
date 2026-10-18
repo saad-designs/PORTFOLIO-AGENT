@@ -98,12 +98,14 @@ def _tier1_native_gemini(video_id: str) -> str:
             types.Part(text="Watch and listen to the audio of this video (which may be in Urdu, Hindi, or English). Provide a comprehensive, detailed English transcript and breakdown of everything said, capturing every PSX stock ticker, price target, support/resistance level, and macroeconomic insight.")
         ]
     )
-    from model_router import get_candidate_models, record_model_error, TASK_MULTIMODAL
+    from model_router import get_candidate_models, record_model_error, TASK_MULTIMODAL, get_active_google_api_key
     models_to_try = get_candidate_models(TASK_MULTIMODAL)
+    active_key = get_active_google_api_key()
+    active_client = genai.Client(api_key=active_key, http_options={"timeout": 300000}) if active_key else client
     last_err = None
     for model_name in models_to_try:
         try:
-            response = client.models.generate_content(
+            response = active_client.models.generate_content(
                 model=model_name,
                 contents=content
             )

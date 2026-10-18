@@ -101,12 +101,41 @@ whatsapp_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
 async def whatsapp_queue_worker():
     """
     Sequential background consumer for WhatsApp incoming payloads.
-    Guarantees fast HTTP returns (<5ms) to Express and applies pre-LLM noise filtering.
+    Guarantees fast HTTP returns (<5ms) to Express, applies pre-LLM noise filtering,
+    and micro-batches consecutive KTrade text messages within a 15-second window (up to 8 messages)
+    into a single consolidated LLM call.
     """
     print("🚀 [WhatsApp Queue Worker] Ingestion queue consumer online.")
+    buffered_payloads = []
+
+    def _archive_payload(p):
+        from portfolio_manager import supabase
+        if supabase:
+            try:
+                c_id = p.chat_id or "KTrade"
+                sdr = p.sender or "KTrade"
+                bdy = p.body or ""
+                ts = p.timestamp or int(time.time())
+                supabase.table("messages").insert({
+                    "chat_id": c_id,
+                    "sender": sdr,
+                    "body": bdy[:500] if bdy else f"[{p.filename or 'Media Attachment'}]",
+                    "timestamp": ts,
+                    "is_group": p.is_group
+                }).execute()
+            except Exception:
+                pass
+
     while True:
+        is_pulled_from_queue = False
         try:
-            payload = await whatsapp_queue.get()
+            if buffered_payloads:
+                payload = buffered_payloads.pop(0)
+                is_pulled_from_queue = True
+            else:
+                payload = await whatsapp_queue.get()
+                is_pulled_from_queue = True
+
             try:
                 chat_id = payload.chat_id or "KTrade"
                 sender = payload.sender or "KTrade"
@@ -115,18 +144,7 @@ async def whatsapp_queue_worker():
                 timestamp = payload.timestamp or int(time.time())
 
                 # Supabase message archival
-                from portfolio_manager import supabase
-                if supabase:
-                    try:
-                        supabase.table("messages").insert({
-                            "chat_id": chat_id,
-                            "sender": sender,
-                            "body": body[:500] if body else f"[{payload.filename or 'Media Attachment'}]",
-                            "timestamp": timestamp,
-                            "is_group": payload.is_group
-                        }).execute()
-                    except Exception:
-                        pass
+                _archive_payload(payload)
 
                 # 1. Multimodal media payload
                 if payload.has_media and payload.media_base64:
@@ -146,26 +164,70 @@ async def whatsapp_queue_worker():
                     except Exception as media_err:
                         print(f"❌ [WhatsApp Worker] Multimodal processing failed: {media_err}")
 
-                # 2. Text intelligence payload with pre-LLM noise filter
+                # 2. Text intelligence payload with 15-second micro-batching
                 elif body and len(body.strip()) > 0:
-                    clean_text = body.strip()
+                    batched_bodies = [body.strip()]
+                    batched_timestamps = [timestamp]
+
+                    # Micro-batching window: wait and drain up to 8 text messages from the same chat_id within 15s
+                    max_batch = 8
+                    window_deadline = time.time() + 15.0
+
+                    while len(batched_bodies) < max_batch:
+                        remaining_window = window_deadline - time.time()
+                        if remaining_window <= 0:
+                            break
+                        try:
+                            # Wait up to 3s of typing silence or until window deadline
+                            next_payload = await asyncio.wait_for(
+                                whatsapp_queue.get(),
+                                timeout=min(remaining_window, 3.0)
+                            )
+                        except asyncio.TimeoutError:
+                            # Typing silence reached
+                            break
+
+                        _archive_payload(next_payload)
+
+                        # Check if next_payload can be batched (same chat_id, text-only, non-empty body)
+                        if (
+                            not next_payload.has_media
+                            and (next_payload.chat_id or "KTrade") == chat_id
+                            and (next_payload.body or "").strip()
+                        ):
+                            batched_bodies.append(next_payload.body.strip())
+                            if next_payload.timestamp:
+                                batched_timestamps.append(next_payload.timestamp)
+                            whatsapp_queue.task_done()
+                        else:
+                            # Different chat or has media! Buffer it for next worker iteration
+                            buffered_payloads.append(next_payload)
+                            break
+
+                    consolidated_text = "\n---\n".join(batched_bodies)
+                    consolidated_ts = max(batched_timestamps)
+
+                    if len(batched_bodies) > 1:
+                        print(f"📦 [Micro-Batching] Consolidated {len(batched_bodies)} consecutive KTrade text messages into 1 payload ({len(consolidated_text)} chars).")
+
                     # Zero-Cost Pre-LLM Noise Filter (Filters chitchat < 30 chars with no tickers or financial keywords)
-                    if not is_financial_or_signal_text(clean_text, has_media=False):
-                        print(f"ℹ️ [Noise Filter] 0ms bypass on short non-financial commentary (< 30 chars, no tickers/keywords): '{clean_text}'")
-                        if timestamp:
-                            update_whatsapp_checkpoint(timestamp)
+                    if not is_financial_or_signal_text(consolidated_text, has_media=False):
+                        print(f"ℹ️ [Noise Filter] 0ms bypass on short non-financial commentary (< 30 chars, no tickers/keywords): '{consolidated_text}'")
+                        if consolidated_ts:
+                            update_whatsapp_checkpoint(consolidated_ts)
                     else:
-                        print(f"📥 [WhatsApp Worker] Processing text intel ({len(clean_text)} chars) from {source}...")
+                        print(f"📥 [WhatsApp Worker] Processing text intel ({len(consolidated_text)} chars) from {source}...")
                         await process_whatsapp_text_payload(
-                            text=clean_text,
+                            text=consolidated_text,
                             source=source,
-                            timestamp=timestamp
+                            timestamp=consolidated_ts
                         )
 
             except Exception as item_err:
                 print(f"❌ [WhatsApp Worker] Error handling message item: {item_err}")
             finally:
-                whatsapp_queue.task_done()
+                if is_pulled_from_queue:
+                    whatsapp_queue.task_done()
         except asyncio.CancelledError:
             break
         except Exception as q_err:

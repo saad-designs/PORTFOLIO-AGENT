@@ -14,11 +14,32 @@ class TradeExecution(BaseModel):
     shares: Optional[float] = Field(default=None, description="Exact number of shares executed. None if not a trade.")
     price: Optional[float] = Field(default=None, description="Execution price per share. None if not a trade.")
 
+FIRST_PERSON_EXECUTION_KEYWORDS = (
+    "bought",
+    "sold",
+    "executed",
+    "filled",
+    "my average",
+    "took entry",
+    "booked profit",
+)
+
+def has_trade_execution_intent(text: str) -> bool:
+    """Fast pre-check to verify if text contains explicit first-person trade execution markers."""
+    if not text or not isinstance(text, str):
+        return False
+    lower = text.lower()
+    return any(keyword in lower for keyword in FIRST_PERSON_EXECUTION_KEYWORDS)
+
 def extract_trade_intent(message_content: str) -> TradeExecution | None:
     """
     Parses a natural language message and extracts trade parameters safely into a Pydantic object.
-    Returns None if the message is not a trade intent.
+    Returns None if the message is not an explicit personal trade execution.
+    Fast-rejects general broker calls, signals, and conversational chat in 0ms without invoking an LLM.
     """
+    if not has_trade_execution_intent(message_content):
+        return None
+
     try:
         from model_router import get_langchain_llm, TASK_FAST_INGESTION
         llm = get_langchain_llm(TASK_FAST_INGESTION)

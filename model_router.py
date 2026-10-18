@@ -6,15 +6,73 @@ import json
 import asyncio
 from typing import List, Dict, Any, Optional, Union
 
-# --- API KEY ENVIRONMENT SANITIZATION ---
-# Prevent Google GenAI and LangChain from spamming:
-# "Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY."
+# --- API KEY ENVIRONMENT SANITIZATION & MULTI-KEY ROTATION ---
+# Prevent Google GenAI and LangChain from spamming duplicate key warning
 if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
 os.environ.pop("GEMINI_API_KEY", None)
 
+CURRENT_GOOGLE_KEY_INDEX: int = 0
+GOOGLE_KEY_COOLDOWN_UNTIL: Dict[str, float] = {}
+
+def get_google_api_keys() -> List[str]:
+    """Returns list of configured Google API keys in priority order (GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3)."""
+    keys = []
+    primary = os.getenv("GOOGLE_API_KEY")
+    if primary and primary.strip():
+        keys.append(primary.strip())
+    for env_var in ["GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_BACKUP"]:
+        val = os.getenv(env_var)
+        if val and val.strip() and val.strip() not in keys:
+            keys.append(val.strip())
+    return keys
+
+def get_active_google_api_key() -> Optional[str]:
+    """Returns the currently active Google API key, rotating if in cooldown."""
+    global CURRENT_GOOGLE_KEY_INDEX
+    keys = get_google_api_keys()
+    if not keys:
+        return None
+    now = time.time()
+    current_key = keys[CURRENT_GOOGLE_KEY_INDEX % len(keys)]
+    if GOOGLE_KEY_COOLDOWN_UNTIL.get(current_key, 0.0) <= now:
+        return current_key
+
+    # Search for an available non-cooling key
+    for idx, k in enumerate(keys):
+        if GOOGLE_KEY_COOLDOWN_UNTIL.get(k, 0.0) <= now:
+            CURRENT_GOOGLE_KEY_INDEX = idx
+            print(f"🔄 [Key Rotation] Active key in cooldown. Rotated to Google API Key #{idx + 1}")
+            return k
+
+    # If all keys are in cooldown, return the one that recovers soonest
+    soonest_key = min(keys, key=lambda k: GOOGLE_KEY_COOLDOWN_UNTIL.get(k, 0.0))
+    return soonest_key
+
+def rotate_to_next_google_key(reason: str = "Quota Exhausted") -> Optional[str]:
+    """Forces rotation to the next available backup Google API key and resets model cooldowns for the new key."""
+    global CURRENT_GOOGLE_KEY_INDEX
+    keys = get_google_api_keys()
+    if len(keys) <= 1:
+        return None
+
+    now = time.time()
+    old_key = keys[CURRENT_GOOGLE_KEY_INDEX % len(keys)]
+    GOOGLE_KEY_COOLDOWN_UNTIL[old_key] = now + 3600.0  # 1 hour cooldown for exhausted key
+
+    old_idx = CURRENT_GOOGLE_KEY_INDEX
+    CURRENT_GOOGLE_KEY_INDEX = (CURRENT_GOOGLE_KEY_INDEX + 1) % len(keys)
+    new_key = keys[CURRENT_GOOGLE_KEY_INDEX]
+
+    # Reset Gemini model cooldowns for the fresh key
+    for model_list in GEMINI_TASK_ROUTING.values():
+        for m in model_list:
+            MODEL_COOLDOWN_UNTIL.pop(m, None)
+
+    print(f"🔄 [Key Rotation] Google Key #{old_idx + 1} marked on cooldown ({reason}). Rotated to Key #{CURRENT_GOOGLE_KEY_INDEX + 1} (quota refreshed).")
+    return new_key
+
 # --- GROQ CLIENT INITIALIZATION ---
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = None
 
 def get_groq_client():
@@ -22,13 +80,13 @@ def get_groq_client():
     if groq_client is not None:
         return groq_client
     key = os.getenv("GROQ_API_KEY")
-    if key and key.strip():
+    if key and key.strip() and is_model_available("groq"):
         try:
             from groq import Groq
             groq_client = Groq(api_key=key.strip())
             return groq_client
-        except Exception as e:
-            print(f"⚠️ [Model Router] Groq client initialization failed: {e}")
+        except Exception:
+            return None
     return None
 
 # --- ACTIVE PSX TICKERS & PRE-LLM NOISE FILTER ---
@@ -303,101 +361,117 @@ def extract_prompt_string(contents: Any) -> str:
 async def generate_with_fallback(client, contents: list, task: str = TASK_FAST_INGESTION) -> str:
     """
     Multi-provider generation with circuit breaker and quota preservation:
-    1. For text-only TASK_FAST_INGESTION: Routes first to Groq (llama-3.3-70b-versatile -> llama-3.1-8b-instant).
+    1. If GROQ_API_KEY is configured: For text-only TASK_FAST_INGESTION, routes first to Groq
+       (llama-3.3-70b-versatile -> llama-3.1-8b-instant -> open-weights).
     2. Falls back to Gemini cascade (gemini-3.5-flash-lite -> gemini-3.5-flash).
     3. Multimodal contents (images, PDFs, video URLs) and TASK_DEEP_REASONING route strictly
        to Gemini (gemini-3.8-flash -> gemini-3.5-flash -> gemini-3.5-flash-lite).
+    4. Automatically rotates across GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3
+       if 429 RESOURCE_EXHAUSTED occurs.
     """
     is_text = is_pure_text_contents(contents)
 
-    # 1. Text-only FAST_INGESTION offloaded to Groq to protect Google 20 RPD free tier quota
-    if task == TASK_FAST_INGESTION and is_text:
+    # 1. Text-only FAST_INGESTION offloaded to Groq if configured
+    groq_key = os.getenv("GROQ_API_KEY")
+    if task == TASK_FAST_INGESTION and is_text and groq_key and groq_key.strip():
         prompt_str = extract_prompt_string(contents)
         groq_result = await asyncio.to_thread(generate_text_groq, prompt_str)
         if groq_result:
             return groq_result
-        print("ℹ️ [Model Router] Groq text models unavailable or exhausted. Falling back to Gemini cascade...")
+        if is_model_available("groq"):
+            print("ℹ️ [Model Router] Groq text models unavailable or exhausted. Cascading to Gemini...")
 
-    # 2. Gemini Cascade
+    # 2. Gemini Cascade with Multi-Key Rotation
     effective_task = task
     if not is_text and task == TASK_FAST_INGESTION:
         effective_task = TASK_MULTIMODAL
 
-    candidates = get_candidate_models(effective_task)
+    google_keys = get_google_api_keys()
+    max_key_attempts = max(1, len(google_keys))
     last_error = None
-    now = time.time()
 
-    for model_name in candidates:
-        if not is_model_available(model_name):
-            remaining = int(MODEL_COOLDOWN_UNTIL.get(model_name, 0.0) - now)
-            print(f"⚡ [Circuit Breaker] Skipping '{model_name}' (cooling down for {remaining}s more).")
-            continue
+    for key_idx in range(max_key_attempts):
+        active_key = get_active_google_api_key()
+        active_client = client
+        if active_client is None or getattr(active_client, "_active_google_key", None) != active_key:
+            from google import genai
+            active_client = genai.Client(api_key=active_key, http_options={"timeout": 300000})
+            active_client._active_google_key = active_key
 
-        max_attempts = 2
-        for attempt in range(max_attempts):
-            try:
-                chat = client.chats.create(model=model_name)
-                response = await asyncio.to_thread(chat.send_message, contents)
-                return response.text.strip()
-            except Exception as e:
-                last_error = e
-                record_model_error(model_name, e)
+        candidates = get_candidate_models(effective_task)
+        now = time.time()
 
-                # If error put model into cooldown, stop retrying this model immediately
-                if not is_model_available(model_name):
-                    print(f"⚠️ [Model Router] '{model_name}' entered cooldown after error. Moving to next candidate...")
-                    break
+        for model_name in candidates:
+            if not is_model_available(model_name):
+                remaining = int(MODEL_COOLDOWN_UNTIL.get(model_name, 0.0) - now)
+                print(f"⚡ [Circuit Breaker] Skipping '{model_name}' (cooling down for {remaining}s more).")
+                continue
 
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(2 * (attempt + 1))
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                try:
+                    chat = active_client.chats.create(model=model_name)
+                    response = await asyncio.to_thread(chat.send_message, contents)
+                    return response.text.strip()
+                except Exception as e:
+                    last_error = e
+                    record_model_error(model_name, e)
 
-    raise RuntimeError(f"❌ All models (Groq & Gemini) failed in generate_with_fallback for {task}. Last error: {repr(last_error)}")
+                    # If error put model into cooldown, stop retrying this model immediately
+                    if not is_model_available(model_name):
+                        print(f"⚠️ [Model Router] '{model_name}' entered cooldown after error. Moving to next candidate...")
+                        break
+
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(2 * (attempt + 1))
+
+        # Check if 429 / daily quota limits caused all candidates on this key to fail
+        err_lower = str(last_error).lower() if last_error else ""
+        if ("429" in err_lower or "resource_exhausted" in err_lower or "quota" in err_lower) and len(google_keys) > 1:
+            next_k = rotate_to_next_google_key(reason="All candidate models on active key hit 429 quota exhaustion")
+            if next_k and key_idx < max_key_attempts - 1:
+                client = None
+                continue
+
+    raise RuntimeError(f"❌ All models (Groq & Gemini across {len(google_keys)} keys) failed in generate_with_fallback for {task}. Last error: {repr(last_error)}")
 
 # --- LANGCHAIN LLM ROUTER ---
 def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
     """
     Builds a LangChain chat model with multi-provider fallbacks:
-    - TASK_FAST_INGESTION: ChatGroq (gpt-oss-120b / llama-3.3) -> ChatGoogleGenerativeAI (gemini-3.5-flash-lite).
+    - TASK_FAST_INGESTION: ChatGroq (llama-3.3 / gpt-oss) -> ChatGoogleGenerativeAI (gemini-3.5-flash-lite).
     - TASK_DEEP_REASONING: ChatGoogleGenerativeAI (gemini-3.8-flash -> gemini-3.5-flash -> gemini-3.5-flash-lite).
+    Supports multi-key Gemini rotation across GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3.
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
-    google_key = os.getenv("GOOGLE_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
 
-    if task == TASK_FAST_INGESTION and groq_key:
+    groq_llms = []
+    if task == TASK_FAST_INGESTION and groq_key and groq_key.strip():
         try:
             from langchain_groq import ChatGroq
-            groq_llms = []
             for g_model in GROQ_TEXT_MODELS:
                 if is_model_available(g_model):
                     groq_llms.append(ChatGroq(model=g_model, groq_api_key=groq_key.strip(), **kwargs))
-
-            gemini_candidates = get_candidate_models(TASK_FAST_INGESTION)
-            gemini_llms = [
-                ChatGoogleGenerativeAI(model=m, google_api_key=google_key, **kwargs)
-                for m in gemini_candidates
-            ]
-
-            all_llms = groq_llms + gemini_llms
-            if all_llms:
-                if len(all_llms) == 1:
-                    return all_llms[0]
-                return all_llms[0].with_fallbacks(all_llms[1:])
         except Exception as e:
-            print(f"⚠️ [Model Router] Failed building Groq LangChain LLM: {e}")
+            pass
 
-    # Fallback / Deep reasoning on Gemini
+    # Build Gemini LLMs with multi-key fallbacks
+    google_keys = get_google_api_keys()
+    gemini_llms = []
     candidates = get_candidate_models(task)
-    gemini_llms = [
-        ChatGoogleGenerativeAI(model=m, google_api_key=google_key, **kwargs)
-        for m in candidates
-    ]
 
-    if not gemini_llms:
+    for g_key in google_keys:
+        for m in candidates:
+            gemini_llms.append(ChatGoogleGenerativeAI(model=m, google_api_key=g_key, **kwargs))
+
+    all_llms = groq_llms + gemini_llms
+    if not all_llms:
         fallback_model = GEMINI_TASK_ROUTING[task][0]
-        return ChatGoogleGenerativeAI(model=fallback_model, google_api_key=google_key, **kwargs)
+        fallback_key = get_active_google_api_key()
+        return ChatGoogleGenerativeAI(model=fallback_model, google_api_key=fallback_key, **kwargs)
 
-    if len(gemini_llms) == 1:
-        return gemini_llms[0]
+    if len(all_llms) == 1:
+        return all_llms[0]
 
-    return gemini_llms[0].with_fallbacks(gemini_llms[1:])
+    return all_llms[0].with_fallbacks(all_llms[1:])
