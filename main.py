@@ -83,7 +83,6 @@ client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options
 
 import agent
 from langgraph.types import Command
-import discord_bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsapp_media_payload, process_whatsapp_text_payload
 from scheduler_config import scheduler
@@ -329,14 +328,7 @@ async def run_startup_orchestration():
 async def lifespan(app: FastAPI):
     # Startup
     app.state.graph = await agent.get_agent()
-    
-    # Retrieve token
-    token = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
-    if not token:
-        print("❌ CRITICAL: DISCORD_TOKEN is missing from environment variables!", flush=True)
-    else:
-        print("🚀 Starting Discord bot in background task...", flush=True)
-        asyncio.create_task(discord_bot.bot.start(token))
+    print("ℹ️ [Decommissioned] Discord bot is offline; persistent Agent Feed and Matte Dark Web Dashboard active.", flush=True)
 
     # Start WhatsApp ingestion queue worker
     asyncio.create_task(whatsapp_queue_worker())
@@ -366,8 +358,6 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(run_startup_orchestration())
     yield
     # Shutdown
-    print("🛑 Shutting down Discord bot...", flush=True)
-    await discord_bot.bot.close()
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
@@ -524,6 +514,7 @@ async def create_dashboard_dividend(payload: DividendCreatePayload, request: Req
     return {"status": "success", "dividend": entry}
 
 @app.patch("/api/dashboard/dividends/{id}")
+@app.patch("/api/dashboard/dividends/{id}/status")
 async def update_dashboard_dividend(id: int, payload: DividendStatusUpdatePayload, request: Request):
     verify_dashboard_auth(request)
     from portfolio_manager import update_dividend_status
@@ -665,6 +656,63 @@ async def get_dashboard_intelligence(request: Request):
     intel_data = await asyncio.to_thread(_fetch_intelligence)
     intel_data["desk_manager_thought"] = await asyncio.to_thread(get_desk_manager_thought)
     return {"status": "success", **intel_data}
+
+@app.get("/api/dashboard/feed")
+async def get_dashboard_feed(request: Request, limit: int = 50):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_agent_feed, get_db_connection
+    feed = await asyncio.to_thread(get_agent_feed, limit)
+    
+    def _fetch_ancillary():
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id, source, signal_payload, status, created_at FROM pending_signals ORDER BY created_at DESC LIMIT 20;")
+            pending = [
+                {"id": r[0], "source": r[1], "payload": r[2], "status": r[3], "created_at": r[4].isoformat() if r[4] else None}
+                for r in cur.fetchall()
+            ]
+            cur.execute("SELECT id, source, rule, created_at FROM active_playbook ORDER BY created_at DESC LIMIT 20;")
+            playbook = [
+                {"id": r[0], "source": r[1], "rule": r[2], "created_at": r[3].isoformat() if r[3] else None}
+                for r in cur.fetchall()
+            ]
+            cur.execute("SELECT id, source_type, source_url, content, created_at FROM agent_knowledge ORDER BY created_at DESC LIMIT 20;")
+            knowledge = [
+                {"id": r[0], "source_type": r[1], "source_url": r[2], "content": r[3], "created_at": r[4].isoformat() if r[4] else None}
+                for r in cur.fetchall()
+            ]
+            return pending, playbook, knowledge
+        finally:
+            cur.close()
+            conn.close()
+
+    pending_signals, active_playbook, mentor_knowledge = await asyncio.to_thread(_fetch_ancillary)
+
+    return {
+        "status": "success",
+        "agent_feed": feed,
+        "pending_signals": pending_signals,
+        "active_playbook": active_playbook,
+        "mentor_knowledge": mentor_knowledge
+    }
+
+class DashboardChatPayload(BaseModel):
+    message: str
+
+@app.post("/api/dashboard/chat")
+async def dashboard_chat_endpoint(payload: DashboardChatPayload, request: Request):
+    verify_dashboard_auth(request)
+    from chat_copilot import process_dashboard_chat
+    result = await process_dashboard_chat(payload.message)
+    return result
+
+@app.get("/api/dashboard/chat-history")
+async def get_dashboard_chat_history_endpoint(request: Request, limit: int = 50):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_chat_history
+    history = await asyncio.to_thread(get_chat_history, limit)
+    return {"status": "success", "history": history}
 
 @app.get("/api/dashboard/whatsapp-qr")
 async def get_dashboard_whatsapp_qr():
@@ -848,22 +896,9 @@ async def process_webhook_alert(ticker: str, signal: str, price: float):
     
     print(f"⚡ [Webhook Task] Background worker started for {ticker}...")
     try:
-        from discord_bot import bot, send_long_message
+        from portfolio_manager import publish_agent_event
         from agent import get_agent
         
-        channel_id_str = os.getenv("ALERT_CHANNEL_ID") or os.getenv("ADMIN_CHANNEL_ID")
-        if not channel_id_str:
-            print("❌ [Webhook Task] ERROR: ALERT_CHANNEL_ID or ADMIN_CHANNEL_ID is not set!")
-            return
-            
-        channel = bot.get_channel(int(channel_id_str))
-        if not channel:
-            print(f"❌ [Webhook Task] ERROR: Bot could not find the Discord channel {channel_id_str}.")
-            return
-
-        print(f"✅ [Webhook Task] Channel found. Sending initial Discord alert...")
-        await channel.send(f"🚨 **Real-Time Webhook Triggered:** `{ticker}` hit signal `{signal}` at price `Rs. {price}`. Initiating instant DCF valuation sweep...")
-
         prompt = f"Market Alert: {ticker} triggered a {signal} signal at Rs. {price}. Run a calculate_dcf_valuation for {ticker} and give me a strict tactical verdict comparing fair value to the current price."
         initial_state = {"messages": [("user", prompt)]}
         
@@ -871,9 +906,13 @@ async def process_webhook_alert(ticker: str, signal: str, price: float):
         config = {"configurable": {"thread_id": f"webhook_alert_{ticker}"}}
         ai_verdict = await agent_app.ainvoke(initial_state, config)
         
-        print(f"✅ [Webhook Task] Agent analysis complete. Pushing to Discord...")
-        await send_long_message(channel, ai_verdict)
-        print(f"🚀 [Webhook Task] Webhook pipeline fully complete for {ticker}.")
+        publish_agent_event(
+            category='SYSTEM_ALERT',
+            title=f"Market Alert: {ticker} ({signal})",
+            content=str(ai_verdict),
+            metadata={"ticker": ticker, "signal": signal, "price": price}
+        )
+        print(f"🚀 [Webhook Task] Webhook alert pushed to Agent Feed for {ticker}.")
 
     except Exception as e:
         print(f"\n❌ [CRITICAL WEBHOOK ERROR] The background task crashed:")
@@ -970,8 +1009,9 @@ async def trigger_agent():
     initial_state = {"tickers": ["SYS", "HBL", "LUCK"]}
     
     await app.state.graph.ainvoke(initial_state, config=config)
-    await discord_bot.send_alert(thread_id, "Buy signal detected for SYS at optimal execution price. KMI-30 Compliant.")
-    return {"thread_id": thread_id, "status": "started", "message": "Awaiting human approval"}
+    from portfolio_manager import publish_agent_event
+    publish_agent_event('SYSTEM_ALERT', 'Manual Agent Trigger: SYS', 'Buy signal detected for SYS at optimal execution price. KMI-30 Compliant.', {'ticker': 'SYS'})
+    return {"thread_id": thread_id, "status": "started", "message": "Triggered and published to agent feed"}
 
 if __name__ == "__main__":
     import uvicorn

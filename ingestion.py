@@ -475,13 +475,13 @@ async def process_whatsapp_media_payload(
         if trade_intent and trade_intent.is_trade_execution:
             print(f"🎯 [WhatsApp Trade Signal Detected]: {trade_intent.action} {trade_intent.shares} {trade_intent.ticker} @ {trade_intent.price}")
             try:
-                from discord_bot import bot, ALERT_CHANNEL_ID
-                if ALERT_CHANNEL_ID:
-                    alert_chan = bot.get_channel(int(ALERT_CHANNEL_ID))
-                    if alert_chan:
-                        await alert_chan.send(
-                            f"🚨 **WhatsApp Trade Executed/Detected:** `{trade_intent.action}` `{trade_intent.shares}` `{trade_intent.ticker}` @ `Rs. {trade_intent.price}` (Source: {source})"
-                        )
+                from portfolio_manager import publish_agent_event
+                publish_agent_event(
+                    category='KTRADE_WHATSAPP',
+                    title=f"🚨 Trade Executed: {trade_intent.action} {trade_intent.shares} {trade_intent.ticker}",
+                    content=f"Detected WhatsApp Trade: {trade_intent.action} {trade_intent.shares} {trade_intent.ticker} @ Rs. {trade_intent.price} (Source: {source})",
+                    metadata={"ticker": trade_intent.ticker, "action": trade_intent.action, "shares": trade_intent.shares, "price": trade_intent.price, "source": source}
+                )
             except Exception as alert_err:
                 print(f"⚠️ [Trade Alert Error]: {alert_err}")
     except Exception as tp_err:
@@ -531,21 +531,17 @@ async def process_whatsapp_media_payload(
         except Exception as sent_err:
             print(f"⚠️ Failed to parse/save WhatsApp sentiment mapping: {sent_err}")
 
-    # 6. Downstream Integration: Discord Research Channel
+    # 6. Downstream Integration: Agent Feed Broadcast
     try:
-        import discord
-        from discord_bot import bot, RESEARCH_CHANNEL_ID
-        channel = bot.get_channel(RESEARCH_CHANNEL_ID)
-        if channel:
-            embed = discord.Embed(
-                title=f"📱 KTrade Multimodal Intel: {source} ({media_category})",
-                description=discord_friendly_message[:4096],
-                color=3447003
-            )
-            embed.set_footer(text=f"Attachment: {filename} | Ingested to PGVector & Playbook")
-            await channel.send(embed=embed)
+        from portfolio_manager import publish_agent_event
+        publish_agent_event(
+            category='KTRADE_WHATSAPP',
+            title=f"📱 KTrade Multimodal Intel: {source} ({media_category})",
+            content=discord_friendly_message[:4096],
+            metadata={"source": source, "media_category": media_category, "attachment": filename}
+        )
     except Exception as dc_err:
-        print(f"⚠️ [Discord Channel Dispatch]: {dc_err}")
+        print(f"⚠️ [Agent Feed Dispatch]: {dc_err}")
 
     # 7. Checkpoint Update
     if timestamp:
@@ -617,13 +613,13 @@ async def process_whatsapp_text_payload(text: str, source: str = "KTrade", times
         if trade_intent and trade_intent.is_trade_execution:
             print(f"🎯 [WhatsApp Trade Intent Detected]: {trade_intent}")
             try:
-                from discord_bot import bot, ALERT_CHANNEL_ID
-                if ALERT_CHANNEL_ID:
-                    alert_chan = bot.get_channel(int(ALERT_CHANNEL_ID))
-                    if alert_chan:
-                        await alert_chan.send(
-                            f"🚨 **WhatsApp Trade Executed/Detected:** `{trade_intent.action}` `{trade_intent.shares}` `{trade_intent.ticker}` @ `Rs. {trade_intent.price}` (Source: {source})"
-                        )
+                from portfolio_manager import publish_agent_event
+                publish_agent_event(
+                    category='KTRADE_WHATSAPP',
+                    title=f"🚨 Trade Detected: {trade_intent.action} {trade_intent.shares} {trade_intent.ticker}",
+                    content=f"WhatsApp Trade Signal: {trade_intent.action} {trade_intent.shares} {trade_intent.ticker} @ Rs. {trade_intent.price} (Source: {source})",
+                    metadata={"ticker": trade_intent.ticker, "action": trade_intent.action, "shares": trade_intent.shares, "price": trade_intent.price, "source": source}
+                )
             except Exception:
                 pass
     except Exception as tp_err:

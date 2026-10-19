@@ -1277,34 +1277,54 @@ def get_desk_manager_thought() -> str:
             pass
     return "Desk Manager synthesis standing by. Run manual sweep to generate initial thesis."
 
-def record_capital_transaction(tx_type: str, amount: float, reference_note: str = None) -> dict:
+def record_capital_transaction(tx_type: str, amount: float, notes: str = None, reference_note: str = None) -> dict:
     """
     Records cash moving in/out of KTrade & Bank in capital_ledger:
-    - DEPOSIT_TO_BROKER (Fresh capital deposited to KTrade)
-    - WITHDRAWAL_FROM_BROKER (Cash withdrawn from KTrade to personal bank)
-    - DIVIDEND_BANK_TO_BROKER (Reinvested dividend moved from bank account to KTrade)
-    - FEE_ADJUSTMENT (Broker fee / withholding / adjustment)
+    - DEPOSIT_TO_KTRADE (Fresh capital deposited to KTrade)
+    - WITHDRAWAL_FROM_KTRADE (Cash withdrawn from KTrade to personal bank)
+    - DIVIDEND_SENT_TO_KTRADE (Reinvested dividend moved from bank account to KTrade)
+    - FEE_ADJUSTMENT (Broker fee / withholding / trade cash flow adjustment)
     Also keeps legacy cash_ledger synchronized for uninterrupted automated execution.
     """
     import uuid
-    valid_types = {'DEPOSIT_TO_BROKER', 'WITHDRAWAL_FROM_BROKER', 'DIVIDEND_BANK_TO_BROKER', 'FEE_ADJUSTMENT'}
-    clean_type = tx_type.strip().upper()
-    if clean_type not in valid_types:
-        raise ValueError(f"Invalid tx_type: {tx_type}. Must be one of {valid_types}")
+    # Mapping legacy transaction types to standard types
+    type_map = {
+        'DEPOSIT_TO_BROKER': 'DEPOSIT_TO_KTRADE',
+        'WITHDRAWAL_FROM_BROKER': 'WITHDRAWAL_FROM_KTRADE',
+        'DIVIDEND_BANK_TO_BROKER': 'DIVIDEND_SENT_TO_KTRADE',
+        'DEPOSIT_TO_KTRADE': 'DEPOSIT_TO_KTRADE',
+        'WITHDRAWAL_FROM_KTRADE': 'WITHDRAWAL_FROM_KTRADE',
+        'DIVIDEND_SENT_TO_KTRADE': 'DIVIDEND_SENT_TO_KTRADE',
+        'FEE_ADJUSTMENT': 'FEE_ADJUSTMENT'
+    }
+    raw_type = tx_type.strip().upper()
+    if raw_type not in type_map:
+        raise ValueError(f"Invalid tx_type: {tx_type}. Must be one of {set(type_map.values())}")
+    clean_type = type_map[raw_type]
 
+    note_text = notes if notes is not None else reference_note
     amt = float(amount)
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO capital_ledger (tx_type, amount, reference_note, tx_date)
-            VALUES (%s, %s, %s, NOW())
-            RETURNING id, tx_type, amount, reference_note, tx_date;
-        """, (clean_type, amt, reference_note))
+            INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+            VALUES (%s, %s, %s, %s, NOW(), NOW())
+            RETURNING id, tx_type, amount, notes, created_at;
+        """, (clean_type, amt, note_text, note_text))
         row = cur.fetchone()
         
-        # Mirror to cash_ledger
-        cash_delta = amt if clean_type in {'DEPOSIT_TO_BROKER', 'DIVIDEND_BANK_TO_BROKER'} else (-amt if clean_type == 'WITHDRAWAL_FROM_BROKER' else amt)
+        # Mirror to cash_ledger:
+        # DEPOSIT_TO_KTRADE / DIVIDEND_SENT_TO_KTRADE increases KTrade cash (+amt)
+        # WITHDRAWAL_FROM_KTRADE decreases KTrade cash (-amt)
+        # FEE_ADJUSTMENT applies exact signed delta (e.g. -net_total on BUY, +net_total on SELL)
+        if clean_type in {'DEPOSIT_TO_KTRADE', 'DIVIDEND_SENT_TO_KTRADE'}:
+            cash_delta = amt
+        elif clean_type == 'WITHDRAWAL_FROM_KTRADE':
+            cash_delta = -amt
+        else:
+            cash_delta = amt
+
         user_id = os.getenv("DISCORD_USER_ID", "1536522727287164979")
         cur.execute("""
             INSERT INTO cash_ledger (transaction_id, discord_user_id, transaction_type, amount, created_at)
@@ -1316,7 +1336,9 @@ def record_capital_transaction(tx_type: str, amount: float, reference_note: str 
             "id": row[0],
             "tx_type": row[1],
             "amount": float(row[2]),
+            "notes": row[3],
             "reference_note": row[3],
+            "created_at": row[4].isoformat() if row[4] else None,
             "tx_date": row[4].isoformat() if row[4] else None
         }
     except Exception as e:
@@ -1328,28 +1350,72 @@ def record_capital_transaction(tx_type: str, amount: float, reference_note: str 
 
 def record_dividend(
     ticker: str,
-    shares_held: float,
-    dps_gross: float,
+    shares_held: float = None,
+    dps_gross: float = 0.0,
+    gross_amount: float = None,
     tax_rate_pct: float = 15.00,
+    tax_withheld: float = None,
+    net_amount: float = None,
     ex_date: str = None,
     payment_date: str = None,
-    status: str = 'ENTITLED',
+    status: str = 'CREDITED_TO_BANK',
     notes: str = None
 ) -> dict:
     """
     Tracks the exact PSX Dividend Lifecycle:
-    ANNOUNCED -> ENTITLED (Pending Payout) -> CREDITED_TO_BANK (15% WHT deducted) -> SENT_TO_KTRADE (Reinvested)
+    ENTITLED (Pending Payout) -> CREDITED_TO_BANK (CDC Dividend Credited into Personal Bank Account) -> SENT_TO_KTRADE (Reinvested in KTrade)
+
+    CRITICAL RULE:
+    A dividend in 'ENTITLED' or 'CREDITED_TO_BANK' does NOT increase KTrade cash.
+    Only when marked 'SENT_TO_KTRADE' does it insert a 'DIVIDEND_SENT_TO_KTRADE' row in capital_ledger and increase KTrade available cash!
     """
     from utils import normalize_ticker
     clean_ticker = normalize_ticker(ticker)
-    shares = float(shares_held)
-    dps = float(dps_gross)
+    
+    # Auto-lookup shares from portfolio_holdings if not provided
+    if shares_held is None or float(shares_held) <= 0:
+        conn_lookup = get_db_connection()
+        cur_lookup = conn_lookup.cursor()
+        try:
+            cur_lookup.execute("SELECT shares FROM portfolio_holdings WHERE ticker = %s;", (clean_ticker,))
+            res = cur_lookup.fetchone()
+            shares = float(res[0]) if res and res[0] else 0.0
+        except Exception:
+            shares = 0.0
+        finally:
+            cur_lookup.close()
+            conn_lookup.close()
+    else:
+        shares = float(shares_held)
+
+    dps = float(dps_gross) if dps_gross is not None else 0.0
     tax_rate = float(tax_rate_pct) if tax_rate_pct is not None else 15.00
     
-    gross_amount = round(shares * dps, 2)
-    tax_withheld = round(gross_amount * (tax_rate / 100.0), 2)
-    net_amount = round(gross_amount - tax_withheld, 2)
-    clean_status = status.strip().upper() if status else 'ENTITLED'
+    # Financial math resolution
+    if gross_amount is None:
+        if shares > 0 and dps > 0:
+            gross_amount = round(shares * dps, 2)
+        elif net_amount is not None:
+            gross_amount = round(float(net_amount) / (1.0 - (tax_rate / 100.0)), 2) if tax_rate < 100 else float(net_amount)
+        else:
+            gross_amount = 0.0
+    else:
+        gross_amount = round(float(gross_amount), 2)
+
+    if tax_withheld is None:
+        tax_withheld = round(gross_amount * (tax_rate / 100.0), 2)
+    else:
+        tax_withheld = round(float(tax_withheld), 2)
+
+    if net_amount is None:
+        net_amount = round(gross_amount - tax_withheld, 2)
+    else:
+        net_amount = round(float(net_amount), 2)
+
+    clean_status = status.strip().upper() if status else 'CREDITED_TO_BANK'
+    valid_statuses = {'ENTITLED', 'ANNOUNCED', 'CREDITED_TO_BANK', 'SENT_TO_KTRADE'}
+    if clean_status not in valid_statuses:
+        clean_status = 'CREDITED_TO_BANK'
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -1369,12 +1435,12 @@ def record_dividend(
         row = cur.fetchone()
         conn.commit()
         
-        # If created directly with status 'SENT_TO_KTRADE', credit capital ledger immediately
+        # CRITICAL RULE: Only if status is 'SENT_TO_KTRADE', credit capital_ledger immediately!
         if clean_status == 'SENT_TO_KTRADE':
             record_capital_transaction(
-                tx_type='DIVIDEND_BANK_TO_BROKER',
+                tx_type='DIVIDEND_SENT_TO_KTRADE',
                 amount=net_amount,
-                reference_note=f"Reinvested Dividend #{row[0]}: {clean_ticker} ({shares} shs @ Rs. {dps})"
+                notes=f"Reinvested Dividend #{row[0]}: {clean_ticker} ({shares} shs @ Rs. {dps})"
             )
 
         return {
@@ -1399,36 +1465,119 @@ def record_dividend(
         cur.close()
         conn.close()
 
+def transfer_dividend_to_ktrade(dividend_id_or_ticker) -> dict:
+    """
+    Transitions a dividend to SENT_TO_KTRADE, logs DIVIDEND_SENT_TO_KTRADE in capital_ledger,
+    and increments KTrade available cash.
+    Accepts either an integer ID or ticker string (e.g. 'MEBL', 'HUBC').
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Determine if target is ID or ticker
+        is_id = False
+        target_id = None
+        target_ticker = None
+
+        if isinstance(dividend_id_or_ticker, int) or (isinstance(dividend_id_or_ticker, str) and dividend_id_or_ticker.isdigit()):
+            is_id = True
+            target_id = int(dividend_id_or_ticker)
+        else:
+            target_ticker = str(dividend_id_or_ticker).strip().upper()
+
+        if is_id:
+            cur.execute("""
+                SELECT id, ticker, shares_held, dps_gross, net_amount, status
+                FROM dividend_ledger
+                WHERE id = %s
+            """, (target_id,))
+        else:
+            cur.execute("""
+                SELECT id, ticker, shares_held, dps_gross, net_amount, status
+                FROM dividend_ledger
+                WHERE ticker = %s AND status IN ('CREDITED_TO_BANK', 'ENTITLED')
+                ORDER BY created_at DESC
+                LIMIT 1;
+            """, (target_ticker,))
+
+        existing = cur.fetchone()
+        if not existing:
+            raise ValueError(f"No eligible dividend found for '{dividend_id_or_ticker}' to transfer to KTrade.")
+
+        div_id = existing[0]
+        ticker = existing[1]
+        shares = float(existing[2])
+        dps = float(existing[3])
+        net_amount = float(existing[4])
+        old_status = existing[5]
+
+        if old_status == 'SENT_TO_KTRADE':
+            # Already transferred
+            return {
+                "id": div_id,
+                "ticker": ticker,
+                "status": "SENT_TO_KTRADE",
+                "net_amount": net_amount,
+                "message": "Dividend was already transferred to KTrade."
+            }
+
+        cur.execute("""
+            UPDATE dividend_ledger
+            SET status = 'SENT_TO_KTRADE'
+            WHERE id = %s
+            RETURNING id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
+                      tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at;
+        """, (div_id,))
+        row = cur.fetchone()
+        conn.commit()
+
+        # Log in capital_ledger & increment KTrade cash
+        cap_entry = record_capital_transaction(
+            tx_type='DIVIDEND_SENT_TO_KTRADE',
+            amount=net_amount,
+            notes=f"Reinvested Dividend #{div_id}: {ticker} ({shares} shs @ Rs. {dps})"
+        )
+        print(f"💰 [Dividend Pipeline] Dividend #{div_id} ({ticker}) marked SENT_TO_KTRADE. Added Rs. {net_amount} to KTrade Available Cash.")
+
+        return {
+            "id": row[0],
+            "ticker": row[1],
+            "shares_held": float(row[2]),
+            "dps_gross": float(row[3]),
+            "gross_amount": float(row[4]),
+            "tax_rate_pct": float(row[5]),
+            "tax_withheld": float(row[6]),
+            "net_amount": float(row[7]),
+            "ex_date": str(row[8]) if row[8] else None,
+            "payment_date": str(row[9]) if row[9] else None,
+            "status": row[10],
+            "notes": row[11],
+            "created_at": row[12].isoformat() if row[12] else None,
+            "capital_transaction": cap_entry
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
 def update_dividend_status(dividend_id: int, new_status: str) -> dict:
     """
     Transitions dividend across lifecycle states.
-    CRITICAL REALITY LOGIC:
-    When new_status is 'SENT_TO_KTRADE', automatically inserts a corresponding
-    'DIVIDEND_BANK_TO_BROKER' entry into capital_ledger and increments available KTrade cash!
+    If new_status is 'SENT_TO_KTRADE', routes directly through transfer_dividend_to_ktrade()!
     """
-    valid_statuses = {'ANNOUNCED', 'ENTITLED', 'CREDITED_TO_BANK', 'SENT_TO_KTRADE'}
     clean_status = new_status.strip().upper()
+    if clean_status == 'SENT_TO_KTRADE':
+        return transfer_dividend_to_ktrade(dividend_id)
+
+    valid_statuses = {'ANNOUNCED', 'ENTITLED', 'CREDITED_TO_BANK', 'SENT_TO_KTRADE'}
     if clean_status not in valid_statuses:
         raise ValueError(f"Invalid dividend status: {new_status}. Must be one of {valid_statuses}")
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("""
-            SELECT id, ticker, shares_held, dps_gross, net_amount, status
-            FROM dividend_ledger
-            WHERE id = %s
-        """, (dividend_id,))
-        existing = cur.fetchone()
-        if not existing:
-            raise ValueError(f"Dividend #{dividend_id} not found.")
-
-        old_status = existing[5]
-        ticker = existing[1]
-        shares = float(existing[2])
-        dps = float(existing[3])
-        net_amount = float(existing[4])
-
         cur.execute("""
             UPDATE dividend_ledger
             SET status = %s
@@ -1437,22 +1586,9 @@ def update_dividend_status(dividend_id: int, new_status: str) -> dict:
                       tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at;
         """, (clean_status, dividend_id))
         row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Dividend #{dividend_id} not found.")
         conn.commit()
-
-        # If transitioning to SENT_TO_KTRADE and not already transferred, inject into capital_ledger!
-        if clean_status == 'SENT_TO_KTRADE' and old_status != 'SENT_TO_KTRADE':
-            cur.execute("""
-                SELECT id FROM capital_ledger 
-                WHERE tx_type = 'DIVIDEND_BANK_TO_BROKER' AND reference_note LIKE %s
-            """, (f"%Dividend #{dividend_id}:%",))
-            cap_exists = cur.fetchone()
-            if not cap_exists:
-                record_capital_transaction(
-                    tx_type='DIVIDEND_BANK_TO_BROKER',
-                    amount=net_amount,
-                    reference_note=f"Reinvested Dividend #{dividend_id}: {ticker} ({shares} shs @ Rs. {dps})"
-                )
-                print(f"💰 [Dividend Ledger] Automatically transferred Net Dividend Rs. {net_amount} to KTrade Available Cash.")
 
         return {
             "id": row[0],
@@ -1476,17 +1612,17 @@ def update_dividend_status(dividend_id: int, new_status: str) -> dict:
         cur.close()
         conn.close()
 
-def record_trade(
+def record_trade_execution(
     ticker: str,
     side: str,
     quantity: float,
     price: float,
-    fees_and_tax: float = 0.00,
+    fees: float = 0.00,
     notes: str = None
 ) -> dict:
     """
     Logs BUY / SELL trade in trade_history, updates portfolio_holdings weighted average cost,
-    and reflects trade cash flow in cash_ledger.
+    and reflects trade cash flow in capital_ledger and cash_ledger.
     """
     from utils import normalize_ticker
     clean_ticker = normalize_ticker(ticker)
@@ -1496,19 +1632,19 @@ def record_trade(
 
     qty = float(quantity)
     prc = float(price)
-    fees = float(fees_and_tax) if fees_and_tax is not None else 0.00
+    f_val = float(fees) if fees is not None else 0.00
     gross = round(qty * prc, 2)
-    net_total = round(gross + fees if clean_side == 'BUY' else gross - fees, 2)
+    net_total = round(gross + f_val if clean_side == 'BUY' else gross - f_val, 2)
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         # 1. Insert into trade_history
         cur.execute("""
-            INSERT INTO trade_history (ticker, side, quantity, price, fees_and_tax, net_total, executed_at, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s)
-            RETURNING id, ticker, side, quantity, price, fees_and_tax, net_total, executed_at, notes;
-        """, (clean_ticker, clean_side, qty, prc, fees, net_total, notes))
+            INSERT INTO trade_history (ticker, side, quantity, price, fees, fees_and_tax, net_total, executed_at, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+            RETURNING id, ticker, side, quantity, price, fees, net_total, executed_at, notes;
+        """, (clean_ticker, clean_side, qty, prc, f_val, f_val, net_total, notes))
         t_row = cur.fetchone()
 
         # 2. Update portfolio_holdings
@@ -1535,7 +1671,7 @@ def record_trade(
                 """, (clean_ticker, qty, prc))
             
             # Cash flow deduction
-            record_capital_transaction('FEE_ADJUSTMENT', -net_total, f"Trade Execution: BUY {qty} {clean_ticker} @ {prc}")
+            record_capital_transaction('FEE_ADJUSTMENT', -net_total, notes=f"Trade Execution: BUY {qty} {clean_ticker} @ {prc}")
 
         elif clean_side == 'SELL':
             if existing_h:
@@ -1548,7 +1684,7 @@ def record_trade(
                 """, (new_shares, existing_h[0]))
             
             # Cash flow credit
-            record_capital_transaction('FEE_ADJUSTMENT', net_total, f"Trade Execution: SELL {qty} {clean_ticker} @ {prc}")
+            record_capital_transaction('FEE_ADJUSTMENT', net_total, notes=f"Trade Execution: SELL {qty} {clean_ticker} @ {prc}")
 
         conn.commit()
         return {
@@ -1557,7 +1693,7 @@ def record_trade(
             "side": t_row[2],
             "quantity": float(t_row[3]),
             "price": float(t_row[4]),
-            "fees_and_tax": float(t_row[5]),
+            "fees": float(t_row[5]),
             "net_total": float(t_row[6]),
             "executed_at": t_row[7].isoformat() if t_row[7] else None,
             "notes": t_row[8]
@@ -1569,6 +1705,9 @@ def record_trade(
         cur.close()
         conn.close()
 
+# Alias for backward compatibility
+record_trade = record_trade_execution
+
 def get_complete_financial_summary() -> dict:
     """
     Computes complete PSX investment summary, capital accounting, and live mark-to-market valuations.
@@ -1579,8 +1718,8 @@ def get_complete_financial_summary() -> dict:
         # 1. Capital Ledger Summary
         cur.execute("""
             SELECT 
-                COALESCE(SUM(CASE WHEN tx_type = 'DEPOSIT_TO_BROKER' THEN amount WHEN tx_type = 'WITHDRAWAL_FROM_BROKER' THEN -amount ELSE 0 END), 0) as fresh_capital,
-                COALESCE(SUM(CASE WHEN tx_type = 'DIVIDEND_BANK_TO_BROKER' THEN amount ELSE 0 END), 0) as reinvested_divs
+                COALESCE(SUM(CASE WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER') THEN amount WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount ELSE 0 END), 0) as fresh_capital,
+                COALESCE(SUM(CASE WHEN tx_type IN ('DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount ELSE 0 END), 0) as reinvested_divs
             FROM capital_ledger;
         """)
         cap_row = cur.fetchone()
@@ -1685,16 +1824,22 @@ def get_complete_financial_summary() -> dict:
             "financial_kpis": {
                 "total_net_worth": net_worth,
                 "fresh_capital_invested": fresh_capital,
+                "fresh_capital_deposited": fresh_capital,
                 "ktrade_available_cash": round(available_cash, 2),
+                "ktrade_cash_balance": round(available_cash, 2),
                 "portfolio_market_value": round(portfolio_market_val, 2),
                 "portfolio_cost_basis": round(portfolio_cost, 2),
+                "total_cost_basis": round(portfolio_cost, 2),
                 "unrealized_pnl": unrealized_pnl,
                 "unrealized_pnl_pct": unrealized_pnl_pct,
                 "total_gross_dividends": total_gross_div,
                 "total_wht_tax_paid": total_tax_wht,
                 "net_dividends_in_bank": net_div_bank,
+                "dividends_in_bank": net_div_bank,
                 "net_dividends_reinvested": net_div_reinvested,
+                "dividends_sent_to_ktrade": net_div_reinvested,
                 "pending_dividends": pending_div,
+                "dividends_pending": pending_div,
                 "true_total_return": true_total_return,
                 "true_roi_pct": true_roi_pct
             },
@@ -1865,5 +2010,120 @@ def get_desk_manager_thought() -> str:
         pass
 
     return "No Desk Manager synthesis memorandum generated yet."
+
+def publish_agent_event(category: str, title: str, content: str, metadata: dict = None) -> bool:
+    """
+    Unified agent feed publisher. Replaces Discord alerts with persistent entries in Supabase agent_feed.
+    Categories: 'DESK_MANAGER', 'KTRADE_WHATSAPP', 'YOUTUBE_MENTOR', 'MACRO_NEWS', 'SYSTEM_ALERT'
+    """
+    try:
+        if metadata is None:
+            metadata = {}
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_feed (category, title, content, metadata, created_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            RETURNING id;
+        """, (category, title, content, json.dumps(metadata)))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        event_id = row[0] if row else None
+        print(f"📢 [Agent Feed] Published [{category}] #{event_id}: {title}")
+        return True
+    except Exception as e:
+        print(f"❌ [Agent Feed] Failed publishing event [{category}] {title}: {e}")
+        return False
+
+def get_agent_feed(limit: int = 50, category: str = None) -> list[dict]:
+    """Retrieves recent events from agent_feed table."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        if category:
+            cur.execute("""
+                SELECT id, category, title, content, metadata, created_at
+                FROM agent_feed
+                WHERE category = %s
+                ORDER BY created_at DESC
+                LIMIT %s;
+            """, (category, limit))
+        else:
+            cur.execute("""
+                SELECT id, category, title, content, metadata, created_at
+                FROM agent_feed
+                ORDER BY created_at DESC
+                LIMIT %s;
+            """, (limit,))
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "category": r[1],
+                "title": r[2],
+                "content": r[3],
+                "metadata": r[4] if isinstance(r[4], dict) else json.loads(r[4] or "{}"),
+                "created_at": r[5].isoformat() if r[5] else None
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"❌ [Agent Feed] Error fetching feed: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+def save_chat_message(role: str, content: str, actions_taken: list = None) -> int:
+    """Saves a user or assistant message to Supabase chat_messages."""
+    if actions_taken is None:
+        actions_taken = []
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO chat_messages (role, content, actions_taken, created_at)
+            VALUES (%s, %s, %s, NOW())
+            RETURNING id;
+        """, (role, content, json.dumps(actions_taken)))
+        row = cur.fetchone()
+        conn.commit()
+        msg_id = row[0] if row else None
+        return msg_id
+    finally:
+        cur.close()
+        conn.close()
+
+def get_chat_history(limit: int = 50) -> list[dict]:
+    """Retrieves recent conversation history from chat_messages."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, role, content, actions_taken, created_at
+            FROM chat_messages
+            ORDER BY created_at ASC
+            LIMIT %s;
+        """, (limit,))
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "role": r[1],
+                "content": r[2],
+                "actions_taken": r[3] if isinstance(r[3], list) else json.loads(r[3] or "[]"),
+                "created_at": r[4].isoformat() if r[4] else None
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"❌ [Chat History] Error fetching history: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
 
 

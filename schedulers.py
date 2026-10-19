@@ -10,10 +10,46 @@ import os
 from datetime import datetime, timedelta
 from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_db, evaluate_trade_trigger
 import traceback
-from discord_bot import bot, get_last_run, update_last_run, send_long_message
-from langchain_google_genai import ChatGoogleGenerativeAI
-import yfinance as yf
-from portfolio_manager import get_db_connection
+from portfolio_manager import get_db_connection, publish_agent_event
+
+STATE_FILE = "scheduler_state.json"
+def get_last_run(task_name):
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                return data.get(task_name, 0)
+        except Exception:
+            return 0
+    return 0
+
+def update_last_run(task_name):
+    data = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data[task_name] = datetime.now().timestamp()
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+async def send_long_message(channel, raw_message, max_chars: int = 1800):
+    publish_agent_event('SYSTEM_ALERT', 'Scheduler Notice', str(raw_message))
+
+class DummyBot:
+    def get_channel(self, cid):
+        return None
+    async def fetch_channel(self, cid):
+        return None
+    async def wait_until_ready(self):
+        return True
+
+bot = DummyBot()
 
 # Define your admin channel ID here or pull from os.environ
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", 0))
@@ -211,18 +247,13 @@ async def _run_youtube_sweep_inner():
                 # Store the high-signal structured output in Vector DB instead of rambling text
                 await ingest_knowledge_tool.ainvoke({"input_text_or_url": formatted_text})
 
-                # Post knowledge brief to Discord research channel
-                if alert_channel:
-                    try:
-                        import discord
-                        embed = discord.Embed(
-                            title=f"🎬 YouTube Knowledge Brief: {mentor}",
-                            description=formatted_text[:4096],
-                            color=3447003
-                        )
-                        await alert_channel.send(embed=embed)
-                    except Exception as discord_err:
-                        print(f"⚠️ [YouTube Sweep] Failed to send Discord embed for {mentor}: {discord_err}")
+                # Post knowledge brief to Agent Feed
+                publish_agent_event(
+                    category='YOUTUBE_MENTOR',
+                    title=f"🎬 YouTube Knowledge Brief: {mentor}",
+                    content=formatted_text,
+                    metadata={"mentor": mentor}
+                )
 
             # Advance checkpoint only AFTER all transcripts are successfully stored and broadcasted
             from youtube_scraper import LATEST_SWEEP_TIMESTAMP
@@ -231,12 +262,12 @@ async def _run_youtube_sweep_inner():
                 update_checkpoint("youtube_last_timestamp", LATEST_SWEEP_TIMESTAMP)
                 print(f"✅ [YouTube Sweep] Watermark checkpoint advanced to {LATEST_SWEEP_TIMESTAMP}.")
 
-            alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-            if alert_channel:
-                from discord_bot import send_long_message
-                await send_long_message(
-                    alert_channel,
-                    f"⚠️ **PARTIAL SWEEP FAILURE**: The following mentors failed all fallback extraction tiers: {', '.join(failed_mentors)}"
+            if failed_mentors:
+                publish_agent_event(
+                    category='SYSTEM_ALERT',
+                    title="⚠️ Partial YouTube Sweep Failure",
+                    content=f"The following mentors failed all fallback extraction tiers: {', '.join(failed_mentors)}",
+                    metadata={"failed_mentors": failed_mentors}
                 )
                 
         print("✅ [YouTube Sweep] Knowledge ingestion complete.")
@@ -360,11 +391,13 @@ async def run_business_portfolio_sweep():
         error_msg = f"❌ [Business Sweep Error]: {str(e)}"
         logger.error(error_msg)
         
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            tb_str = traceback.format_exc()
-            discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (Business)**\n```python\n{tb_str[-1900:]}\n```"
-            await alert_channel.send(discord_msg)
+        tb_str = traceback.format_exc()
+        publish_agent_event(
+            category='SYSTEM_ALERT',
+            title="⚠️ Critical Sweep Failure (Business)",
+            content=f"Business Sweep crashed:\n{tb_str[-1900:]}",
+            metadata={"error": str(e)}
+        )
 
 # In-memory cache to prevent Discord alert spam
 # Format: {"LUCK_STOP_LOSS": datetime.datetime(...)}
@@ -594,8 +627,14 @@ async def evaluate_asymmetric_triggers(live_prices: dict, send_long_message_func
             f"{audit_result.get('strategic_thesis', '')}"
         )
 
-        from portfolio_manager import add_pending_signal
+        from portfolio_manager import add_pending_signal, publish_agent_event
         await asyncio.to_thread(add_pending_signal, "Asymmetric Trigger", {"ticker": ticker, "message": message, "verdict": "EXECUTE"})
+        publish_agent_event(
+            category='SYSTEM_ALERT',
+            title=f"🎯 Execution Directive: {ticker}",
+            content=message,
+            metadata={"ticker": ticker, "action": "BUY"}
+        )
         ASYMMETRIC_ALERT_COOLDOWNS[alert_key] = now
         print(f"✅ High-conviction execution directive dispatched for {ticker}.")
 
@@ -717,10 +756,12 @@ async def run_intraday_price_loop():
                             msg += f"**Diagnostic Reason:** {reason}\n\n"
                             msg += f"**Recommendation:** TAKE PROFIT. Lock in gains or place tight trailing stops."
                             
-                        if alert_channel:
-                            await alert_channel.send(msg)
-                        else:
-                            print(msg)
+                        publish_agent_event(
+                            category='SYSTEM_ALERT',
+                            title=f"⚠️ Portfolio Exit Alert: {ticker}",
+                            content=msg,
+                            metadata={"ticker": ticker}
+                        )
 
         # --- 2. EXISTING PROFIT AND REBALANCE TRIGGERS ---
         from portfolio_manager import check_profit_and_rebalance_triggers
@@ -839,18 +880,25 @@ async def run_intraday_price_loop():
                 msg += f"**Est. New Balance:** Rs. {alert.get('new_cash_balance', 0):,.2f}\n\n"
                 msg += f"🧠 **AI Contextual Verdict (Multi-Agent):**\n{parsed_rationale}\n"
             
-            from portfolio_manager import add_pending_signal
+            from portfolio_manager import add_pending_signal, publish_agent_event
             await asyncio.to_thread(add_pending_signal, "Intraday Sweep", {"ticker": ticker, "type": alert_type, "message": msg, "action": ai_action})
+            publish_agent_event(
+                category='SYSTEM_ALERT',
+                title=f"🚨 Portfolio Alert: {ticker} ({alert_type})",
+                content=msg,
+                metadata={"ticker": ticker, "alert_type": alert_type, "action": ai_action}
+            )
             
     except Exception as e:
         error_msg = f"❌ [Intraday Loop Error]: {str(e)}"
         logger.error(error_msg)
-        
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            tb_str = traceback.format_exc()
-            discord_msg = f"⚠️ **CRITICAL SWEEP FAILURE (Intraday)**\n```python\n{tb_str[-1900:]}\n```"
-            await alert_channel.send(discord_msg)
+        tb_str = traceback.format_exc()
+        publish_agent_event(
+            category='SYSTEM_ALERT',
+            title="⚠️ Critical Sweep Failure (Intraday)",
+            content=f"Intraday loop crashed:\n{tb_str[-1900:]}",
+            metadata={"error": str(e)}
+        )
 
 async def run_daily_closing_briefing(bot_instance=None):
     """
@@ -898,29 +946,37 @@ async def run_daily_closing_briefing(bot_instance=None):
         pnl = summary.get("daily_pnl", 0.0)
         pnl_pct = summary.get("daily_pnl_pct", 0.0)
         sign = "+" if pnl >= 0 else ""
-        embed.add_field(name="Daily PnL", value=f"{sign}Rs. {pnl:,.2f} ({sign}{pnl_pct:.2f}%)", inline=False)
-        
-        # Top Gainer
-        g_ticker, g_change = summary['top_gainer']
-        if g_ticker and g_ticker != "N/A":
-            embed.add_field(name="🏆 Top Gainer", value=f"{g_ticker} (+{g_change:.2f}%)", inline=True)
-            
-        # Top Loser
-        l_ticker, l_change = summary['top_loser']
-        if l_ticker and l_ticker != "N/A":
-            embed.add_field(name="🔻 Top Loser", value=f"{l_ticker} ({l_change:.2f}%)", inline=True)
-            
-        await alert_channel.send(embed=embed)
+        g_ticker, g_change = summary.get('top_gainer', ('N/A', 0.0))
+        l_ticker, l_change = summary.get('top_loser', ('N/A', 0.0))
+
+        brief_text = (
+            f"📊 Daily Closing Summary & Liquidity Report:\n"
+            f"• Total Portfolio Value: Rs. {summary['total_portfolio_value']:,.2f}\n"
+            f"• Liquid Cash: Rs. {summary['liquid_cash']:,.2f}\n"
+            f"• Equity Allocation: {summary['equity_allocation_pct']:.1f}%\n"
+            f"• Daily PnL: {sign}Rs. {pnl:,.2f} ({sign}{pnl_pct:.2f}%)\n"
+            f"• Top Gainer: {g_ticker} (+{g_change:.2f}%)\n"
+            f"• Top Loser: {l_ticker} ({l_change:.2f}%)"
+        )
+        publish_agent_event(
+            category='DESK_MANAGER',
+            title="📊 Daily Closing Summary & Liquidity Report",
+            content=brief_text,
+            metadata=summary
+        )
         set_last_run_date("daily_closing_briefing", datetime.now().strftime("%Y-%m-%d"))
         logger.info("✅ Daily Closing Summary sent.")
     except Exception as e:
         error_msg = f"❌ [Daily Closing Summary Error]: {str(e)}"
         logger.error(error_msg)
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            import traceback
-            tb_str = traceback.format_exc()
-            await alert_channel.send(f"⚠️ **CRITICAL SWEEP FAILURE (Daily Summary)**\n```python\n{tb_str[-1900:]}\n```")
+        import traceback
+        tb_str = traceback.format_exc()
+        publish_agent_event(
+            category='SYSTEM_ALERT',
+            title="⚠️ Critical Sweep Failure (Daily Summary)",
+            content=f"Daily summary crashed:\n{tb_str[-1900:]}",
+            metadata={"error": str(e)}
+        )
 
 async def run_intraday_technical_scanner():
     """
@@ -953,20 +1009,25 @@ async def run_intraday_technical_scanner():
                 
             technical_alert_cooldowns[ticker] = now_ts
             
-            if alert_channel:
-                await alert_channel.send(message)
-            else:
-                print(f"=== TECHNICAL ALERT ===\n{message}")
+            publish_agent_event(
+                category='SYSTEM_ALERT',
+                title=f"📈 Technical Signal Alert: {ticker}",
+                content=message,
+                metadata={"ticker": ticker}
+            )
                 
         logger.info(f"✅ Technical Analysis Scanner complete.")
     except Exception as e:
         error_msg = f"❌ [Technical Scanner Error]: {str(e)}"
         logger.error(error_msg)
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if alert_channel:
-            import traceback
-            tb_str = traceback.format_exc()
-            await alert_channel.send(f"⚠️ **CRITICAL SWEEP FAILURE (Tech Scanner)**\n```python\n{tb_str[-1900:]}\n```")
+        import traceback
+        tb_str = traceback.format_exc()
+        publish_agent_event(
+            category='SYSTEM_ALERT',
+            title="⚠️ Critical Sweep Failure (Tech Scanner)",
+            content=f"Technical scanner crashed:\n{tb_str[-1900:]}",
+            metadata={"error": str(e)}
+        )
 
 async def run_monthly_macro_sync():
     """Monthly background task to update macro variables via Chromium."""
@@ -1061,9 +1122,12 @@ async def run_cash_deployment_sweep():
             f"The following KMI-30 assets have crossed the 20% Margin of Safety threshold:\n"
             + "\n".join(actionable_setups)
         )
-        channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if channel:
-            await send_long_message(channel, payload)
+        publish_agent_event(
+            category='MACRO_NEWS',
+            title="🚨 Margin of Safety Deployment Alert",
+            content=payload,
+            metadata={"setups_count": len(actionable_setups)}
+        )
 
 import aiohttp
 import asyncio
@@ -1144,12 +1208,13 @@ NEVER use Markdown pipe tables (| col | col |) because Discord cannot render the
         from model_router import generate_with_fallback, TASK_DEEP_REASONING
         final_verdict = await generate_with_fallback(client, [prompt], task=TASK_DEEP_REASONING)
         
-        # 4. Send to Discord
-        alert_channel = bot.get_channel(PROSPECT_CHANNEL_ID)
-        if alert_channel:
-            await send_long_message(alert_channel, f"👔 **DESK MANAGER SYNTHESIS:**\n\n{final_verdict}")
-        else:
-            print(f"👔 DESK MANAGER FALLBACK: {final_verdict}")
+        # 4. Publish to Agent Feed
+        publish_agent_event(
+            category='DESK_MANAGER',
+            title="👔 Desk Manager Daily Synthesis",
+            content=final_verdict,
+            metadata={"signal_ids": signal_ids}
+        )
             
         # 5. Mark as processed
         cur.execute("UPDATE pending_signals SET status = 'processed' WHERE id = ANY(%s)", (signal_ids,))
@@ -1170,9 +1235,7 @@ async def start_scheduled_sweeps():
     global _has_run_closing_report_today
     logger.info("🚀 Master background scheduled sweeps started (Intraday Loop, 00:00 YouTube, 12/16:00 Email, 18:00 Business).")
     
-    # Ensure Discord bot is ready before doing anything that requires fetching channels
-    await bot.wait_until_ready()
-    logger.info("🤖 Discord bot is ready. Schedulers proceeding.")
+    logger.info("🚀 Master background schedulers online with autonomous Agent Feed logging.")
     
     # Catch-up sweeps on startup
     now = datetime.now()

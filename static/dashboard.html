@@ -181,6 +181,9 @@
           <button id="auth-lock-btn" onclick="toggleAuthLock()" title="Auth Security" class="p-1.5 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] rounded-lg text-xs transition">
             🔓
           </button>
+          <button onclick="toggleCopilotDrawer()" title="Toggle AI Copilot" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-lg text-xs font-semibold transition flex items-center gap-1.5">
+            <span>🤖</span> <span class="hidden sm:inline">AI Copilot</span>
+          </button>
         </div>
       </header>
 
@@ -734,9 +737,92 @@
 
         </div>
 
-      </section>
-
     </main>
+
+    <!-- RIGHT SIDEBAR: PERSISTENT AI COPILOT CHAT DRAWER -->
+    <aside id="copilot-drawer" class="w-96 bg-[#12151B] border-l border-[#1E232D] flex flex-col shrink-0 sticky top-0 h-screen z-20 transition-all duration-300">
+      <!-- Chat Header -->
+      <div class="p-4 border-b border-[#1E232D] flex items-center justify-between bg-[#12151B]">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 text-sm font-bold">
+            🤖
+          </div>
+          <div>
+            <div class="flex items-center gap-1.5">
+              <h3 class="text-xs font-bold text-white tracking-wide">AI Financial Copilot</h3>
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            </div>
+            <p class="text-[10px] text-slate-400 font-mono">Groq 70B • Gemini Cascade</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-1">
+          <button onclick="clearChatUI()" title="Clear Chat UI" class="p-1 text-slate-400 hover:text-white rounded hover:bg-[#1E232D] text-xs">
+            🗑️
+          </button>
+          <button onclick="toggleCopilotDrawer()" title="Close Copilot" class="p-1 text-slate-400 hover:text-white rounded hover:bg-[#1E232D] text-xs md:hidden">
+            &times;
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick Suggestion Action Chips -->
+      <div class="p-2.5 border-b border-[#1E232D] bg-[#0B0D10]/40 flex gap-1.5 overflow-x-auto text-[11px] whitespace-nowrap">
+        <button onclick="sendQuickPrompt('Bought 500 HUBC at 118.50')" class="px-2 py-1 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 rounded-lg border border-[#2A313E] transition">
+          + Bought HUBC
+        </button>
+        <button onclick="sendQuickPrompt('Deposited 100,000 into KTrade')" class="px-2 py-1 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 rounded-lg border border-[#2A313E] transition">
+          + Deposit 100k
+        </button>
+        <button onclick="sendQuickPrompt('Received MEBL dividend in bank')" class="px-2 py-1 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 rounded-lg border border-[#2A313E] transition">
+          + MEBL Div in Bank
+        </button>
+        <button onclick="sendQuickPrompt('Sent the MEBL dividend from bank to KTrade')" class="px-2 py-1 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 rounded-lg border border-[#2A313E] transition">
+          + Div &rarr; KTrade
+        </button>
+        <button onclick="sendQuickPrompt('What is our current portfolio net worth and cash balance?')" class="px-2 py-1 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 rounded-lg border border-[#2A313E] transition">
+          📊 Net Worth
+        </button>
+      </div>
+
+      <!-- Chat Messages Scroll Container -->
+      <div id="copilot-messages" class="flex-1 p-4 space-y-3 overflow-y-auto font-sans text-xs">
+        <!-- Default Welcome Message -->
+        <div class="p-3 bg-[#0B0D10] border border-[#1E232D] rounded-xl space-y-1.5 text-slate-300">
+          <div class="flex items-center gap-1.5 text-[10px] text-emerald-400 font-mono font-semibold">
+            <span>⚡</span> CO-INVESTOR COPILOT ONLINE
+          </div>
+          <p class="text-xs leading-relaxed text-slate-200">
+            Type natural-language ledger entries or portfolio questions. Trades, deposits, and dividends will automatically sync to Supabase and update dashboard KPIs in real-time.
+          </p>
+          <div class="text-[10px] text-slate-500 font-mono">
+            Examples: <i>"Bought 500 HUBC @ 118.50"</i> • <i>"Got 8,500 net MEBL dividend in bank"</i> • <i>"Sent MEBL dividend to KTrade"</i>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat Input Bar -->
+      <div class="p-3 border-t border-[#1E232D] bg-[#12151B]">
+        <form id="copilot-form" onsubmit="handleCopilotSubmit(event)" class="relative flex items-center">
+          <input
+            type="text"
+            id="copilot-input"
+            placeholder="Type command (e.g. Bought 500 HUBC at 118.50)..."
+            class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl pl-3.5 pr-10 py-2.5 text-white text-xs placeholder:text-slate-500 font-sans transition"
+            autocomplete="off"
+          />
+          <button
+            type="submit"
+            id="copilot-send-btn"
+            class="absolute right-1.5 p-1.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-black rounded-lg transition shadow-md shadow-emerald-500/20"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
+            </svg>
+          </button>
+        </form>
+        <p class="text-[10px] text-slate-500 text-center mt-1.5 font-mono">Press Enter to dispatch to Ledger & AI Copilot</p>
+      </div>
+    </aside>
   </div>
 
   <!-- MODAL: LOG BUY / SELL TRADE -->
@@ -1363,7 +1449,7 @@
 
     async function updateDivStatus(id, newStatus) {
       try {
-        await apiFetch(`/api/dashboard/dividends/${id}`, {
+        await apiFetch(`/api/dashboard/dividends/${id}/status`, {
           method: 'PATCH',
           body: JSON.stringify({ status: newStatus })
         });
@@ -1375,27 +1461,60 @@
       }
     }
 
-    // 4. INTELLIGENCE & WHATSAPP DATA LOADER
+    // 4. INTELLIGENCE & AGENT FEED DATA LOADER
     async function loadIntelligenceData() {
       try {
-        const data = await apiFetch('/api/dashboard/intelligence');
+        // Fetch both live feed and messages
+        const [feedRes, intelRes] = await Promise.all([
+          apiFetch('/api/dashboard/feed').catch(() => ({ agent_feed: [] })),
+          apiFetch('/api/dashboard/intelligence').catch(() => ({ messages: [], pending_signals: [], active_playbook: [] }))
+        ]);
 
-        // WhatsApp Messages Stream
-        const msgs = data.messages || [];
-        document.getElementById('whatsapp-feed-count').innerText = `${msgs.length} Messages`;
+        const agentEvents = feedRes.agent_feed || [];
+        const msgs = intelRes.messages || [];
+        document.getElementById('whatsapp-feed-count').innerText = `${agentEvents.length + msgs.length} Items`;
         const feedContainer = document.getElementById('whatsapp-feed-container');
 
-        if (!msgs.length) {
-          feedContainer.innerHTML = '<p class="text-xs text-slate-500 italic text-center py-10">No KTrade messages received yet.</p>';
-        } else {
-          feedContainer.innerHTML = msgs.map(m => {
+        const categoryBadges = {
+          DESK_MANAGER: 'bg-violet-500/20 text-violet-400 border border-violet-500/30',
+          KTRADE_WHATSAPP: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
+          YOUTUBE_MENTOR: 'bg-amber-500/20 text-amber-400 border border-amber-500/30',
+          MACRO_NEWS: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30',
+          SYSTEM_ALERT: 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+        };
+
+        let itemsHtml = '';
+
+        // Render agent_feed events
+        if (agentEvents.length) {
+          itemsHtml += agentEvents.map(ev => {
+            const dateStr = ev.created_at ? new Date(ev.created_at).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' }) : '--';
+            const badgeClass = categoryBadges[ev.category] || 'bg-slate-800 text-slate-400';
+            return `
+              <div class="p-3.5 bg-[#0B0D10] border border-[#1E232D] rounded-xl hover:border-[#2A313E] transition">
+                <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1.5">
+                  <div class="flex items-center gap-2">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase ${badgeClass}">${ev.category}</span>
+                    <span class="font-bold text-white truncate max-w-xs">${ev.title}</span>
+                  </div>
+                  <span class="text-slate-500 font-mono">${dateStr}</span>
+                </div>
+                <p class="text-xs text-slate-200 whitespace-pre-wrap leading-relaxed">${ev.content}</p>
+              </div>
+            `;
+          }).join('');
+        }
+
+        // Render WhatsApp raw messages
+        if (msgs.length) {
+          itemsHtml += msgs.map(m => {
             const dateStr = m.created_at ? new Date(m.created_at).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' }) : '--';
             const hasMedia = !!m.extension;
 
             return `
               <div class="p-3.5 bg-[#0B0D10] border border-[#1E232D] rounded-xl hover:border-[#2A313E] transition">
                 <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1.5">
-                  <span class="font-semibold text-emerald-400 font-mono">${m.sender || 'KTrade Mentor'}</span>
+                  <span class="font-semibold text-emerald-400 font-mono">${m.sender || 'KTrade Group'}</span>
                   <div class="flex items-center gap-2">
                     ${hasMedia ? `<span class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 text-[9px] font-mono uppercase">${m.extension}</span>` : ''}
                     <span class="text-slate-500 font-mono">${dateStr}</span>
@@ -1405,6 +1524,12 @@
               </div>
             `;
           }).join('');
+        }
+
+        if (!itemsHtml) {
+          feedContainer.innerHTML = '<p class="text-xs text-slate-500 italic text-center py-10">No feed events or WhatsApp messages recorded yet.</p>';
+        } else {
+          feedContainer.innerHTML = itemsHtml;
         }
 
         // Pending Signals
@@ -1703,9 +1828,163 @@
       }
     }
 
+    // CHAT COPILOT CONTROLLER
+    let copilotDrawerOpen = true;
+    function toggleCopilotDrawer() {
+      const drawer = document.getElementById('copilot-drawer');
+      if (!drawer) return;
+      copilotDrawerOpen = !copilotDrawerOpen;
+      if (copilotDrawerOpen) {
+        drawer.classList.remove('hidden');
+      } else {
+        drawer.classList.add('hidden');
+      }
+    }
+
+    async function loadChatHistory() {
+      try {
+        const data = await apiFetch('/api/dashboard/chat-history?limit=30');
+        const container = document.getElementById('copilot-messages');
+        if (!data.history || !data.history.length) return;
+        
+        container.innerHTML = '';
+        data.history.forEach(msg => {
+          appendChatMessage(msg.role, msg.content, msg.actions_taken, false);
+        });
+        scrollChatToBottom();
+      } catch (err) {
+        console.error('Failed to load chat history:', err);
+      }
+    }
+
+    function appendChatMessage(role, content, actions = [], scroll = true) {
+      const container = document.getElementById('copilot-messages');
+      if (!container) return;
+      const isUser = role === 'user';
+      
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-1`;
+
+      let badgesHtml = '';
+      if (actions && actions.length) {
+        badgesHtml = `
+          <div class="flex flex-wrap gap-1 mt-1.5">
+            ${actions.map(act => `
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase ${
+                act.status === 'FAILED' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
+                (act.type === 'TRADE' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
+                 act.type === 'CAPITAL' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' :
+                 'bg-violet-500/20 text-violet-300 border border-violet-500/30')
+              }">
+                ⚡ ${act.label || act.type}
+              </span>
+            `).join('')}
+          </div>
+        `;
+      }
+
+      msgDiv.innerHTML = `
+        <div class="max-w-[90%] rounded-xl p-3 text-xs leading-relaxed ${
+          isUser 
+            ? 'bg-[#1E232D] text-white border border-[#2A313E] rounded-br-none' 
+            : 'bg-[#0B0D10] text-slate-200 border border-[#1E232D] rounded-bl-none shadow-md'
+        }">
+          <p class="whitespace-pre-wrap">${escapeHtml(content)}</p>
+          ${badgesHtml}
+        </div>
+      `;
+
+      container.appendChild(msgDiv);
+      if (scroll) scrollChatToBottom();
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      const div = document.createElement('div');
+      div.innerText = text;
+      return div.innerHTML;
+    }
+
+    function scrollChatToBottom() {
+      const container = document.getElementById('copilot-messages');
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+
+    async function handleCopilotSubmit(e) {
+      if (e) e.preventDefault();
+      const input = document.getElementById('copilot-input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      input.value = '';
+      appendChatMessage('user', text);
+
+      const container = document.getElementById('copilot-messages');
+      const loaderId = 'loader-' + Date.now();
+      const loaderDiv = document.createElement('div');
+      loaderDiv.id = loaderId;
+      loaderDiv.className = 'flex items-start';
+      loaderDiv.innerHTML = `
+        <div class="bg-[#0B0D10] border border-[#1E232D] rounded-xl p-3 text-xs text-slate-400 flex items-center gap-2">
+          <div class="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+          <span class="font-mono text-[11px]">Processing ledger action...</span>
+        </div>
+      `;
+      container.appendChild(loaderDiv);
+      scrollChatToBottom();
+
+      try {
+        const res = await apiFetch('/api/dashboard/chat', {
+          method: 'POST',
+          body: JSON.stringify({ message: text })
+        });
+
+        const l = document.getElementById(loaderId);
+        if (l) l.remove();
+
+        appendChatMessage('assistant', res.reply || 'Command processed.', res.actions_taken || []);
+
+        // Immediately refresh dashboard metrics!
+        loadOverviewData();
+        if (currentTab === 'portfolio') loadPortfolioData();
+        if (currentTab === 'dividends') loadDividendsData();
+        if (currentTab === 'whatsapp') loadIntelligenceData();
+
+        if (res.actions_taken && res.actions_taken.length) {
+          showToast('Ledger updated successfully!', 'success');
+        }
+      } catch (err) {
+        const l = document.getElementById(loaderId);
+        if (l) l.remove();
+        appendChatMessage('assistant', `⚠️ Error executing command: ${err.message}`, [{ type: 'ERROR', label: 'FAILED', status: 'FAILED' }]);
+        showToast(`Copilot Error: ${err.message}`, 'error');
+      }
+    }
+
+    function sendQuickPrompt(promptText) {
+      const input = document.getElementById('copilot-input');
+      input.value = promptText;
+      handleCopilotSubmit();
+    }
+
+    function clearChatUI() {
+      const container = document.getElementById('copilot-messages');
+      container.innerHTML = `
+        <div class="p-3 bg-[#0B0D10] border border-[#1E232D] rounded-xl space-y-1.5 text-slate-300">
+          <div class="flex items-center gap-1.5 text-[10px] text-emerald-400 font-mono font-semibold">
+            <span>⚡</span> CO-INVESTOR COPILOT ONLINE
+          </div>
+          <p class="text-xs leading-relaxed text-slate-200">
+            Type natural-language ledger entries or portfolio questions. All updates sync immediately.
+          </p>
+        </div>
+      `;
+    }
+
     // INITIALIZATION & AUTO-REFRESH
     window.addEventListener('DOMContentLoaded', () => {
       loadOverviewData();
+      loadChatHistory();
       // Auto-refresh overview every 25 seconds
       setInterval(() => {
         if (currentTab === 'overview') loadOverviewData();
