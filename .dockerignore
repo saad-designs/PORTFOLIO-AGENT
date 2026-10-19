@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+*.log
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+whatsapp_bridge/.wwebjs_auth
+whatsapp_bridge/.wwebjs_cache
+whatsapp_bridge/node_modules
+cookies.txt
+temp_*
+*.vtt
+scratch
+.agents

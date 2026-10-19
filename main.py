@@ -69,9 +69,11 @@ atexit.register(cleanup_node_process)
 import rate_limiter
 rate_limiter.apply_global_rate_limits()
 
+import urllib.parse
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -380,6 +382,136 @@ async def ping():
 @app.head("/")
 async def health_check():
     return {"status": "alive", "service": "Portfolio Agent Watchdog"}
+
+@app.get("/whatsapp-qr", response_class=HTMLResponse)
+async def whatsapp_qr_page():
+    qr_data = None
+    status = "INITIALIZING"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    status = data.get("status", "INITIALIZING")
+                    qr_data = data.get("qr")
+    except Exception:
+        status = "CONNECTING"
+
+    if status == "READY":
+        content_html = """
+        <div class="card">
+            <div class="icon">✅</div>
+            <h2>WhatsApp Bridge Connected</h2>
+            <p class="subtitle">Live listener is actively authenticated and monitoring KTrade groups.</p>
+            <div class="badge badge-ready">STATUS: READY & MONITORING</div>
+        </div>
+        """
+        refresh_tag = '<meta http-equiv="refresh" content="30">'
+    elif status == "WAITING_FOR_QR" and qr_data:
+        encoded_qr = urllib.parse.quote(qr_data)
+        qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=320x320&data={encoded_qr}&margin=10"
+        content_html = f"""
+        <div class="card">
+            <div class="icon">📱</div>
+            <h2>Scan WhatsApp QR Code</h2>
+            <p class="subtitle">Open WhatsApp on your phone &rarr; <b>Linked Devices</b> &rarr; <b>Link a Device</b>.</p>
+            <div class="qr-container">
+                <img src="{qr_img_url}" alt="WhatsApp QR Code" class="qr-image" />
+            </div>
+            <p class="timer">This QR code auto-refreshes every 6 seconds until connected.</p>
+            <div class="badge badge-waiting">STATUS: WAITING FOR SCAN</div>
+        </div>
+        """
+        refresh_tag = '<meta http-equiv="refresh" content="6">'
+    else:
+        content_html = f"""
+        <div class="card">
+            <div class="icon">⏳</div>
+            <h2>Chromium Initializing...</h2>
+            <p class="subtitle">Headless browser is booting up. WhatsApp Web will generate a QR code momentarily.</p>
+            <div class="spinner"></div>
+            <div class="badge badge-init">STATUS: {status}</div>
+        </div>
+        """
+        refresh_tag = '<meta http-equiv="refresh" content="5">'
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    {refresh_tag}
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Bridge — Cloud Authentication</title>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+            color: #c9d1d9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }}
+        .card {{
+            background: #1c2128;
+            border: 1px solid #30363d;
+            border-radius: 16px;
+            padding: 36px 32px;
+            max-width: 440px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+        }}
+        .icon {{ font-size: 48px; margin-bottom: 12px; }}
+        h2 {{ color: #f0f6fc; font-size: 24px; font-weight: 600; margin-bottom: 8px; }}
+        .subtitle {{ color: #8b949e; font-size: 14px; line-height: 1.5; margin-bottom: 24px; }}
+        .qr-container {{
+            background: #ffffff;
+            padding: 16px;
+            border-radius: 12px;
+            display: inline-block;
+            margin-bottom: 18px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+        }}
+        .qr-image {{
+            display: block;
+            width: 280px;
+            height: 280px;
+            border-radius: 6px;
+        }}
+        .timer {{ color: #8b949e; font-size: 12px; margin-bottom: 20px; }}
+        .badge {{
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }}
+        .badge-ready {{ background: #238636; color: #ffffff; }}
+        .badge-waiting {{ background: #9e6a03; color: #f0f6fc; }}
+        .badge-init {{ background: #388bfd; color: #ffffff; }}
+        .spinner {{
+            width: 40px;
+            height: 40px;
+            margin: 24px auto;
+            border: 4px solid #30363d;
+            border-top: 4px solid #58a6ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }}
+        @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+    </style>
+</head>
+<body>
+    {content_html}
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
 
 class WebhookPayload(BaseModel):
     thread_id: str

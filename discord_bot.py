@@ -1413,8 +1413,7 @@ Call out ONLY the holdings that matter today. Are we bleeding on SYS? Is MEBL ca
         print(f"❌ Briefing Execution Error: {str(e)}")
         await log_error_to_discord(f"run_daily_briefing:\n{str(e)}")
 
-from youtube_transcript_api import YouTubeTranscriptApi
-import yt_dlp
+# Institutional research imports & constants
 
 
 

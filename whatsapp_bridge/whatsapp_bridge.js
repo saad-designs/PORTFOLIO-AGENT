@@ -6,22 +6,58 @@ const express = require('express');
 
 const app = express();
 app.use(express.json());
+let latestQr = null;
+let isClientReady = false;
+
 const client = new Client({
     authStrategy: new LocalAuth({
         dataPath: './.wwebjs_auth'
     }),
     puppeteer: {
         headless: true, // Silent background operation
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ],
         protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
     }
 });
 
 client.on('qr', (qr) => {
+    latestQr = qr;
     console.log('\n======================================================');
     console.log('🔗 [WhatsApp Bridge] SCAN THIS QR CODE');
     qrcode.generate(qr, {small: true});
     console.log('======================================================\n');
+});
+
+client.on('ready', async () => {
+    console.log('✅ [WhatsApp Bridge] Client authenticated. Live listener active.');
+    isClientReady = true;
+    latestQr = null;
+});
+
+client.on('authenticated', () => {
+    console.log('🔑 [WhatsApp Bridge] Session authenticated.');
+    latestQr = null;
+});
+
+client.on('auth_failure', (msg) => {
+    console.error('❌ [WhatsApp Bridge] Auth failure:', msg);
+    latestQr = null;
+    isClientReady = false;
+});
+
+client.on('disconnected', (reason) => {
+    console.warn('⚠️ [WhatsApp Bridge] Client disconnected:', reason);
+    isClientReady = false;
+    latestQr = null;
 });
 
 client.on('code', (code) => {
@@ -147,13 +183,6 @@ async function forwardMessageToPython(msg, chatName, chatId) {
     }
 }
 
-let isClientReady = false;
-
-client.on('ready', async () => {
-    console.log('✅ [WhatsApp Bridge] Client authenticated. Live listener active.');
-    isClientReady = true;
-});
-
 // Health check endpoint
 app.get('/ping', (req, res) => {
     if (isClientReady) {
@@ -161,6 +190,14 @@ app.get('/ping', (req, res) => {
     } else {
         res.status(503).json({ status: 'starting', message: 'Chromium is still booting...' });
     }
+});
+
+// Live QR code status endpoint for cloud browser rendering
+app.get('/qr', (req, res) => {
+    res.json({
+        status: isClientReady ? "READY" : (latestQr ? "WAITING_FOR_QR" : "INITIALIZING"),
+        qr: latestQr
+    });
 });
 
 // List all group chats with their serialized @g.us IDs (diagnostic)

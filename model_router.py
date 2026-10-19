@@ -1,5 +1,10 @@
 import os
 import sys
+# Force UTF-8 stdout on Windows cp1252 consoles
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 import time
 import re
 import json
@@ -173,9 +178,9 @@ GEMINI_TASK_ROUTING: Dict[str, List[str]] = {
         "gemini-3.5-flash-lite"
     ],
     TASK_MULTIMODAL: [
-        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
         "gemini-3.5-flash",
-        "gemini-3.5-flash-lite"
+        "gemini-3.8-flash"
     ]
 }
 

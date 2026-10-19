@@ -185,10 +185,13 @@ async def _run_youtube_sweep_inner():
             alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
             
             for mentor, text in transcripts.items():
-                print("DIAGNOSTIC: Sleeping for 65 seconds to clear Gemini RPM and Token limits...")
-                await asyncio.sleep(65)
-                prompt = SWEEP_FORMAT_PROMPT.format(mentor_name=mentor) + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
-                formatted_text = await generate_with_fallback(client, [prompt], task=TASK_FAST_INGESTION)
+                if "**Partner's Verdict" in text or "!rule" in text or "!target" in text:
+                    formatted_text = text
+                else:
+                    print("DIAGNOSTIC: Sleeping for 65 seconds to clear Gemini RPM and Token limits...")
+                    await asyncio.sleep(65)
+                    prompt = SWEEP_FORMAT_PROMPT.format(mentor_name=mentor) + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
+                    formatted_text = await generate_with_fallback(client, [prompt], task=TASK_FAST_INGESTION)
                 
                 # Extract rule if it exists
                 try:
