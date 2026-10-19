@@ -1,3 +1,9 @@
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 import psycopg2
 import psycopg2.extras
 import os
@@ -38,24 +44,44 @@ except ImportError:
 import aiohttp
 import json
 
-DISCORD_BRIEFS_WEBHOOK = os.getenv("DISCORD_BRIEFS_WEBHOOK") # Add to your .env
+DISCORD_BRIEFS_WEBHOOK = os.getenv("DISCORD_BRIEFS_WEBHOOK")
 
 async def send_learning_brief(source: str, title: str, summary: str):
-    """Fires an educational summary to Discord without triggering trading logic."""
-    if not DISCORD_BRIEFS_WEBHOOK:
-        return
-        
-    payload = {
-        "embeds": [{
-            "title": f"📚 {source} Intelligence: {title}",
-            "description": summary,
-            "color": 3447003, # Blue for informational
-            "footer": {"text": "Agent Ingestion Pipeline"}
-        }]
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        await session.post(DISCORD_BRIEFS_WEBHOOK, json=payload)
+    """
+    Fires an educational summary to persistent Agent Feed. Replaces legacy Discord webhooks.
+    """
+    cat = 'MACRO_NEWS'
+    s_lower = source.lower()
+    if 'youtube' in s_lower or 'mentor' in s_lower:
+        cat = 'YOUTUBE_MENTOR'
+    elif 'whatsapp' in s_lower or 'ktrade' in s_lower:
+        cat = 'KTRADE_WHATSAPP'
+    elif 'desk' in s_lower or 'manager' in s_lower:
+        cat = 'DESK_MANAGER'
+    elif 'alert' in s_lower or 'error' in s_lower or 'warning' in s_lower:
+        cat = 'SYSTEM_ALERT'
+
+    publish_agent_event(
+        category=cat,
+        title=f"📚 {source}: {title}",
+        content=summary,
+        metadata={"source": source, "title": title}
+    )
+
+    if DISCORD_BRIEFS_WEBHOOK:
+        try:
+            payload = {
+                "embeds": [{
+                    "title": f"📚 {source} Intelligence: {title}",
+                    "description": summary[:2000],
+                    "color": 3447003,
+                    "footer": {"text": "Agent Ingestion Pipeline"}
+                }]
+            }
+            async with aiohttp.ClientSession() as session:
+                await session.post(DISCORD_BRIEFS_WEBHOOK, json=payload, timeout=aiohttp.ClientTimeout(total=3))
+        except Exception:
+            pass
 
 def get_db_connection(db_url=None):
     if not PSYCOPG2_AVAILABLE or psycopg2 is None:
@@ -75,6 +101,131 @@ def get_db_connection(db_url=None):
                 time.sleep(1)
             else:
                 raise e
+
+def create_dashboard_and_ledger_tables():
+    """
+    Creates and migrates the 5 essential dashboard & financial ledger tables in Supabase:
+    1. agent_feed (with RLS enabled)
+    2. capital_ledger (with RLS enabled)
+    3. dividend_ledger (with RLS enabled)
+    4. trade_history (with RLS enabled)
+    5. chat_messages (with RLS enabled)
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # 1. agent_feed
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_feed (
+                id BIGSERIAL PRIMARY KEY,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_feed_category ON agent_feed (category);
+            CREATE INDEX IF NOT EXISTS idx_agent_feed_created ON agent_feed (created_at DESC);
+            ALTER TABLE agent_feed ENABLE ROW LEVEL SECURITY;
+        """)
+
+        # 2. capital_ledger
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS capital_ledger (
+                id BIGSERIAL PRIMARY KEY,
+                tx_type TEXT NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                notes TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS notes TEXT;
+            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS reference_note TEXT;
+            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS tx_date TIMESTAMPTZ DEFAULT NOW();
+            CREATE INDEX IF NOT EXISTS idx_capital_ledger_created ON capital_ledger (created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_capital_ledger_tx_type ON capital_ledger (tx_type);
+            ALTER TABLE capital_ledger ENABLE ROW LEVEL SECURITY;
+        """)
+
+        # 3. dividend_ledger
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dividend_ledger (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                shares_held NUMERIC(14,2) NOT NULL,
+                dps_gross NUMERIC(10,4) DEFAULT 0,
+                gross_amount NUMERIC(14,2) NOT NULL,
+                tax_rate_pct NUMERIC(5,2) DEFAULT 15.00,
+                tax_withheld NUMERIC(14,2) NOT NULL,
+                net_amount NUMERIC(14,2) NOT NULL,
+                status TEXT NOT NULL DEFAULT 'CREDITED_TO_BANK',
+                notes TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS notes TEXT;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+            ALTER TABLE dividend_ledger ALTER COLUMN dps_gross SET DEFAULT 0;
+            ALTER TABLE dividend_ledger ALTER COLUMN status SET DEFAULT 'CREDITED_TO_BANK';
+            CREATE INDEX IF NOT EXISTS idx_dividend_ledger_ticker ON dividend_ledger (ticker);
+            CREATE INDEX IF NOT EXISTS idx_dividend_ledger_status ON dividend_ledger (status);
+            CREATE INDEX IF NOT EXISTS idx_dividend_ledger_created ON dividend_ledger (created_at DESC);
+            ALTER TABLE dividend_ledger ENABLE ROW LEVEL SECURITY;
+        """)
+
+        # 4. trade_history
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                quantity NUMERIC(14,2) NOT NULL,
+                price NUMERIC(12,4) NOT NULL,
+                fees NUMERIC(12,2) DEFAULT 0.00,
+                net_total NUMERIC(14,2) NOT NULL,
+                notes TEXT,
+                executed_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS fees NUMERIC(12,2) DEFAULT 0.00;
+            ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS fees_and_tax NUMERIC(12,2) DEFAULT 0.00;
+            ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS notes TEXT;
+            CREATE INDEX IF NOT EXISTS idx_trade_history_ticker ON trade_history (ticker);
+            CREATE INDEX IF NOT EXISTS idx_trade_history_executed ON trade_history (executed_at DESC);
+            ALTER TABLE trade_history ENABLE ROW LEVEL SECURITY;
+        """)
+
+        # 5. chat_messages
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id BIGSERIAL PRIMARY KEY,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                actions_taken JSONB DEFAULT '[]'::jsonb,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages (created_at ASC);
+            ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
+        """)
+
+        # Permissive Policies for Service Role
+        for tbl in ["agent_feed", "capital_ledger", "dividend_ledger", "trade_history", "chat_messages"]:
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_policies WHERE tablename = '{tbl}' AND policyname = 'Allow service access on {tbl}'
+                    ) THEN
+                        CREATE POLICY "Allow service access on {tbl}" ON {tbl} FOR ALL USING (true);
+                    END IF;
+                END $$;
+            """)
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"⚠️ [Database Setup] Could not ensure dashboard tables: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
 def get_whatsapp_checkpoint() -> int:
     """Returns the unix timestamp of the last analyzed WhatsApp message."""
@@ -1777,6 +1928,30 @@ def get_complete_financial_summary() -> dict:
         portfolio_cost = 0.0
         holdings_detail = []
 
+        # Parallelize live price scraping across all holdings
+        price_map = {}
+        def _fetch_price_item(sym, default_p):
+            try:
+                cp, chg = get_live_price_and_change(sym)
+                if cp <= 0:
+                    cp = default_p
+                return cp, chg
+            except Exception:
+                return default_p, 0.0
+
+        if holdings_rows:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(holdings_rows), 10)) as executor:
+                future_map = {
+                    executor.submit(_fetch_price_item, r[0], float(r[2])): r[0]
+                    for r in holdings_rows
+                }
+                for fut in concurrent.futures.as_completed(future_map):
+                    ticker_name = future_map[fut]
+                    try:
+                        price_map[ticker_name] = fut.result()
+                    except Exception:
+                        price_map[ticker_name] = (0.0, 0.0)
+
         for row in holdings_rows:
             tick = row[0]
             shares = float(row[1])
@@ -1784,7 +1959,7 @@ def get_complete_financial_summary() -> dict:
             div_yield = float(row[3]) if row[3] else None
             sentiment = row[4] or "NEUTRAL"
             
-            curr_price, change_pct = get_live_price_and_change(tick)
+            curr_price, change_pct = price_map.get(tick, (avg_price, 0.0))
             if curr_price <= 0:
                 curr_price = avg_price
 

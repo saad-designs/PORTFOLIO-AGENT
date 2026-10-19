@@ -710,8 +710,11 @@ from model_router import get_langchain_llm, TASK_DEEP_REASONING, TASK_FAST_INGES
 # Primary heavy reasoning model with task-specific routing & quota circuit breaker
 llm = get_langchain_llm(TASK_DEEP_REASONING)
 
-# Instantiate the search tool
-search_tool = TavilySearch(name="web_search")
+# Instantiate the search tool safely
+try:
+    search_tool = TavilySearch(name="web_search") if os.getenv("TAVILY_API_KEY") else None
+except Exception:
+    search_tool = None
 
 class AddToWatchlistSchema(BaseModel):
     ticker: str = Field(description="The PSX ticker symbol to add to the coverage universe, e.g., 'ENGRO'")
@@ -894,7 +897,7 @@ async def calculate_dcf_valuation(ticker: str) -> str:
     )
 
 
-tools = [
+tools = [t for t in [
     calculate_dcf_valuation,
     get_stock_quote,
     generate_stock_chart,
@@ -912,7 +915,7 @@ tools = [
     set_price_alert,
     manual_email_sweep_tool,
     add_to_watchlist_tool,
-]
+] if t is not None]
 
 
 from langchain_core.messages import SystemMessage

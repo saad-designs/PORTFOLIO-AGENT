@@ -772,10 +772,6 @@ async def run_intraday_price_loop():
         if not alerts:
             return
             
-        alert_channel = bot.get_channel(PROSPECT_CHANNEL_ID)
-        if not alert_channel:
-            logger.warning(f"⚠️ No valid Discord alert_channel found (ID: {PROSPECT_CHANNEL_ID}). Alerts will only print to console.")
-            
         now_ts = datetime.now().timestamp()
         
         for alert in alerts:
@@ -908,7 +904,6 @@ async def run_daily_closing_briefing(bot_instance=None):
     logger.info(f"📊 [{datetime.now().strftime('%H:%M')}] Initializing Daily Closing Summary...")
     try:
         from portfolio_manager import generate_daily_closing_summary, record_daily_snapshot
-        import discord
         
         # Snapshot the data first
         await asyncio.to_thread(record_daily_snapshot)
@@ -919,29 +914,6 @@ async def run_daily_closing_briefing(bot_instance=None):
         if not summary:
             return
             
-        active_bot = bot_instance or bot
-        
-        alert_channel = active_bot.get_channel(ADMIN_CHANNEL_ID)
-        if not alert_channel:
-            try:
-                alert_channel = await active_bot.fetch_channel(ADMIN_CHANNEL_ID)
-            except Exception:
-                pass
-                
-        if not alert_channel:
-            logger.error(f"Could not find or fetch ADMIN_CHANNEL_ID: {ADMIN_CHANNEL_ID}")
-            return
-            
-        embed = discord.Embed(
-            title="📊 Daily Closing Summary & Liquidity Report",
-            color=0x2B2D31,
-            description="Market closed. Here is your portfolio snapshot:"
-        )
-        
-        embed.add_field(name="Total Portfolio Value", value=f"Rs. {summary['total_portfolio_value']:,.2f}", inline=False)
-        embed.add_field(name="Liquid Cash", value=f"Rs. {summary['liquid_cash']:,.2f}", inline=True)
-        embed.add_field(name="Equity Allocation %", value=f"{summary['equity_allocation_pct']:.1f}%", inline=True)
-        
         # Daily PnL
         pnl = summary.get("daily_pnl", 0.0)
         pnl_pct = summary.get("daily_pnl_pct", 0.0)
@@ -990,10 +962,6 @@ async def run_intraday_technical_scanner():
         
         if not alerts:
             return
-            
-        alert_channel = bot.get_channel(ADMIN_CHANNEL_ID)
-        if not alert_channel:
-            logger.warning(f"⚠️ No valid Discord admin channel found. Alerts will only print to console.")
             
         now_ts = datetime.now().timestamp()
         

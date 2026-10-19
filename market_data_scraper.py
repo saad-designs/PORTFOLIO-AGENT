@@ -161,6 +161,10 @@ async def fetch_psx_data_robust(url: str, is_json: bool = True, timeout: int = 1
                         
         except Exception as e:
             print(f"⚠️ [PSX Scraper] Error on attempt {attempt + 1}: {e}")
+            err_str = str(e).lower()
+            if "getaddrinfo failed" in err_str or "nodename nor servname provided" in err_str or "clientconnectorerror" in err_str:
+                print("🛑 [PSX Scraper] Host resolution / connection failed. Aborting retries immediately.")
+                break
             
         if attempt < max_retries - 1:
             await asyncio.sleep((2 ** attempt) + random.uniform(0.1, 1.5))

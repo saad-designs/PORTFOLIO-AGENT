@@ -327,6 +327,12 @@ async def run_startup_orchestration():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    try:
+        from portfolio_manager import create_dashboard_and_ledger_tables
+        create_dashboard_and_ledger_tables()
+    except Exception as db_init_err:
+        print(f"⚠️ [Startup] DB Table init error: {db_init_err}", flush=True)
+
     app.state.graph = await agent.get_agent()
     print("ℹ️ [Decommissioned] Discord bot is offline; persistent Agent Feed and Matte Dark Web Dashboard active.", flush=True)
 
