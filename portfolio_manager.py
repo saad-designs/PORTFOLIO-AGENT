@@ -65,7 +65,16 @@ def get_db_connection(db_url=None):
         )
     
     conn_str = db_url if db_url else DATABASE_URL
-    return psycopg2.connect(conn_str)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return psycopg2.connect(conn_str)
+        except psycopg2.OperationalError as e:
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(1)
+            else:
+                raise e
 
 def get_whatsapp_checkpoint() -> int:
     """Returns the unix timestamp of the last analyzed WhatsApp message."""
@@ -1211,3 +1220,650 @@ def fetch_supabase_equity_curve() -> pd.DataFrame:
         print(f"Error building equity curve: {e}")
         traceback.print_exc()
         return pd.DataFrame()
+
+
+# ====================================================================
+# PSX INVESTMENT, CAPITAL & 3-STAGE DIVIDEND ACCOUNTING ENGINE
+# ====================================================================
+
+def save_desk_manager_thought(thought: str):
+    """
+    Persists the Desk Manager's synthesis / macro thought to Supabase (agent_checkpoints)
+    and mirrors to local disk (memory_cache/proactive_thought.txt).
+    Prevents ephemeral cloud disk wipes from losing the latest memorandum.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_checkpoints (key, value, updated_at)
+            VALUES ('proactive_thought', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+        """, (thought,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("💾 [Desk Manager] Saved memorandum to Supabase agent_checkpoints.")
+    except Exception as e:
+        print(f"⚠️ [Desk Manager] Error saving thought to Supabase: {e}")
+
+    try:
+        os.makedirs("memory_cache", exist_ok=True)
+        with open("memory_cache/proactive_thought.txt", "w", encoding="utf-8") as f:
+            f.write(f"Proactive thought generated at {datetime.datetime.now()}:\n{thought}")
+    except Exception as f_err:
+        print(f"⚠️ [Desk Manager] Disk cache mirror write failed: {f_err}")
+
+def get_desk_manager_thought() -> str:
+    """Retrieves the latest Desk Manager memorandum from Supabase or disk cache."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'proactive_thought'")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0]:
+            return str(row[0])
+    except Exception as e:
+        print(f"⚠️ [Desk Manager] Error reading thought from Supabase: {e}")
+
+    cache_path = "memory_cache/proactive_thought.txt"
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            pass
+    return "Desk Manager synthesis standing by. Run manual sweep to generate initial thesis."
+
+def record_capital_transaction(tx_type: str, amount: float, reference_note: str = None) -> dict:
+    """
+    Records cash moving in/out of KTrade & Bank in capital_ledger:
+    - DEPOSIT_TO_BROKER (Fresh capital deposited to KTrade)
+    - WITHDRAWAL_FROM_BROKER (Cash withdrawn from KTrade to personal bank)
+    - DIVIDEND_BANK_TO_BROKER (Reinvested dividend moved from bank account to KTrade)
+    - FEE_ADJUSTMENT (Broker fee / withholding / adjustment)
+    Also keeps legacy cash_ledger synchronized for uninterrupted automated execution.
+    """
+    import uuid
+    valid_types = {'DEPOSIT_TO_BROKER', 'WITHDRAWAL_FROM_BROKER', 'DIVIDEND_BANK_TO_BROKER', 'FEE_ADJUSTMENT'}
+    clean_type = tx_type.strip().upper()
+    if clean_type not in valid_types:
+        raise ValueError(f"Invalid tx_type: {tx_type}. Must be one of {valid_types}")
+
+    amt = float(amount)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO capital_ledger (tx_type, amount, reference_note, tx_date)
+            VALUES (%s, %s, %s, NOW())
+            RETURNING id, tx_type, amount, reference_note, tx_date;
+        """, (clean_type, amt, reference_note))
+        row = cur.fetchone()
+        
+        # Mirror to cash_ledger
+        cash_delta = amt if clean_type in {'DEPOSIT_TO_BROKER', 'DIVIDEND_BANK_TO_BROKER'} else (-amt if clean_type == 'WITHDRAWAL_FROM_BROKER' else amt)
+        user_id = os.getenv("DISCORD_USER_ID", "1536522727287164979")
+        cur.execute("""
+            INSERT INTO cash_ledger (transaction_id, discord_user_id, transaction_type, amount, created_at)
+            VALUES (%s, %s, %s, %s, NOW())
+        """, (str(uuid.uuid4()), user_id, clean_type, cash_delta))
+        
+        conn.commit()
+        return {
+            "id": row[0],
+            "tx_type": row[1],
+            "amount": float(row[2]),
+            "reference_note": row[3],
+            "tx_date": row[4].isoformat() if row[4] else None
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+def record_dividend(
+    ticker: str,
+    shares_held: float,
+    dps_gross: float,
+    tax_rate_pct: float = 15.00,
+    ex_date: str = None,
+    payment_date: str = None,
+    status: str = 'ENTITLED',
+    notes: str = None
+) -> dict:
+    """
+    Tracks the exact PSX Dividend Lifecycle:
+    ANNOUNCED -> ENTITLED (Pending Payout) -> CREDITED_TO_BANK (15% WHT deducted) -> SENT_TO_KTRADE (Reinvested)
+    """
+    from utils import normalize_ticker
+    clean_ticker = normalize_ticker(ticker)
+    shares = float(shares_held)
+    dps = float(dps_gross)
+    tax_rate = float(tax_rate_pct) if tax_rate_pct is not None else 15.00
+    
+    gross_amount = round(shares * dps, 2)
+    tax_withheld = round(gross_amount * (tax_rate / 100.0), 2)
+    net_amount = round(gross_amount - tax_withheld, 2)
+    clean_status = status.strip().upper() if status else 'ENTITLED'
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO dividend_ledger (
+                ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
+                tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            RETURNING id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
+                      tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at;
+        """, (
+            clean_ticker, shares, dps, gross_amount, tax_rate,
+            tax_withheld, net_amount, ex_date, payment_date, clean_status, notes
+        ))
+        row = cur.fetchone()
+        conn.commit()
+        
+        # If created directly with status 'SENT_TO_KTRADE', credit capital ledger immediately
+        if clean_status == 'SENT_TO_KTRADE':
+            record_capital_transaction(
+                tx_type='DIVIDEND_BANK_TO_BROKER',
+                amount=net_amount,
+                reference_note=f"Reinvested Dividend #{row[0]}: {clean_ticker} ({shares} shs @ Rs. {dps})"
+            )
+
+        return {
+            "id": row[0],
+            "ticker": row[1],
+            "shares_held": float(row[2]),
+            "dps_gross": float(row[3]),
+            "gross_amount": float(row[4]),
+            "tax_rate_pct": float(row[5]),
+            "tax_withheld": float(row[6]),
+            "net_amount": float(row[7]),
+            "ex_date": str(row[8]) if row[8] else None,
+            "payment_date": str(row[9]) if row[9] else None,
+            "status": row[10],
+            "notes": row[11],
+            "created_at": row[12].isoformat() if row[12] else None
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+def update_dividend_status(dividend_id: int, new_status: str) -> dict:
+    """
+    Transitions dividend across lifecycle states.
+    CRITICAL REALITY LOGIC:
+    When new_status is 'SENT_TO_KTRADE', automatically inserts a corresponding
+    'DIVIDEND_BANK_TO_BROKER' entry into capital_ledger and increments available KTrade cash!
+    """
+    valid_statuses = {'ANNOUNCED', 'ENTITLED', 'CREDITED_TO_BANK', 'SENT_TO_KTRADE'}
+    clean_status = new_status.strip().upper()
+    if clean_status not in valid_statuses:
+        raise ValueError(f"Invalid dividend status: {new_status}. Must be one of {valid_statuses}")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, ticker, shares_held, dps_gross, net_amount, status
+            FROM dividend_ledger
+            WHERE id = %s
+        """, (dividend_id,))
+        existing = cur.fetchone()
+        if not existing:
+            raise ValueError(f"Dividend #{dividend_id} not found.")
+
+        old_status = existing[5]
+        ticker = existing[1]
+        shares = float(existing[2])
+        dps = float(existing[3])
+        net_amount = float(existing[4])
+
+        cur.execute("""
+            UPDATE dividend_ledger
+            SET status = %s
+            WHERE id = %s
+            RETURNING id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
+                      tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at;
+        """, (clean_status, dividend_id))
+        row = cur.fetchone()
+        conn.commit()
+
+        # If transitioning to SENT_TO_KTRADE and not already transferred, inject into capital_ledger!
+        if clean_status == 'SENT_TO_KTRADE' and old_status != 'SENT_TO_KTRADE':
+            cur.execute("""
+                SELECT id FROM capital_ledger 
+                WHERE tx_type = 'DIVIDEND_BANK_TO_BROKER' AND reference_note LIKE %s
+            """, (f"%Dividend #{dividend_id}:%",))
+            cap_exists = cur.fetchone()
+            if not cap_exists:
+                record_capital_transaction(
+                    tx_type='DIVIDEND_BANK_TO_BROKER',
+                    amount=net_amount,
+                    reference_note=f"Reinvested Dividend #{dividend_id}: {ticker} ({shares} shs @ Rs. {dps})"
+                )
+                print(f"💰 [Dividend Ledger] Automatically transferred Net Dividend Rs. {net_amount} to KTrade Available Cash.")
+
+        return {
+            "id": row[0],
+            "ticker": row[1],
+            "shares_held": float(row[2]),
+            "dps_gross": float(row[3]),
+            "gross_amount": float(row[4]),
+            "tax_rate_pct": float(row[5]),
+            "tax_withheld": float(row[6]),
+            "net_amount": float(row[7]),
+            "ex_date": str(row[8]) if row[8] else None,
+            "payment_date": str(row[9]) if row[9] else None,
+            "status": row[10],
+            "notes": row[11],
+            "created_at": row[12].isoformat() if row[12] else None
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+def record_trade(
+    ticker: str,
+    side: str,
+    quantity: float,
+    price: float,
+    fees_and_tax: float = 0.00,
+    notes: str = None
+) -> dict:
+    """
+    Logs BUY / SELL trade in trade_history, updates portfolio_holdings weighted average cost,
+    and reflects trade cash flow in cash_ledger.
+    """
+    from utils import normalize_ticker
+    clean_ticker = normalize_ticker(ticker)
+    clean_side = side.strip().upper()
+    if clean_side not in {'BUY', 'SELL'}:
+        raise ValueError("Trade side must be 'BUY' or 'SELL'.")
+
+    qty = float(quantity)
+    prc = float(price)
+    fees = float(fees_and_tax) if fees_and_tax is not None else 0.00
+    gross = round(qty * prc, 2)
+    net_total = round(gross + fees if clean_side == 'BUY' else gross - fees, 2)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # 1. Insert into trade_history
+        cur.execute("""
+            INSERT INTO trade_history (ticker, side, quantity, price, fees_and_tax, net_total, executed_at, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s)
+            RETURNING id, ticker, side, quantity, price, fees_and_tax, net_total, executed_at, notes;
+        """, (clean_ticker, clean_side, qty, prc, fees, net_total, notes))
+        t_row = cur.fetchone()
+
+        # 2. Update portfolio_holdings
+        cur.execute("""
+            SELECT id, shares, avg_buy_price FROM portfolio_holdings WHERE ticker = %s
+        """, (clean_ticker,))
+        existing_h = cur.fetchone()
+
+        if clean_side == 'BUY':
+            if existing_h:
+                old_shares = float(existing_h[1])
+                old_avg = float(existing_h[2])
+                new_shares = old_shares + qty
+                new_avg = round(((old_shares * old_avg) + (qty * prc)) / new_shares, 4) if new_shares > 0 else prc
+                cur.execute("""
+                    UPDATE portfolio_holdings
+                    SET shares = %s, avg_buy_price = %s, updated_at = NOW()
+                    WHERE id = %s
+                """, (new_shares, new_avg, existing_h[0]))
+            else:
+                cur.execute("""
+                    INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                """, (clean_ticker, qty, prc))
+            
+            # Cash flow deduction
+            record_capital_transaction('FEE_ADJUSTMENT', -net_total, f"Trade Execution: BUY {qty} {clean_ticker} @ {prc}")
+
+        elif clean_side == 'SELL':
+            if existing_h:
+                old_shares = float(existing_h[1])
+                new_shares = max(0.0, old_shares - qty)
+                cur.execute("""
+                    UPDATE portfolio_holdings
+                    SET shares = %s, updated_at = NOW()
+                    WHERE id = %s
+                """, (new_shares, existing_h[0]))
+            
+            # Cash flow credit
+            record_capital_transaction('FEE_ADJUSTMENT', net_total, f"Trade Execution: SELL {qty} {clean_ticker} @ {prc}")
+
+        conn.commit()
+        return {
+            "id": t_row[0],
+            "ticker": t_row[1],
+            "side": t_row[2],
+            "quantity": float(t_row[3]),
+            "price": float(t_row[4]),
+            "fees_and_tax": float(t_row[5]),
+            "net_total": float(t_row[6]),
+            "executed_at": t_row[7].isoformat() if t_row[7] else None,
+            "notes": t_row[8]
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+def get_complete_financial_summary() -> dict:
+    """
+    Computes complete PSX investment summary, capital accounting, and live mark-to-market valuations.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # 1. Capital Ledger Summary
+        cur.execute("""
+            SELECT 
+                COALESCE(SUM(CASE WHEN tx_type = 'DEPOSIT_TO_BROKER' THEN amount WHEN tx_type = 'WITHDRAWAL_FROM_BROKER' THEN -amount ELSE 0 END), 0) as fresh_capital,
+                COALESCE(SUM(CASE WHEN tx_type = 'DIVIDEND_BANK_TO_BROKER' THEN amount ELSE 0 END), 0) as reinvested_divs
+            FROM capital_ledger;
+        """)
+        cap_row = cur.fetchone()
+        fresh_capital = float(cap_row[0]) if cap_row else 0.0
+        reinvested_divs = float(cap_row[1]) if cap_row else 0.0
+
+        # 2. Available Cash Balance
+        cur.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger;")
+        cash_row = cur.fetchone()
+        available_cash = float(cash_row[0]) if cash_row else 0.0
+
+        # 3. Dividend Ledger Summary
+        cur.execute("""
+            SELECT 
+                COALESCE(SUM(gross_amount), 0) as total_gross,
+                COALESCE(SUM(tax_withheld), 0) as total_tax,
+                COALESCE(SUM(CASE WHEN status = 'CREDITED_TO_BANK' THEN net_amount ELSE 0 END), 0) as in_bank,
+                COALESCE(SUM(CASE WHEN status = 'SENT_TO_KTRADE' THEN net_amount ELSE 0 END), 0) as reinvested,
+                COALESCE(SUM(CASE WHEN status IN ('ANNOUNCED', 'ENTITLED') THEN net_amount ELSE 0 END), 0) as pending
+            FROM dividend_ledger;
+        """)
+        div_row = cur.fetchone()
+        total_gross_div = float(div_row[0]) if div_row else 0.0
+        total_tax_wht = float(div_row[1]) if div_row else 0.0
+        net_div_bank = float(div_row[2]) if div_row else 0.0
+        net_div_reinvested = float(div_row[3]) if div_row else 0.0
+        pending_div = float(div_row[4]) if div_row else 0.0
+
+        # 4. Live Portfolio Holdings
+        cur.execute("""
+            SELECT ticker, shares, avg_buy_price, dividend_yield, research_sentiment
+            FROM portfolio_holdings
+            WHERE shares > 0
+            ORDER BY (shares * avg_buy_price) DESC;
+        """)
+        holdings_rows = cur.fetchall()
+
+        # Load KMI-30 Shariah status
+        kmi_set = set()
+        kmi_cache = os.path.join(os.path.dirname(__file__), "kmi30_cache.json")
+        if os.path.exists(kmi_cache):
+            try:
+                with open(kmi_cache, "r", encoding="utf-8") as f:
+                    kmi_data = json.load(f)
+                    if isinstance(kmi_data, list):
+                        kmi_set = set(kmi_data)
+                    elif isinstance(kmi_data, dict):
+                        kmi_set = set(kmi_data.get("tickers", []))
+            except Exception:
+                pass
+        if not kmi_set:
+            kmi_set = {"SYS", "HUBC", "LUCK", "FFC", "EFERT", "MEBL", "MARI", "OGDC", "PPL", "POL"}
+
+        portfolio_market_val = 0.0
+        portfolio_cost = 0.0
+        holdings_detail = []
+
+        for row in holdings_rows:
+            tick = row[0]
+            shares = float(row[1])
+            avg_price = float(row[2])
+            div_yield = float(row[3]) if row[3] else None
+            sentiment = row[4] or "NEUTRAL"
+            
+            curr_price, change_pct = get_live_price_and_change(tick)
+            if curr_price <= 0:
+                curr_price = avg_price
+
+            mv = round(shares * curr_price, 2)
+            cb = round(shares * avg_price, 2)
+            pnl = round(mv - cb, 2)
+            pnl_pct = round((pnl / cb * 100), 2) if cb > 0 else 0.0
+
+            portfolio_market_val += mv
+            portfolio_cost += cb
+
+            holdings_detail.append({
+                "ticker": tick,
+                "shares": shares,
+                "avg_price": avg_price,
+                "current_price": curr_price,
+                "change_pct": change_pct,
+                "market_value": mv,
+                "cost_basis": cb,
+                "unrealized_pnl": pnl,
+                "unrealized_pnl_pct": pnl_pct,
+                "dividend_yield": div_yield,
+                "sentiment": sentiment,
+                "is_kmi30": tick.upper() in kmi_set
+            })
+
+        for h in holdings_detail:
+            h["weight_pct"] = round((h["market_value"] / portfolio_market_val * 100), 2) if portfolio_market_val > 0 else 0.0
+
+        unrealized_pnl = round(portfolio_market_val - portfolio_cost, 2)
+        unrealized_pnl_pct = round((unrealized_pnl / portfolio_cost * 100), 2) if portfolio_cost > 0 else 0.0
+        net_worth = round(portfolio_market_val + available_cash, 2)
+        true_total_return = round((net_worth + net_div_bank) - fresh_capital, 2)
+        true_roi_pct = round((true_total_return / fresh_capital * 100), 2) if fresh_capital > 0 else 0.0
+
+        return {
+            "financial_kpis": {
+                "total_net_worth": net_worth,
+                "fresh_capital_invested": fresh_capital,
+                "ktrade_available_cash": round(available_cash, 2),
+                "portfolio_market_value": round(portfolio_market_val, 2),
+                "portfolio_cost_basis": round(portfolio_cost, 2),
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct": unrealized_pnl_pct,
+                "total_gross_dividends": total_gross_div,
+                "total_wht_tax_paid": total_tax_wht,
+                "net_dividends_in_bank": net_div_bank,
+                "net_dividends_reinvested": net_div_reinvested,
+                "pending_dividends": pending_div,
+                "true_total_return": true_total_return,
+                "true_roi_pct": true_roi_pct
+            },
+            "holdings": holdings_detail,
+            "holdings_count": len(holdings_detail)
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+def get_all_dividends(limit: int = 50) -> list[dict]:
+    """Retrieves all rows from dividend_ledger ordered by created_at DESC."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
+                   tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at
+            FROM dividend_ledger
+            ORDER BY created_at DESC
+            LIMIT %s;
+        """, (limit,))
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "ticker": r[1],
+                "shares_held": float(r[2]),
+                "dps_gross": float(r[3]),
+                "gross_amount": float(r[4]),
+                "tax_rate_pct": float(r[5]),
+                "tax_withheld": float(r[6]),
+                "net_amount": float(r[7]),
+                "ex_date": str(r[8]) if r[8] else None,
+                "payment_date": str(r[9]) if r[9] else None,
+                "status": r[10],
+                "notes": r[11],
+                "created_at": r[12].isoformat() if r[12] else None
+            }
+            for r in rows
+        ]
+    finally:
+        cur.close()
+        conn.close()
+
+def get_capital_ledger_entries(limit: int = 50) -> list[dict]:
+    """Retrieves recent cash transactions from capital_ledger."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, tx_type, amount, reference_note, tx_date
+            FROM capital_ledger
+            ORDER BY tx_date DESC
+            LIMIT %s;
+        """, (limit,))
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "tx_type": r[1],
+                "amount": float(r[2]),
+                "reference_note": r[3],
+                "tx_date": r[4].isoformat() if r[4] else None
+            }
+            for r in rows
+        ]
+    finally:
+        cur.close()
+        conn.close()
+
+def get_trade_history_entries(limit: int = 50) -> list[dict]:
+    """Retrieves executed trade audit trail from trade_history."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, ticker, side, quantity, price, fees_and_tax, net_total, executed_at, notes
+            FROM trade_history
+            ORDER BY executed_at DESC
+            LIMIT %s;
+        """, (limit,))
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "ticker": r[1],
+                "side": r[2],
+                "quantity": float(r[3]),
+                "price": float(r[4]),
+                "fees_and_tax": float(r[5]),
+                "net_total": float(r[6]),
+                "executed_at": r[7].isoformat() if r[7] else None,
+                "notes": r[8]
+            }
+            for r in rows
+        ]
+    finally:
+        cur.close()
+        conn.close()
+
+def save_desk_manager_thought(thought_text: str):
+    """
+    Saves Desk Manager synthesis memorandum into Supabase agent_checkpoints
+    and mirrors to local memory_cache/proactive_thought.txt.
+    Immune to cloud container ephemeral disk wipes.
+    """
+    if not thought_text:
+        return
+    # 1. Mirror to local disk
+    try:
+        os.makedirs("memory_cache", exist_ok=True)
+        with open("memory_cache/proactive_thought.txt", "w", encoding="utf-8") as f:
+            f.write(thought_text)
+    except Exception as e:
+        print(f"⚠️ [Memory Cache] Failed writing local proactive_thought.txt: {e}")
+
+    # 2. Persist to Supabase agent_checkpoints (jsonb format)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_checkpoints (key, value, updated_at)
+            VALUES ('desk_manager_proactive_thought', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+        """, (json.dumps({"thought": thought_text, "saved_at": datetime.datetime.now().isoformat()}),))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("💾 [Supabase] Desk Manager memorandum successfully persisted to agent_checkpoints.")
+    except Exception as e:
+        print(f"❌ [Supabase] Failed persisting Desk Manager thought: {e}")
+
+def get_desk_manager_thought() -> str:
+    """
+    Retrieves the latest Desk Manager synthesis memorandum.
+    Checks Supabase agent_checkpoints first (cloud safe), then falls back to local disk.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'desk_manager_proactive_thought'")
+        res = cur.fetchone()
+        cur.close()
+        conn.close()
+        if res and res[0]:
+            val = res[0]
+            if isinstance(val, dict):
+                return val.get("thought", "")
+            elif isinstance(val, str):
+                try:
+                    parsed = json.loads(val)
+                    if isinstance(parsed, dict) and "thought" in parsed:
+                        return parsed["thought"]
+                    return parsed
+                except Exception:
+                    return val
+            return str(val)
+    except Exception as e:
+        print(f"⚠️ [Supabase] Could not fetch desk manager thought: {e}")
+
+    # Fallback to local file if available
+    try:
+        if os.path.exists("memory_cache/proactive_thought.txt"):
+            with open("memory_cache/proactive_thought.txt", "r", encoding="utf-8") as f:
+                return f.read()
+    except Exception:
+        pass
+
+    return "No Desk Manager synthesis memorandum generated yet."
+
+

@@ -1,0 +1,1717 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PSX Portfolio Co-Investor — Command Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              bg: '#0B0D10',
+              card: '#12151B',
+              cardHover: '#161A22',
+              border: '#1E232D',
+              borderLight: '#2A313E',
+              emerald: '#10B981',
+              amber: '#F59E0B',
+              crimson: '#EF4444',
+              violet: '#8B5CF6',
+              cyan: '#0EA5E9'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #0B0D10;
+      color: #E2E8F0;
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    .font-num {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0B0D10;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1E232D;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #2A313E;
+    }
+    .active-nav {
+      background: #1E232D;
+      color: #10B981;
+      border-left: 3px solid #10B981;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+      animation: fadeIn 0.2s ease-in-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .modal-backdrop {
+      background: rgba(11, 13, 16, 0.85);
+      backdrop-filter: blur(6px);
+    }
+  </style>
+</head>
+<body class="bg-[#0B0D10] text-slate-200 antialiased selection:bg-emerald-500/30 selection:text-emerald-300">
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- AUTH PIN / API KEY MODAL (If DASHBOARD_KEY is enabled) -->
+  <div id="auth-modal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-8 max-w-md w-full shadow-2xl text-center">
+      <div class="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center text-2xl mx-auto mb-4">
+        🔐
+      </div>
+      <h3 class="text-xl font-bold text-white mb-2">Cloud Authentication Required</h3>
+      <p class="text-sm text-slate-400 mb-6">Enter your security PIN or <code class="text-emerald-400 font-mono">DASHBOARD_KEY</code> to access trading execution and financial ledgers.</p>
+      <input type="password" id="auth-key-input" placeholder="Enter DASHBOARD_KEY / PIN" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-4 py-3 text-white text-center font-mono tracking-widest text-lg mb-4">
+      <button onclick="submitAuthKey()" class="w-full bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-black font-semibold py-3 rounded-xl transition duration-150 shadow-lg shadow-emerald-500/20">
+        Unlock Dashboard
+      </button>
+    </div>
+  </div>
+
+  <div class="flex min-h-screen">
+
+    <!-- LEFT SIDEBAR -->
+    <aside class="w-64 bg-[#12151B] border-r border-[#1E232D] flex flex-col justify-between shrink-0 sticky top-0 h-screen z-20">
+      <div>
+        <!-- Logo & Brand Header -->
+        <div class="p-5 border-b border-[#1E232D] flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-lg font-mono">
+            PSX
+          </div>
+          <div>
+            <h1 class="text-sm font-bold text-white tracking-wide">CO-INVESTOR</h1>
+            <p class="text-[11px] text-emerald-400 font-mono uppercase tracking-wider flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> KTrade Cloud Live
+            </p>
+          </div>
+        </div>
+
+        <!-- 6 Main Navigation Categories -->
+        <nav class="p-3 space-y-1">
+          <button onclick="switchTab('overview')" id="nav-overview" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition text-slate-400 hover:text-white hover:bg-[#1E232D] active-nav">
+            <span class="text-base">⚡</span> Command Overview
+          </button>
+          <button onclick="switchTab('portfolio')" id="nav-portfolio" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition text-slate-400 hover:text-white hover:bg-[#1E232D]">
+            <span class="text-base">💼</span> Portfolio & Trades
+          </button>
+          <button onclick="switchTab('dividends')" id="nav-dividends" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition text-slate-400 hover:text-white hover:bg-[#1E232D]">
+            <span class="text-base">💰</span> Dividends & Capital
+          </button>
+          <button onclick="switchTab('whatsapp')" id="nav-whatsapp" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition text-slate-400 hover:text-white hover:bg-[#1E232D]">
+            <span class="text-base">💬</span> KTrade WhatsApp & Signals
+          </button>
+          <button onclick="switchTab('research')" id="nav-research" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition text-slate-400 hover:text-white hover:bg-[#1E232D]">
+            <span class="text-base">🧠</span> Research & Mentors
+          </button>
+          <button onclick="switchTab('system')" id="nav-system" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition text-slate-400 hover:text-white hover:bg-[#1E232D]">
+            <span class="text-base">⚙️</span> Cloud & System Ops
+          </button>
+        </nav>
+      </div>
+
+      <!-- Bottom Status Pill in Sidebar -->
+      <div class="p-4 border-t border-[#1E232D] bg-[#0B0D10]/50">
+        <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+          <span>WhatsApp Bridge</span>
+          <span id="sidebar-bridge-status" class="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-400 font-semibold uppercase">Connecting</span>
+        </div>
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span>KTrade Available</span>
+          <span id="sidebar-ktrade-cash" class="font-mono text-emerald-400 font-semibold">Rs. --</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTENT AREA -->
+    <main class="flex-1 flex flex-col min-w-0 bg-[#0B0D10]">
+
+      <!-- TOP NAV / KPI HEADER BAR -->
+      <header class="h-16 border-b border-[#1E232D] bg-[#12151B]/70 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-10">
+        <div class="flex items-center gap-4">
+          <h2 id="page-title" class="text-base font-bold text-white tracking-wide">Command Overview</h2>
+          <span class="hidden md:inline-block w-px h-4 bg-[#1E232D]"></span>
+          <span id="live-clock" class="hidden md:inline-block text-xs font-mono text-slate-400">PKT --:--:--</span>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <!-- Quick Action Buttons -->
+          <button onclick="openTradeModal()" class="px-3 py-1.5 bg-[#1E232D] hover:bg-emerald-500/20 hover:text-emerald-400 hover:border-emerald-500/40 border border-[#2A313E] rounded-lg text-xs font-medium text-slate-200 transition flex items-center gap-1.5">
+            <span>+</span> Log Trade
+          </button>
+          <button onclick="openDividendModal()" class="px-3 py-1.5 bg-[#1E232D] hover:bg-amber-500/20 hover:text-amber-400 hover:border-amber-500/40 border border-[#2A313E] rounded-lg text-xs font-medium text-slate-200 transition flex items-center gap-1.5">
+            <span>+</span> Log Dividend
+          </button>
+          <button onclick="refreshCurrentTab()" title="Refresh Data" class="p-1.5 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] rounded-lg text-slate-300 text-xs transition">
+            🔄
+          </button>
+          <button id="auth-lock-btn" onclick="toggleAuthLock()" title="Auth Security" class="p-1.5 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] rounded-lg text-xs transition">
+            🔓
+          </button>
+        </div>
+      </header>
+
+      <!-- TAB 1: COMMAND OVERVIEW -->
+      <section id="tab-overview" class="tab-content active p-6 space-y-6">
+
+        <!-- Top KPI Metric Strip -->
+        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+          <!-- Net Worth -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Total Net Worth</p>
+            <p id="kpi-net-worth" class="text-lg font-bold text-white font-num mt-1">Rs. 0.00</p>
+            <p class="text-[10px] text-slate-500 mt-0.5">Portfolio + Cash</p>
+          </div>
+          <!-- Fresh Capital -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Fresh Capital</p>
+            <p id="kpi-fresh-capital" class="text-lg font-bold text-slate-200 font-num mt-1">Rs. 0.00</p>
+            <p class="text-[10px] text-slate-500 mt-0.5">Out-of-Pocket Deposits</p>
+          </div>
+          <!-- KTrade Cash -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">KTrade Cash</p>
+            <p id="kpi-ktrade-cash" class="text-lg font-bold text-emerald-400 font-num mt-1">Rs. 0.00</p>
+            <p class="text-[10px] text-slate-500 mt-0.5">Ready to Deploy</p>
+          </div>
+          <!-- Unrealized P&L -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Unrealized P&L</p>
+            <p id="kpi-unrealized-pnl" class="text-lg font-bold font-num mt-1 text-slate-200">Rs. 0.00</p>
+            <p id="kpi-unrealized-pct" class="text-[10px] text-slate-500 mt-0.5">0.00%</p>
+          </div>
+          <!-- Net Dividends Collected -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Net Divs Collected</p>
+            <p id="kpi-net-divs" class="text-lg font-bold text-teal-400 font-num mt-1">Rs. 0.00</p>
+            <p class="text-[10px] text-slate-500 mt-0.5">Bank + Reinvested</p>
+          </div>
+          <!-- Pending Dividends -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Pending Divs</p>
+            <p id="kpi-pending-divs" class="text-lg font-bold text-amber-400 font-num mt-1">Rs. 0.00</p>
+            <p class="text-[10px] text-slate-500 mt-0.5">Awaiting CDC Credit</p>
+          </div>
+          <!-- True Total Return -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">True ROI</p>
+            <p id="kpi-true-roi" class="text-lg font-bold font-num mt-1 text-slate-200">0.00%</p>
+            <p id="kpi-true-return" class="text-[10px] text-slate-500 mt-0.5 font-num">Rs. 0.00</p>
+          </div>
+        </div>
+
+        <!-- Middle Grid: Asset Allocation Breakdown & Desk Manager Synthesis -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          <!-- Portfolio Allocation Visualizer (1 Col) -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>📊</span> Allocation Breakdown
+                </h3>
+                <span id="allocation-count" class="text-xs font-mono text-slate-400">0 Holdings</span>
+              </div>
+              <div id="allocation-bars" class="space-y-3">
+                <p class="text-xs text-slate-500 italic py-6 text-center">Loading allocation weights...</p>
+              </div>
+            </div>
+            <div class="pt-4 mt-4 border-t border-[#1E232D] flex items-center justify-between text-xs text-slate-400">
+              <span>Stock Holdings Value</span>
+              <span id="allocation-total-stock" class="font-mono text-white font-semibold">Rs. 0.00</span>
+            </div>
+          </div>
+
+          <!-- Desk Manager Proactive Thought Memorandum (2 Cols) -->
+          <div class="lg:col-span-2 bg-[#12151B] border border-[#1E232D] rounded-2xl p-6 flex flex-col">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-2.5">
+                <div class="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center text-sm font-bold">
+                  DM
+                </div>
+                <div>
+                  <h3 class="text-sm font-bold text-white">Desk Manager Synthesis Memorandum</h3>
+                  <p class="text-[11px] text-slate-400">Autonomous multi-agent macro thesis & capital allocation instructions</p>
+                </div>
+              </div>
+              <span class="px-2.5 py-1 rounded-full text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold">
+                CLOUD SYNCED
+              </span>
+            </div>
+            <div id="overview-desk-thought" class="mt-2 flex-1 bg-[#0B0D10] border border-[#1E232D] rounded-xl p-4 text-xs font-mono text-slate-300 whitespace-pre-wrap leading-relaxed max-h-72 overflow-y-auto">
+              Loading Desk Manager synthesis...
+            </div>
+            <div class="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+              <span>Source: LangGraph Macro Analyst & Ingestion Desk</span>
+              <button onclick="triggerSweep('desk_manager')" class="text-emerald-400 hover:text-emerald-300 font-medium">Re-synthesize Now &rarr;</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quick Top Holdings Mini-Table -->
+        <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span>💼</span> Active Positions Snapshot
+            </h3>
+            <button onclick="switchTab('portfolio')" class="text-xs text-emerald-400 hover:text-emerald-300 font-medium">View All Holdings &rarr;</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead>
+                <tr class="text-slate-400 border-b border-[#1E232D] uppercase tracking-wider text-[10px]">
+                  <th class="pb-3 font-semibold">Ticker</th>
+                  <th class="pb-3 font-semibold">Shares</th>
+                  <th class="pb-3 font-semibold font-num text-right">Avg Cost</th>
+                  <th class="pb-3 font-semibold font-num text-right">Live Price</th>
+                  <th class="pb-3 font-semibold font-num text-right">Market Value</th>
+                  <th class="pb-3 font-semibold font-num text-right">Unrealized P&L</th>
+                  <th class="pb-3 font-semibold text-center">Sentiment</th>
+                </tr>
+              </thead>
+              <tbody id="overview-holdings-body" class="divide-y divide-[#1E232D]">
+                <tr><td colspan="7" class="py-6 text-center text-slate-500 italic">Loading active holdings...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: PORTFOLIO & TRADES -->
+      <section id="tab-portfolio" class="tab-content p-6 space-y-6">
+
+        <!-- Header Bar with Action -->
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+          <div>
+            <h3 class="text-base font-bold text-white">PSX Live Portfolio Holdings</h3>
+            <p class="text-xs text-slate-400 mt-0.5">Real-time mark-to-market valuations and Shariah KMI-30 compliance status</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <button onclick="openTradeModal()" class="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-black font-semibold text-xs rounded-xl transition flex items-center gap-1.5 shadow-lg shadow-emerald-500/20">
+              <span>+</span> Log Buy / Sell Trade
+            </button>
+          </div>
+        </div>
+
+        <!-- Holdings Detailed Table -->
+        <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead>
+                <tr class="text-slate-400 border-b border-[#1E232D] uppercase tracking-wider text-[10px]">
+                  <th class="pb-3 font-semibold">Ticker</th>
+                  <th class="pb-3 font-semibold font-num text-right">Shares</th>
+                  <th class="pb-3 font-semibold font-num text-right">Avg Buy (Rs.)</th>
+                  <th class="pb-3 font-semibold font-num text-right">Live Price (Rs.)</th>
+                  <th class="pb-3 font-semibold font-num text-right">Daily %</th>
+                  <th class="pb-3 font-semibold font-num text-right">Market Value</th>
+                  <th class="pb-3 font-semibold font-num text-right">Unrealized P&L</th>
+                  <th class="pb-3 font-semibold font-num text-right">Portfolio %</th>
+                  <th class="pb-3 font-semibold text-center">Sentiment</th>
+                  <th class="pb-3 font-semibold text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="portfolio-holdings-table" class="divide-y divide-[#1E232D]">
+                <tr><td colspan="10" class="py-6 text-center text-slate-500 italic">Loading portfolio holdings...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Trade History Ledger -->
+        <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h4 class="text-sm font-bold text-white">Executed Trade Audit Trail (`trade_history`)</h4>
+              <p class="text-xs text-slate-400 mt-0.5">Immutable record of every BUY and SELL order with fees and CGT deductions</p>
+            </div>
+            <span id="trades-count" class="text-xs font-mono text-slate-400">0 Trades</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead>
+                <tr class="text-slate-400 border-b border-[#1E232D] uppercase tracking-wider text-[10px]">
+                  <th class="pb-3 font-semibold">ID</th>
+                  <th class="pb-3 font-semibold">Date</th>
+                  <th class="pb-3 font-semibold">Ticker</th>
+                  <th class="pb-3 font-semibold">Side</th>
+                  <th class="pb-3 font-semibold font-num text-right">Quantity</th>
+                  <th class="pb-3 font-semibold font-num text-right">Price (Rs.)</th>
+                  <th class="pb-3 font-semibold font-num text-right">Fees & Tax (Rs.)</th>
+                  <th class="pb-3 font-semibold font-num text-right">Net Total (Rs.)</th>
+                  <th class="pb-3 font-semibold">Notes</th>
+                </tr>
+              </thead>
+              <tbody id="trade-history-table" class="divide-y divide-[#1E232D]">
+                <tr><td colspan="9" class="py-6 text-center text-slate-500 italic">Loading trade history...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: DIVIDENDS & CAPITAL LEDGER -->
+      <section id="tab-dividends" class="tab-content p-6 space-y-6">
+
+        <!-- PSX 3-Stage Dividend Explanation Banner -->
+        <div class="bg-gradient-to-r from-emerald-950/30 via-[#12151B] to-amber-950/20 border border-[#1E232D] rounded-2xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div>
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span>🇵🇰</span> PSX CDC 3-Stage Dividend Settlement Engine
+            </h3>
+            <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+              Dividends never automatically enter broker trading balances. They are credited to your <b>bank account</b> via CDC e-Dividend mandate (15% Filer WHT deducted). Only when you transfer cash into KTrade should your trading balance increment.
+            </p>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button onclick="openDividendModal()" class="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 active:scale-[0.99] text-black font-semibold text-xs rounded-xl transition shadow-lg shadow-amber-500/20">
+              + Log Dividend
+            </button>
+            <button onclick="openCapitalModal()" class="px-3.5 py-2 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] text-slate-200 font-medium text-xs rounded-xl transition">
+              + Capital Deposit/Withdrawal
+            </button>
+          </div>
+        </div>
+
+        <!-- 4 Dividend KPI Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <!-- Pending Entitlements -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-amber-400 uppercase tracking-wider">1. Pending CDC Credit</span>
+              <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+            </div>
+            <p id="div-kpi-pending" class="text-xl font-bold font-num text-white mt-2">Rs. 0.00</p>
+            <p class="text-[11px] text-slate-400 mt-1">Status: <code class="text-amber-400">ENTITLED</code></p>
+          </div>
+          <!-- Credited to Bank -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-emerald-400 uppercase tracking-wider">2. Received in Bank</span>
+              <span class="text-base">🏦</span>
+            </div>
+            <p id="div-kpi-bank" class="text-xl font-bold font-num text-white mt-2">Rs. 0.00</p>
+            <p class="text-[11px] text-slate-400 mt-1">Status: <code class="text-emerald-400">CREDITED_TO_BANK</code></p>
+          </div>
+          <!-- Reinvested to KTrade -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-violet-400 uppercase tracking-wider">3. Reinvested to Broker</span>
+              <span class="text-base">🔄</span>
+            </div>
+            <p id="div-kpi-reinvested" class="text-xl font-bold font-num text-white mt-2">Rs. 0.00</p>
+            <p class="text-[11px] text-slate-400 mt-1">Status: <code class="text-violet-400">SENT_TO_KTRADE</code></p>
+          </div>
+          <!-- WHT Tax Deducted -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-xl p-4">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-slate-400 uppercase tracking-wider">Total WHT Tax Paid</span>
+              <span class="text-base">🧾</span>
+            </div>
+            <p id="div-kpi-tax" class="text-xl font-bold font-num text-rose-400 mt-2">Rs. 0.00</p>
+            <p class="text-[11px] text-slate-400 mt-1">15% Filer / 30% Non-Filer</p>
+          </div>
+        </div>
+
+        <!-- Dividend Ledger Table with 1-Click Action Buttons -->
+        <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h4 class="text-sm font-bold text-white">PSX Dividend Lifecycle Tracker (`dividend_ledger`)</h4>
+              <p class="text-xs text-slate-400 mt-0.5">Click actions to advance payouts from Entitlement &rarr; Bank Credit &rarr; KTrade Cash Transfer</p>
+            </div>
+            <span id="dividends-count" class="text-xs font-mono text-slate-400">0 Records</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead>
+                <tr class="text-slate-400 border-b border-[#1E232D] uppercase tracking-wider text-[10px]">
+                  <th class="pb-3 font-semibold">ID</th>
+                  <th class="pb-3 font-semibold">Ticker</th>
+                  <th class="pb-3 font-semibold font-num text-right">Shares</th>
+                  <th class="pb-3 font-semibold font-num text-right">DPS (Rs.)</th>
+                  <th class="pb-3 font-semibold font-num text-right">Gross (Rs.)</th>
+                  <th class="pb-3 font-semibold font-num text-right">WHT (15%)</th>
+                  <th class="pb-3 font-semibold font-num text-right">Net Payout (Rs.)</th>
+                  <th class="pb-3 font-semibold">Payment Date</th>
+                  <th class="pb-3 font-semibold text-center">Status</th>
+                  <th class="pb-3 font-semibold text-center">One-Click Actions</th>
+                </tr>
+              </thead>
+              <tbody id="dividend-ledger-table" class="divide-y divide-[#1E232D]">
+                <tr><td colspan="10" class="py-6 text-center text-slate-500 italic">Loading dividend ledger...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Capital Ledger Table (Deposits & Withdrawals) -->
+        <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h4 class="text-sm font-bold text-white">Cash & Capital Ledger (`capital_ledger`)</h4>
+              <p class="text-xs text-slate-400 mt-0.5">Audit log of fresh cash injections, bank-to-broker dividend reinvestments, and withdrawals</p>
+            </div>
+            <span id="capital-count" class="text-xs font-mono text-slate-400">0 Entries</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead>
+                <tr class="text-slate-400 border-b border-[#1E232D] uppercase tracking-wider text-[10px]">
+                  <th class="pb-3 font-semibold">ID</th>
+                  <th class="pb-3 font-semibold">Date</th>
+                  <th class="pb-3 font-semibold">Transaction Type</th>
+                  <th class="pb-3 font-semibold font-num text-right">Amount (Rs.)</th>
+                  <th class="pb-3 font-semibold">Reference Note</th>
+                </tr>
+              </thead>
+              <tbody id="capital-ledger-table" class="divide-y divide-[#1E232D]">
+                <tr><td colspan="5" class="py-6 text-center text-slate-500 italic">Loading capital transactions...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: KTRADE WHATSAPP & SIGNALS -->
+      <section id="tab-whatsapp" class="tab-content p-6 space-y-6">
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          <!-- Live WhatsApp Group Feed (2 Cols) -->
+          <div class="lg:col-span-2 bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col h-[700px]">
+            <div class="flex items-center justify-between pb-3 border-b border-[#1E232D]">
+              <div class="flex items-center gap-3">
+                <span class="text-2xl">📱</span>
+                <div>
+                  <h3 class="text-sm font-bold text-white">KTrade Live WhatsApp Feed (`messages`)</h3>
+                  <p class="text-xs text-slate-400">Real-time group messages, chart uploads, research PDFs & broker calls</p>
+                </div>
+              </div>
+              <span id="whatsapp-feed-count" class="text-xs font-mono text-slate-400">0 Messages</span>
+            </div>
+
+            <!-- Messages Stream Container -->
+            <div id="whatsapp-feed-container" class="flex-1 overflow-y-auto space-y-3 py-4 pr-1">
+              <p class="text-xs text-slate-500 italic text-center py-10">Loading WhatsApp message stream...</p>
+            </div>
+          </div>
+
+          <!-- Pending Signals & Active Playbook (1 Col) -->
+          <div class="space-y-6">
+
+            <!-- Pending Signals Card -->
+            <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+              <div class="flex items-center justify-between mb-3">
+                <h4 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>🚨</span> Pending Trading Signals
+                </h4>
+                <span id="signals-count" class="text-xs font-mono text-slate-400">0 Signals</span>
+              </div>
+              <div id="pending-signals-container" class="space-y-2 max-h-72 overflow-y-auto">
+                <p class="text-xs text-slate-500 italic py-4 text-center">Loading pending signals...</p>
+              </div>
+            </div>
+
+            <!-- Active Playbook Rules Card -->
+            <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5">
+              <div class="flex items-center justify-between mb-3">
+                <h4 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>📘</span> Active Playbook Rules
+                </h4>
+                <span id="playbook-count" class="text-xs font-mono text-slate-400">0 Rules</span>
+              </div>
+              <div id="active-playbook-container" class="space-y-2 max-h-72 overflow-y-auto">
+                <p class="text-xs text-slate-500 italic py-4 text-center">Loading trading playbook...</p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 5: RESEARCH & MENTORS -->
+      <section id="tab-research" class="tab-content p-6 space-y-6">
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          <!-- YouTube Mentor Insights (`agent_knowledge`) -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col h-[650px]">
+            <div class="flex items-center justify-between pb-3 border-b border-[#1E232D]">
+              <div class="flex items-center gap-3">
+                <span class="text-2xl">📺</span>
+                <div>
+                  <h3 class="text-sm font-bold text-white">YouTube Mentor Transcripts & Insights</h3>
+                  <p class="text-xs text-slate-400">Transcribed via Gemini 3.5 & synthesized via Groq Llama 3.3</p>
+                </div>
+              </div>
+              <button onclick="triggerSweep('youtube')" class="px-2.5 py-1 bg-[#1E232D] hover:bg-emerald-500/20 hover:text-emerald-400 border border-[#2A313E] rounded-lg text-xs font-medium transition">
+                Sweep Videos
+              </button>
+            </div>
+            <div id="mentor-knowledge-container" class="flex-1 overflow-y-auto space-y-3 py-4">
+              <p class="text-xs text-slate-500 italic text-center py-10">Loading mentor knowledge...</p>
+            </div>
+          </div>
+
+          <!-- Institutional Broker Reports (`institutional_reports`) -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col h-[650px]">
+            <div class="flex items-center justify-between pb-3 border-b border-[#1E232D]">
+              <div class="flex items-center gap-3">
+                <span class="text-2xl">📑</span>
+                <div>
+                  <h3 class="text-sm font-bold text-white">Institutional Broker Research Reports</h3>
+                  <p class="text-xs text-slate-400">Parsed from AKD, Arif Habib, Topline, and KTrade PDFs</p>
+                </div>
+              </div>
+              <button onclick="triggerSweep('news')" class="px-2.5 py-1 bg-[#1E232D] hover:bg-emerald-500/20 hover:text-emerald-400 border border-[#2A313E] rounded-lg text-xs font-medium transition">
+                Sweep News
+              </button>
+            </div>
+            <div id="institutional-reports-container" class="flex-1 overflow-y-auto space-y-3 py-4">
+              <p class="text-xs text-slate-500 italic text-center py-10">Loading institutional reports...</p>
+            </div>
+          </div>
+
+        </div>
+
+      </section>
+
+      <!-- TAB 6: CLOUD & SYSTEM OPS -->
+      <section id="tab-system" class="tab-content p-6 space-y-6">
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          <!-- WhatsApp Cloud Bridge Diagnostic & Live QR (1 Col) -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col">
+            <div class="flex items-center justify-between pb-3 border-b border-[#1E232D]">
+              <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                <span>📱</span> WhatsApp Cloud Bridge
+              </h3>
+              <span id="system-bridge-badge" class="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-400 font-semibold uppercase">Connecting</span>
+            </div>
+
+            <!-- Bridge Diagnostic Info -->
+            <div class="mt-4 space-y-3 text-xs">
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Node.js Process:</span>
+                <span class="font-mono text-white">whatsapp_bridge.js (Port 3000)</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Puppeteer Low-RAM:</span>
+                <span class="font-mono text-emerald-400 font-semibold">--max-old-space-size=256</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Monitored KTrade Groups:</span>
+                <span id="system-monitored-groups-count" class="font-mono text-white">2 Groups</span>
+              </div>
+            </div>
+
+            <!-- Remote Live QR Code Container -->
+            <div class="mt-5 p-4 bg-[#0B0D10] border border-[#1E232D] rounded-xl flex flex-col items-center justify-center min-h-[280px]">
+              <div id="system-qr-box" class="text-center">
+                <p class="text-xs text-slate-400">Checking WhatsApp QR status...</p>
+              </div>
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-[#1E232D] flex items-center justify-between text-xs">
+              <span class="text-slate-500">Auto-refreshes every 5s</span>
+              <a href="/whatsapp-qr" target="_blank" class="text-emerald-400 hover:text-emerald-300 font-medium">Open Dedicated QR Page &rarr;</a>
+            </div>
+          </div>
+
+          <!-- AI Model Router & Multi-Key Cooldowns (1 Col) -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col">
+            <div class="flex items-center justify-between pb-3 border-b border-[#1E232D]">
+              <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                <span>🤖</span> AI Router & Circuit Breaker
+              </h3>
+              <span class="px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">Active</span>
+            </div>
+
+            <div class="mt-4 space-y-3 text-xs">
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Active Google API Key:</span>
+                <span id="system-active-key" class="font-mono text-emerald-400 font-semibold">Key #1</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Groq Llama 3.3 70B:</span>
+                <span id="model-status-groq" class="font-mono text-emerald-400">ONLINE (Fast)</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Gemini 3.5 Flash Lite:</span>
+                <span id="model-status-lite" class="font-mono text-emerald-400">ONLINE</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Gemini 3.5 Flash:</span>
+                <span id="model-status-flash" class="font-mono text-emerald-400">ONLINE</span>
+              </div>
+              <div class="flex items-center justify-between text-slate-400">
+                <span>Gemini 3.8 Flash:</span>
+                <span id="model-status-deep" class="font-mono text-emerald-400">ONLINE</span>
+              </div>
+            </div>
+
+            <div class="mt-5 p-4 bg-[#0B0D10] border border-[#1E232D] rounded-xl flex-1">
+              <h4 class="text-xs font-semibold text-slate-300 mb-2">Active Circuit Breaker Cooldowns:</h4>
+              <div id="system-cooldowns-list" class="space-y-1 text-xs font-mono text-slate-400">
+                <p class="text-emerald-400">✅ All models operational. Zero cooldowns.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Manual Trigger Pipelines & Sync Checkpoints (1 Col) -->
+          <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-5 flex flex-col justify-between">
+            <div>
+              <div class="pb-3 border-b border-[#1E232D]">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>⚡</span> Manual Background Sweeps
+                </h3>
+                <p class="text-xs text-slate-400 mt-0.5">Trigger sweeps on demand without waiting for cron intervals</p>
+              </div>
+
+              <div class="mt-4 space-y-2.5">
+                <button onclick="triggerSweep('business')" class="w-full flex items-center justify-between px-4 py-2.5 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] rounded-xl text-xs font-medium text-slate-200 transition">
+                  <span class="flex items-center gap-2"><span>💼</span> Business & Macro Sweep</span>
+                  <span class="text-emerald-400 font-mono">Trigger &rarr;</span>
+                </button>
+                <button onclick="triggerSweep('youtube')" class="w-full flex items-center justify-between px-4 py-2.5 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] rounded-xl text-xs font-medium text-slate-200 transition">
+                  <span class="flex items-center gap-2"><span>📺</span> YouTube Mentors Sweep</span>
+                  <span class="text-emerald-400 font-mono">Trigger &rarr;</span>
+                </button>
+                <button onclick="triggerSweep('news')" class="w-full flex items-center justify-between px-4 py-2.5 bg-[#1E232D] hover:bg-[#2A313E] border border-[#2A313E] rounded-xl text-xs font-medium text-slate-200 transition">
+                  <span class="flex items-center gap-2"><span>📰</span> Macro RSS News Sweep</span>
+                  <span class="text-emerald-400 font-mono">Trigger &rarr;</span>
+                </button>
+              </div>
+
+              <!-- Database Checkpoints Watermarks -->
+              <div class="mt-5">
+                <h4 class="text-xs font-semibold text-slate-300 mb-2">Supabase Sync Watermarks (`agent_checkpoints`):</h4>
+                <div id="system-checkpoints-list" class="space-y-1 text-xs font-mono text-slate-400 max-h-48 overflow-y-auto">
+                  <p class="text-slate-500 italic">Loading checkpoints...</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="pt-4 border-t border-[#1E232D] text-xs text-slate-500 text-center font-mono">
+              PSX Portfolio Co-Investor Core v2.5 (Cloud Edition)
+            </div>
+          </div>
+
+        </div>
+
+      </section>
+
+    </main>
+  </div>
+
+  <!-- MODAL: LOG BUY / SELL TRADE -->
+  <div id="trade-modal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-6 max-w-lg w-full shadow-2xl">
+      <div class="flex items-center justify-between mb-4 pb-3 border-b border-[#1E232D]">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <span>💼</span> Log PSX Buy / Sell Execution
+        </h3>
+        <button onclick="closeTradeModal()" class="text-slate-400 hover:text-white text-lg">&times;</button>
+      </div>
+
+      <form onsubmit="submitTrade(event)" class="space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Ticker Symbol</label>
+            <input type="text" id="trade-ticker" placeholder="e.g. SYS, HUBC" required class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono uppercase text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Side</label>
+            <select id="trade-side" onchange="calculateTradeNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Shares Quantity</label>
+            <input type="number" step="1" id="trade-qty" placeholder="500" required oninput="calculateTradeNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Price per Share (Rs.)</label>
+            <input type="number" step="0.01" id="trade-price" placeholder="450.50" required oninput="calculateTradeNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono text-sm">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Broker Commission + CDC + SST (Rs.)</label>
+          <input type="number" step="0.01" id="trade-fees" placeholder="35.00" value="0.00" oninput="calculateTradeNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono text-sm">
+        </div>
+
+        <!-- Calculated Net Total Preview -->
+        <div class="p-3 bg-[#0B0D10] border border-[#1E232D] rounded-xl flex items-center justify-between text-xs">
+          <span class="text-slate-400">Calculated Cash Impact:</span>
+          <span id="trade-net-preview" class="font-mono text-emerald-400 font-bold text-sm">Rs. 0.00</span>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Trade Notes / Strategy</label>
+          <input type="text" id="trade-notes" placeholder="e.g. Accumulation at 200 EMA support" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+        </div>
+
+        <div class="flex items-center justify-end gap-3 pt-3">
+          <button type="button" onclick="closeTradeModal()" class="px-4 py-2 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 text-xs rounded-xl font-medium transition">Cancel</button>
+          <button type="submit" class="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-black text-xs font-semibold rounded-xl transition shadow-lg shadow-emerald-500/20">Record Trade</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: LOG DIVIDEND -->
+  <div id="dividend-modal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-6 max-w-lg w-full shadow-2xl">
+      <div class="flex items-center justify-between mb-4 pb-3 border-b border-[#1E232D]">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <span>💰</span> Log PSX Dividend Announcement / Payout
+        </h3>
+        <button onclick="closeDividendModal()" class="text-slate-400 hover:text-white text-lg">&times;</button>
+      </div>
+
+      <form onsubmit="submitDividend(event)" class="space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Ticker</label>
+            <input type="text" id="div-ticker" placeholder="e.g. ENGRO" required class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono uppercase text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Shares Held</label>
+            <input type="number" step="1" id="div-shares" placeholder="1000" required oninput="calculateDividendNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono text-sm">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Gross DPS (Rs./share)</label>
+            <input type="number" step="0.01" id="div-dps" placeholder="12.50" required oninput="calculateDividendNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Withholding Tax (WHT)</label>
+            <select id="div-tax-rate" onchange="calculateDividendNet()" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+              <option value="15.00">15% Active Filer (Standard)</option>
+              <option value="30.00">30% Non-Filer</option>
+              <option value="0.00">0% Tax Exempt</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Calculated Dividend Breakdown Preview -->
+        <div class="p-3 bg-[#0B0D10] border border-[#1E232D] rounded-xl space-y-1 text-xs">
+          <div class="flex justify-between text-slate-400">
+            <span>Gross Dividend:</span>
+            <span id="div-gross-preview" class="font-mono text-white">Rs. 0.00</span>
+          </div>
+          <div class="flex justify-between text-rose-400">
+            <span>WHT Deducted:</span>
+            <span id="div-tax-preview" class="font-mono">-Rs. 0.00</span>
+          </div>
+          <div class="flex justify-between text-emerald-400 font-semibold pt-1 border-t border-[#1E232D]">
+            <span>Net CDC Bank Credit:</span>
+            <span id="div-net-preview" class="font-mono">Rs. 0.00</span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Ex-Dividend Date</label>
+            <input type="date" id="div-ex-date" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Payment Date (CDC Credit)</label>
+            <input type="date" id="div-pay-date" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Initial Status</label>
+          <select id="div-status" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+            <option value="ENTITLED">ENTITLED (Pending CDC Bank Credit)</option>
+            <option value="ANNOUNCED">ANNOUNCED (Before Ex-Date)</option>
+            <option value="CREDITED_TO_BANK">CREDITED_TO_BANK (Already in Bank Account)</option>
+            <option value="SENT_TO_KTRADE">SENT_TO_KTRADE (Directly Reinvested into Broker)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Notes</label>
+          <input type="text" id="div-notes" placeholder="e.g. Interim FY26 Q1 Payout" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+        </div>
+
+        <div class="flex items-center justify-end gap-3 pt-3">
+          <button type="button" onclick="closeDividendModal()" class="px-4 py-2 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 text-xs rounded-xl font-medium transition">Cancel</button>
+          <button type="submit" class="px-5 py-2 bg-amber-500 hover:bg-amber-600 active:scale-[0.99] text-black text-xs font-semibold rounded-xl transition shadow-lg shadow-amber-500/20">Log Dividend</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: LOG CAPITAL DEPOSIT / WITHDRAWAL -->
+  <div id="capital-modal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-[#12151B] border border-[#1E232D] rounded-2xl p-6 max-w-md w-full shadow-2xl">
+      <div class="flex items-center justify-between mb-4 pb-3 border-b border-[#1E232D]">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <span>💵</span> Log Capital Deposit / Withdrawal
+        </h3>
+        <button onclick="closeCapitalModal()" class="text-slate-400 hover:text-white text-lg">&times;</button>
+      </div>
+
+      <form onsubmit="submitCapital(event)" class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Transaction Type</label>
+          <select id="cap-type" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+            <option value="DEPOSIT_TO_BROKER">Deposit Fresh Capital into KTrade (Increases Cash)</option>
+            <option value="WITHDRAWAL_FROM_BROKER">Withdraw Cash from KTrade to Bank (Decreases Cash)</option>
+            <option value="DIVIDEND_BANK_TO_BROKER">Manual Dividend Reinvestment (Bank &rarr; KTrade)</option>
+            <option value="FEE_ADJUSTMENT">Fee Adjustment / Miscellaneous</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Amount (Rs.)</label>
+          <input type="number" step="0.01" id="cap-amount" placeholder="50000.00" required class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white font-mono text-sm">
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Reference Note</label>
+          <input type="text" id="cap-note" placeholder="e.g. IBFT from Meezan Bank to KTrade" class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl px-3 py-2 text-white text-sm">
+        </div>
+
+        <div class="flex items-center justify-end gap-3 pt-3">
+          <button type="button" onclick="closeCapitalModal()" class="px-4 py-2 bg-[#1E232D] hover:bg-[#2A313E] text-slate-300 text-xs rounded-xl font-medium transition">Cancel</button>
+          <button type="submit" class="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-black text-xs font-semibold rounded-xl transition shadow-lg shadow-emerald-500/20">Record Transaction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT APPLICATION CORE -->
+  <script>
+    // State Store
+    let currentTab = 'overview';
+    let authKey = localStorage.getItem('psx_dashboard_key') || '';
+    let refreshInterval = null;
+
+    // Formatters
+    const formatRs = (val) => {
+      const num = parseFloat(val) || 0.0;
+      return 'Rs. ' + num.toLocaleString('en-PK', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    const formatPct = (val) => {
+      const num = parseFloat(val) || 0.0;
+      const sign = num > 0 ? '+' : '';
+      return `${sign}${num.toFixed(2)}%`;
+    };
+
+    // Live Clock
+    function updateClock() {
+      const now = new Date();
+      const options = { timeZone: 'Asia/Karachi', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' };
+      document.getElementById('live-clock').innerText = 'PKT ' + now.toLocaleTimeString('en-GB', options);
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // Toast Notifications
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      const colors = {
+        success: 'bg-emerald-500/20 border-emerald-500 text-emerald-300',
+        error: 'bg-rose-500/20 border-rose-500 text-rose-300',
+        info: 'bg-slate-800 border-slate-700 text-slate-200'
+      };
+      toast.className = `border px-4 py-3 rounded-xl shadow-2xl backdrop-blur-md text-xs font-medium transition-all duration-300 pointer-events-auto flex items-center gap-2 ${colors[type] || colors.info}`;
+      toast.innerHTML = `<span>${type === 'success' ? '✅' : (type === 'error' ? '❌' : 'ℹ️')}</span><span>${message}</span>`;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(10px)';
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    }
+
+    // Authenticated Fetch Wrapper
+    async function apiFetch(endpoint, options = {}) {
+      const headers = options.headers || {};
+      if (authKey) {
+        headers['x-dashboard-key'] = authKey;
+        headers['Authorization'] = `Bearer ${authKey}`;
+      }
+      headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+
+      try {
+        const res = await fetch(endpoint, { ...options, headers });
+        if (res.status === 401) {
+          document.getElementById('auth-modal').classList.remove('hidden');
+          throw new Error('Unauthorized');
+        }
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(errData.detail || 'API request failed');
+        }
+        return await res.json();
+      } catch (err) {
+        if (err.message !== 'Unauthorized') {
+          console.error(`API Error on ${endpoint}:`, err);
+        }
+        throw err;
+      }
+    }
+
+    function submitAuthKey() {
+      const input = document.getElementById('auth-key-input').value.trim();
+      if (!input) return;
+      authKey = input;
+      localStorage.setItem('psx_dashboard_key', authKey);
+      document.getElementById('auth-modal').classList.add('hidden');
+      showToast('Key saved. Refreshing dashboard...', 'success');
+      loadOverviewData();
+      if (currentTab !== 'overview') loadTabData(currentTab);
+    }
+
+    function toggleAuthLock() {
+      const stored = localStorage.getItem('psx_dashboard_key');
+      if (stored) {
+        localStorage.removeItem('psx_dashboard_key');
+        authKey = '';
+        showToast('Auth key cleared from local storage.', 'info');
+      } else {
+        document.getElementById('auth-modal').classList.remove('hidden');
+      }
+    }
+
+    // Tab Navigation
+    function switchTab(tabId) {
+      currentTab = tabId;
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+      const activeEl = document.getElementById(`tab-${tabId}`);
+      if (activeEl) activeEl.classList.add('active');
+
+      document.querySelectorAll('nav button').forEach(el => el.classList.remove('active-nav'));
+      const navBtn = document.getElementById(`nav-${tabId}`);
+      if (navBtn) navBtn.classList.add('active-nav');
+
+      const titles = {
+        overview: 'Command Overview',
+        portfolio: 'Portfolio & Executed Trades',
+        dividends: 'PSX Dividends & Capital Ledger',
+        whatsapp: 'KTrade WhatsApp & Intelligence Signals',
+        research: 'Research & Mentor Knowledge Base',
+        system: 'Cloud Runtime & System Diagnostic Ops'
+      };
+      document.getElementById('page-title').innerText = titles[tabId] || 'Command Overview';
+
+      loadTabData(tabId);
+    }
+
+    function refreshCurrentTab() {
+      loadOverviewData();
+      loadTabData(currentTab);
+      showToast('Dashboard data refreshed', 'info');
+    }
+
+    function loadTabData(tabId) {
+      if (tabId === 'portfolio') loadPortfolioData();
+      else if (tabId === 'dividends') loadDividendsData();
+      else if (tabId === 'whatsapp') loadIntelligenceData();
+      else if (tabId === 'research') loadResearchData();
+      else if (tabId === 'system') loadSystemOpsData();
+    }
+
+    // 1. OVERVIEW DATA LOADER
+    async function loadOverviewData() {
+      try {
+        const data = await apiFetch('/api/dashboard/overview');
+        const kpis = data.financial_summary?.financial_kpis || {};
+        const holdings = data.financial_summary?.holdings || [];
+
+        // KPI Strip
+        document.getElementById('kpi-net-worth').innerText = formatRs(kpis.total_net_worth);
+        document.getElementById('kpi-fresh-capital').innerText = formatRs(kpis.fresh_capital_invested);
+        document.getElementById('kpi-ktrade-cash').innerText = formatRs(kpis.ktrade_available_cash);
+        document.getElementById('sidebar-ktrade-cash').innerText = formatRs(kpis.ktrade_available_cash);
+
+        const unPnl = kpis.unrealized_pnl || 0.0;
+        const unPnlEl = document.getElementById('kpi-unrealized-pnl');
+        unPnlEl.innerText = formatRs(unPnl);
+        unPnlEl.className = `text-lg font-bold font-num mt-1 ${unPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+
+        const unPctEl = document.getElementById('kpi-unrealized-pct');
+        unPctEl.innerText = formatPct(kpis.unrealized_pnl_pct);
+        unPctEl.className = `text-[10px] mt-0.5 font-num font-semibold ${unPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+
+        document.getElementById('kpi-net-divs').innerText = formatRs((kpis.net_dividends_in_bank || 0) + (kpis.net_dividends_reinvested || 0));
+        document.getElementById('kpi-pending-divs').innerText = formatRs(kpis.pending_dividends);
+
+        const trueRoi = kpis.true_roi_pct || 0.0;
+        const roiEl = document.getElementById('kpi-true-roi');
+        roiEl.innerText = formatPct(trueRoi);
+        roiEl.className = `text-lg font-bold font-num mt-1 ${trueRoi >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+        document.getElementById('kpi-true-return').innerText = formatRs(kpis.true_total_return);
+
+        // Desk Manager Memorandum
+        const thought = data.desk_manager_thought || 'No Desk Manager synthesis memorandum generated yet.';
+        document.getElementById('overview-desk-thought').innerText = thought;
+
+        // Allocation Bars
+        renderAllocation(holdings, kpis.portfolio_market_value || 0.0);
+
+        // Quick Holdings Table
+        renderOverviewHoldings(holdings);
+
+        // Sidebar Bridge Status
+        const bridgeStatus = data.system_health?.whatsapp_bridge?.status || 'OFFLINE';
+        const bridgeEl = document.getElementById('sidebar-bridge-status');
+        bridgeEl.innerText = bridgeStatus;
+        bridgeEl.className = `px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold uppercase ${
+          bridgeStatus === 'READY' ? 'bg-emerald-500/20 text-emerald-400' : (bridgeStatus.includes('QR') ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')
+        }`;
+
+      } catch (err) {
+        console.error('Failed to load overview data:', err);
+      }
+    }
+
+    function renderAllocation(holdings, totalMktVal) {
+      const container = document.getElementById('allocation-bars');
+      document.getElementById('allocation-count').innerText = `${holdings.length} Holdings`;
+      document.getElementById('allocation-total-stock').innerText = formatRs(totalMktVal);
+
+      if (!holdings.length) {
+        container.innerHTML = '<p class="text-xs text-slate-500 italic py-6 text-center">No active positions.</p>';
+        return;
+      }
+
+      container.innerHTML = holdings.map(h => {
+        const weight = h.weight_pct || 0.0;
+        return `
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="font-semibold text-white font-mono">${h.ticker}</span>
+              <span class="font-num text-slate-400">${weight.toFixed(1)}% (${formatRs(h.market_value)})</span>
+            </div>
+            <div class="w-full bg-[#0B0D10] h-2 rounded-full overflow-hidden border border-[#1E232D]">
+              <div class="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-500" style="width: ${Math.min(100, Math.max(2, weight))}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderOverviewHoldings(holdings) {
+      const tbody = document.getElementById('overview-holdings-body');
+      if (!holdings.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-500 italic">No active holdings in portfolio_holdings.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = holdings.map(h => {
+        const pnl = h.unrealized_pnl || 0.0;
+        const pnlClass = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+        return `
+          <tr class="hover:bg-[#161A22] transition">
+            <td class="py-3 font-bold text-white font-mono flex items-center gap-1.5">
+              ${h.ticker}
+              ${h.is_kmi30 ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">KMI30</span>' : ''}
+            </td>
+            <td class="py-3 font-num text-slate-300">${h.shares.toLocaleString()}</td>
+            <td class="py-3 font-num text-right text-slate-400">${formatRs(h.avg_price)}</td>
+            <td class="py-3 font-num text-right text-white font-semibold">${formatRs(h.current_price)}</td>
+            <td class="py-3 font-num text-right text-white font-semibold">${formatRs(h.market_value)}</td>
+            <td class="py-3 font-num text-right ${pnlClass} font-semibold">
+              ${pnl >= 0 ? '+' : ''}${formatRs(pnl)} (${formatPct(h.unrealized_pnl_pct)})
+            </td>
+            <td class="py-3 text-center">
+              <span class="text-[10px] px-2 py-0.5 rounded-full uppercase font-mono font-semibold ${
+                h.sentiment === 'BULLISH' ? 'bg-emerald-500/20 text-emerald-400' : (h.sentiment === 'BEARISH' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-800 text-slate-400')
+              }">${h.sentiment || 'NEUTRAL'}</span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // 2. PORTFOLIO & TRADES LOADER
+    async function loadPortfolioData() {
+      try {
+        const [overviewRes, tradesRes] = await Promise.all([
+          apiFetch('/api/dashboard/overview'),
+          apiFetch('/api/dashboard/trades')
+        ]);
+
+        const holdings = overviewRes.financial_summary?.holdings || [];
+        const tbody = document.getElementById('portfolio-holdings-table');
+
+        if (!holdings.length) {
+          tbody.innerHTML = '<tr><td colspan="10" class="py-8 text-center text-slate-500 italic">Zero active positions.</td></tr>';
+        } else {
+          tbody.innerHTML = holdings.map(h => {
+            const pnl = h.unrealized_pnl || 0.0;
+            const pnlClass = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+            const chg = h.change_pct || 0.0;
+            const chgClass = chg >= 0 ? 'text-emerald-400' : 'text-rose-400';
+
+            return `
+              <tr class="hover:bg-[#161A22] transition">
+                <td class="py-3.5 font-bold text-white font-mono flex items-center gap-1.5">
+                  ${h.ticker}
+                  ${h.is_kmi30 ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">KMI30</span>' : ''}
+                </td>
+                <td class="py-3.5 font-num text-right text-slate-200">${h.shares.toLocaleString()}</td>
+                <td class="py-3.5 font-num text-right text-slate-400">${formatRs(h.avg_price)}</td>
+                <td class="py-3.5 font-num text-right text-white font-semibold">${formatRs(h.current_price)}</td>
+                <td class="py-3.5 font-num text-right ${chgClass} font-semibold">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</td>
+                <td class="py-3.5 font-num text-right text-white font-semibold">${formatRs(h.market_value)}</td>
+                <td class="py-3.5 font-num text-right ${pnlClass} font-semibold">
+                  ${pnl >= 0 ? '+' : ''}${formatRs(pnl)} (${formatPct(h.unrealized_pnl_pct)})
+                </td>
+                <td class="py-3.5 font-num text-right text-slate-400">${(h.weight_pct || 0).toFixed(1)}%</td>
+                <td class="py-3.5 text-center">
+                  <span class="text-[10px] px-2 py-0.5 rounded-full uppercase font-mono font-semibold ${
+                    h.sentiment === 'BULLISH' ? 'bg-emerald-500/20 text-emerald-400' : (h.sentiment === 'BEARISH' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-800 text-slate-400')
+                  }">${h.sentiment || 'NEUTRAL'}</span>
+                </td>
+                <td class="py-3.5 text-center">
+                  <button onclick="prefillTrade('${h.ticker}', 'SELL', ${h.shares}, ${h.current_price})" class="px-2.5 py-1 bg-[#1E232D] hover:bg-rose-500/20 hover:text-rose-400 border border-[#2A313E] rounded-lg text-[11px] font-medium transition">
+                    Sell
+                  </button>
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+        // Trade History
+        const trades = tradesRes.trades || [];
+        document.getElementById('trades-count').innerText = `${trades.length} Trades`;
+        const tradeTbody = document.getElementById('trade-history-table');
+
+        if (!trades.length) {
+          tradeTbody.innerHTML = '<tr><td colspan="9" class="py-8 text-center text-slate-500 italic">No trades recorded yet.</td></tr>';
+        } else {
+          tradeTbody.innerHTML = trades.map(t => {
+            const sideClass = t.side === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400';
+            const dateStr = t.executed_at ? new Date(t.executed_at).toLocaleDateString('en-PK', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '--';
+
+            return `
+              <tr class="hover:bg-[#161A22] transition font-num text-xs">
+                <td class="py-3 text-slate-500">#${t.id}</td>
+                <td class="py-3 text-slate-400 font-sans">${dateStr}</td>
+                <td class="py-3 font-bold text-white">${t.ticker}</td>
+                <td class="py-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${sideClass}">${t.side}</span></td>
+                <td class="py-3 text-right text-slate-300">${t.quantity.toLocaleString()}</td>
+                <td class="py-3 text-right text-slate-300">${formatRs(t.price)}</td>
+                <td class="py-3 text-right text-slate-400">${formatRs(t.fees_and_tax)}</td>
+                <td class="py-3 text-right font-bold text-white">${formatRs(t.net_total)}</td>
+                <td class="py-3 text-slate-400 font-sans truncate max-w-xs">${t.notes || '--'}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+      } catch (err) {
+        console.error('Failed to load portfolio/trades:', err);
+      }
+    }
+
+    // 3. DIVIDENDS & CAPITAL LEDGER LOADER
+    async function loadDividendsData() {
+      try {
+        const [divRes, capRes] = await Promise.all([
+          apiFetch('/api/dashboard/dividends'),
+          apiFetch('/api/dashboard/capital')
+        ]);
+
+        const metrics = divRes.metrics || {};
+        document.getElementById('div-kpi-pending').innerText = formatRs(metrics.pending_dividends);
+        document.getElementById('div-kpi-bank').innerText = formatRs(metrics.net_dividends_in_bank);
+        document.getElementById('div-kpi-reinvested').innerText = formatRs(metrics.net_dividends_reinvested);
+        document.getElementById('div-kpi-tax').innerText = formatRs(metrics.total_wht_tax_paid);
+
+        const divs = divRes.dividends || [];
+        document.getElementById('dividends-count').innerText = `${divs.length} Records`;
+        const divTbody = document.getElementById('dividend-ledger-table');
+
+        if (!divs.length) {
+          divTbody.innerHTML = '<tr><td colspan="10" class="py-8 text-center text-slate-500 italic">No dividends recorded in dividend_ledger.</td></tr>';
+        } else {
+          divTbody.innerHTML = divs.map(d => {
+            const statusBadges = {
+              ANNOUNCED: 'bg-slate-800 text-slate-400 border border-slate-700',
+              ENTITLED: 'bg-amber-500/20 text-amber-400 border border-amber-500/30',
+              CREDITED_TO_BANK: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
+              SENT_TO_KTRADE: 'bg-violet-500/20 text-violet-400 border border-violet-500/30'
+            };
+
+            // Action button generator
+            let actionBtn = '';
+            if (d.status === 'ENTITLED' || d.status === 'ANNOUNCED') {
+              actionBtn = `
+                <button onclick="updateDivStatus(${d.id}, 'CREDITED_TO_BANK')" class="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500 hover:text-black text-emerald-400 border border-emerald-500/30 rounded-lg text-[10px] font-semibold transition">
+                  Mark Received in Bank
+                </button>
+              `;
+            } else if (d.status === 'CREDITED_TO_BANK') {
+              actionBtn = `
+                <button onclick="updateDivStatus(${d.id}, 'SENT_TO_KTRADE')" class="px-2.5 py-1 bg-violet-500/20 hover:bg-violet-500 hover:text-white text-violet-400 border border-violet-500/30 rounded-lg text-[10px] font-semibold transition">
+                  Transfer to KTrade Cash &rarr;
+                </button>
+              `;
+            } else {
+              actionBtn = `<span class="text-[11px] font-mono text-slate-500">Reinvested in Broker</span>`;
+            }
+
+            return `
+              <tr class="hover:bg-[#161A22] transition text-xs font-num">
+                <td class="py-3 text-slate-500">#${d.id}</td>
+                <td class="py-3 font-bold text-white font-sans">${d.ticker}</td>
+                <td class="py-3 text-right text-slate-300">${d.shares_held.toLocaleString()}</td>
+                <td class="py-3 text-right text-slate-300">${d.dps_gross.toFixed(2)}</td>
+                <td class="py-3 text-right text-slate-300">${formatRs(d.gross_amount)}</td>
+                <td class="py-3 text-right text-rose-400">${formatRs(d.tax_withheld)} (${d.tax_rate_pct}%)</td>
+                <td class="py-3 text-right font-bold text-emerald-400">${formatRs(d.net_amount)}</td>
+                <td class="py-3 text-slate-400 font-sans">${d.payment_date || '--'}</td>
+                <td class="py-3 text-center">
+                  <span class="px-2 py-0.5 rounded text-[10px] font-bold ${statusBadges[d.status] || 'bg-slate-800 text-slate-400'}">
+                    ${d.status}
+                  </span>
+                </td>
+                <td class="py-3 text-center font-sans">
+                  ${actionBtn}
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+        // Capital Ledger
+        const caps = capRes.entries || [];
+        document.getElementById('capital-count').innerText = `${caps.length} Entries`;
+        const capTbody = document.getElementById('capital-ledger-table');
+
+        if (!caps.length) {
+          capTbody.innerHTML = '<tr><td colspan="5" class="py-8 text-center text-slate-500 italic">No capital ledger transactions recorded yet.</td></tr>';
+        } else {
+          capTbody.innerHTML = caps.map(c => {
+            const isDeposit = c.amount >= 0;
+            const dateStr = c.tx_date ? new Date(c.tx_date).toLocaleDateString('en-PK', { month: 'short', day: 'numeric', year: 'numeric' }) : '--';
+
+            return `
+              <tr class="hover:bg-[#161A22] transition text-xs font-num">
+                <td class="py-3 text-slate-500">#${c.id}</td>
+                <td class="py-3 text-slate-400 font-sans">${dateStr}</td>
+                <td class="py-3 font-sans">
+                  <span class="px-2 py-0.5 rounded text-[10px] font-semibold ${
+                    c.tx_type === 'DIVIDEND_BANK_TO_BROKER' ? 'bg-violet-500/20 text-violet-400' : (isDeposit ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400')
+                  }">${c.tx_type}</span>
+                </td>
+                <td class="py-3 text-right font-bold ${isDeposit ? 'text-emerald-400' : 'text-rose-400'}">
+                  ${isDeposit ? '+' : ''}${formatRs(c.amount)}
+                </td>
+                <td class="py-3 text-slate-400 font-sans truncate max-w-sm">${c.reference_note || '--'}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+      } catch (err) {
+        console.error('Failed to load dividends/capital:', err);
+      }
+    }
+
+    async function updateDivStatus(id, newStatus) {
+      try {
+        await apiFetch(`/api/dashboard/dividends/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: newStatus })
+        });
+        showToast(`Dividend #${id} updated to ${newStatus}`, 'success');
+        loadDividendsData();
+        loadOverviewData();
+      } catch (err) {
+        showToast(`Failed to update dividend: ${err.message}`, 'error');
+      }
+    }
+
+    // 4. INTELLIGENCE & WHATSAPP DATA LOADER
+    async function loadIntelligenceData() {
+      try {
+        const data = await apiFetch('/api/dashboard/intelligence');
+
+        // WhatsApp Messages Stream
+        const msgs = data.messages || [];
+        document.getElementById('whatsapp-feed-count').innerText = `${msgs.length} Messages`;
+        const feedContainer = document.getElementById('whatsapp-feed-container');
+
+        if (!msgs.length) {
+          feedContainer.innerHTML = '<p class="text-xs text-slate-500 italic text-center py-10">No KTrade messages received yet.</p>';
+        } else {
+          feedContainer.innerHTML = msgs.map(m => {
+            const dateStr = m.created_at ? new Date(m.created_at).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit' }) : '--';
+            const hasMedia = !!m.extension;
+
+            return `
+              <div class="p-3.5 bg-[#0B0D10] border border-[#1E232D] rounded-xl hover:border-[#2A313E] transition">
+                <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1.5">
+                  <span class="font-semibold text-emerald-400 font-mono">${m.sender || 'KTrade Mentor'}</span>
+                  <div class="flex items-center gap-2">
+                    ${hasMedia ? `<span class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 text-[9px] font-mono uppercase">${m.extension}</span>` : ''}
+                    <span class="text-slate-500 font-mono">${dateStr}</span>
+                  </div>
+                </div>
+                <p class="text-xs text-slate-200 whitespace-pre-wrap leading-relaxed">${m.body || (hasMedia ? 'Media document/chart processed.' : '')}</p>
+              </div>
+            `;
+          }).join('');
+        }
+
+        // Pending Signals
+        const signals = data.pending_signals || [];
+        document.getElementById('signals-count').innerText = `${signals.length} Signals`;
+        const sigContainer = document.getElementById('pending-signals-container');
+
+        if (!signals.length) {
+          sigContainer.innerHTML = '<p class="text-xs text-slate-500 italic py-4 text-center">No pending signals awaiting approval.</p>';
+        } else {
+          sigContainer.innerHTML = signals.map(s => {
+            const p = typeof s.payload === 'string' ? JSON.parse(s.payload || '{}') : (s.payload || {});
+            return `
+              <div class="p-3 bg-[#0B0D10] border border-[#1E232D] rounded-xl text-xs">
+                <div class="flex justify-between items-center mb-1">
+                  <span class="font-bold text-amber-400">${s.source || 'Signal Engine'}</span>
+                  <span class="text-[10px] text-slate-500 font-mono">${s.status || 'PENDING'}</span>
+                </div>
+                <p class="text-slate-300 font-mono text-[11px] truncate">${p.title || p.text || JSON.stringify(p)}</p>
+              </div>
+            `;
+          }).join('');
+        }
+
+        // Active Playbook
+        const rules = data.active_playbook || [];
+        document.getElementById('playbook-count').innerText = `${rules.length} Rules`;
+        const pbContainer = document.getElementById('active-playbook-container');
+
+        if (!rules.length) {
+          pbContainer.innerHTML = '<p class="text-xs text-slate-500 italic py-4 text-center">No active playbook rules registered.</p>';
+        } else {
+          pbContainer.innerHTML = rules.map(r => `
+            <div class="p-3 bg-[#0B0D10] border border-[#1E232D] rounded-xl text-xs">
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono uppercase">${r.source || 'Strategy'}</span>
+              <p class="text-slate-200 mt-1.5 leading-relaxed">${r.rule || ''}</p>
+            </div>
+          `).join('');
+        }
+
+      } catch (err) {
+        console.error('Failed to load intelligence/whatsapp:', err);
+      }
+    }
+
+    // 5. RESEARCH & MENTOR DATA LOADER
+    async function loadResearchData() {
+      try {
+        const data = await apiFetch('/api/dashboard/intelligence');
+
+        // YouTube Mentor Knowledge
+        const mentors = data.mentor_knowledge || [];
+        const mContainer = document.getElementById('mentor-knowledge-container');
+
+        if (!mentors.length) {
+          mContainer.innerHTML = '<p class="text-xs text-slate-500 italic text-center py-10">No YouTube mentor videos transcribed yet.</p>';
+        } else {
+          mContainer.innerHTML = mentors.map(m => `
+            <div class="p-4 bg-[#0B0D10] border border-[#1E232D] rounded-xl space-y-2">
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-bold text-emerald-400">${m.source_type || 'YouTube'}</span>
+                <span class="text-[10px] text-slate-500 font-mono">${m.created_at ? new Date(m.created_at).toLocaleDateString() : ''}</span>
+              </div>
+              <p class="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed line-clamp-6">${m.content || ''}</p>
+              ${m.source_url ? `<a href="${m.source_url}" target="_blank" class="text-[11px] text-slate-500 hover:text-emerald-400 inline-block font-mono">Watch Video &rarr;</a>` : ''}
+            </div>
+          `).join('');
+        }
+
+        // Institutional Reports
+        const reports = data.institutional_reports || [];
+        const rContainer = document.getElementById('institutional-reports-container');
+
+        if (!reports.length) {
+          rContainer.innerHTML = '<p class="text-xs text-slate-500 italic text-center py-10">No institutional reports ingested yet.</p>';
+        } else {
+          rContainer.innerHTML = reports.map(r => `
+            <div class="p-4 bg-[#0B0D10] border border-[#1E232D] rounded-xl space-y-2">
+              <div class="flex items-center justify-between text-xs">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-white">${r.ticker || 'MACRO'}</span>
+                  <span class="text-[10px] text-slate-400 font-mono">${r.source || 'Broker'}</span>
+                </div>
+                <span class="text-[10px] px-2 py-0.5 rounded-full font-mono uppercase font-bold ${
+                  r.sentiment === 'BULLISH' ? 'bg-emerald-500/20 text-emerald-400' : (r.sentiment === 'BEARISH' ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-800 text-slate-400')
+                }">${r.sentiment || 'NEUTRAL'}</span>
+              </div>
+              <p class="text-xs font-semibold text-slate-200">${r.subject || 'Research Note'}</p>
+              <p class="text-xs text-slate-400 leading-relaxed">${r.summary || ''}</p>
+            </div>
+          `).join('');
+        }
+
+      } catch (err) {
+        console.error('Failed to load research data:', err);
+      }
+    }
+
+    // 6. CLOUD & SYSTEM OPS DATA LOADER
+    async function loadSystemOpsData() {
+      try {
+        const [overviewRes, qrRes] = await Promise.all([
+          apiFetch('/api/dashboard/overview'),
+          apiFetch('/api/dashboard/whatsapp-qr')
+        ]);
+
+        const health = overviewRes.system_health || {};
+        const bStatus = qrRes.status || health.whatsapp_bridge?.status || 'OFFLINE';
+        const bBadge = document.getElementById('system-bridge-badge');
+        bBadge.innerText = bStatus;
+        bBadge.className = `px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold uppercase ${
+          bStatus === 'READY' ? 'bg-emerald-500/20 text-emerald-400' : (bStatus.includes('QR') ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')
+        }`;
+
+        // Live QR Code Box
+        const qrBox = document.getElementById('system-qr-box');
+        if (bStatus === 'READY') {
+          qrBox.innerHTML = `
+            <div class="text-center">
+              <span class="text-4xl">✅</span>
+              <p class="text-sm font-bold text-white mt-2">WhatsApp Session Authenticated</p>
+              <p class="text-xs text-slate-400 mt-1">Live headless listener is actively ingesting KTrade chats.</p>
+            </div>
+          `;
+        } else if ((bStatus === 'QR_READY' || bStatus === 'WAITING_FOR_QR') && qrRes.qr) {
+          const enc = encodeURIComponent(qrRes.qr);
+          qrBox.innerHTML = `
+            <div class="text-center">
+              <p class="text-xs font-bold text-amber-400 mb-2">Scan with WhatsApp &rarr; Linked Devices</p>
+              <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${enc}&margin=6" class="w-48 h-48 rounded-lg bg-white p-2 mx-auto shadow-xl" alt="QR Code" />
+              <p class="text-[10px] text-slate-500 mt-2">Auto-refreshes every 5s</p>
+            </div>
+          `;
+        } else {
+          qrBox.innerHTML = `
+            <div class="text-center">
+              <div class="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+              <p class="text-xs text-slate-400">Chromium booting / waiting for QR code...</p>
+            </div>
+          `;
+        }
+
+        // Monitored groups
+        const groups = qrRes.monitored_chats || health.whatsapp_bridge?.monitored_chats || [];
+        document.getElementById('system-monitored-groups-count').innerText = `${groups.length} Groups Active`;
+
+        // Model Router Status
+        const router = health.model_router || {};
+        document.getElementById('system-active-key').innerText = `Key #${(router.active_google_key_index || 0) + 1}`;
+
+        const cdList = document.getElementById('system-cooldowns-list');
+        const cooldowns = router.cooldowns || {};
+        const cdKeys = Object.keys(cooldowns);
+        if (!cdKeys.length) {
+          cdList.innerHTML = '<p class="text-emerald-400">✅ All models operational. Zero cooldowns.</p>';
+        } else {
+          cdList.innerHTML = cdKeys.map(k => `
+            <p class="text-amber-400">⚠️ ${k}: Cooling for ${cooldowns[k]}s</p>
+          `).join('');
+        }
+
+        // Checkpoints
+        const cp = health.checkpoints || {};
+        const cpList = document.getElementById('system-checkpoints-list');
+        const cpKeys = Object.keys(cp);
+        if (!cpKeys.length) {
+          cpList.innerHTML = '<p class="text-slate-500 italic">No checkpoints saved.</p>';
+        } else {
+          cpList.innerHTML = cpKeys.map(k => `
+            <div class="flex justify-between text-[11px] py-1 border-b border-[#1E232D]">
+              <span class="text-slate-300 font-semibold truncate max-w-[140px]">${k}</span>
+              <span class="text-slate-500">${cp[k] ? new Date(cp[k]).toLocaleTimeString() : '--'}</span>
+            </div>
+          `).join('');
+        }
+
+      } catch (err) {
+        console.error('Failed to load system ops:', err);
+      }
+    }
+
+    // TRIGGER BACKGROUND SWEEPS
+    async function triggerSweep(type) {
+      try {
+        showToast(`Triggering ${type} sweep in background...`, 'info');
+        const res = await apiFetch(`/api/dashboard/trigger-sweep/${type}`, { method: 'POST' });
+        showToast(`Successfully launched ${type} sweep!`, 'success');
+      } catch (err) {
+        showToast(`Failed to trigger sweep: ${err.message}`, 'error');
+      }
+    }
+
+    // MODAL HANDLERS
+    function openTradeModal() { document.getElementById('trade-modal').classList.remove('hidden'); }
+    function closeTradeModal() { document.getElementById('trade-modal').classList.add('hidden'); }
+    function openDividendModal() { document.getElementById('dividend-modal').classList.remove('hidden'); }
+    function closeDividendModal() { document.getElementById('dividend-modal').classList.add('hidden'); }
+    function openCapitalModal() { document.getElementById('capital-modal').classList.remove('hidden'); }
+    function closeCapitalModal() { document.getElementById('capital-modal').classList.add('hidden'); }
+
+    function prefillTrade(ticker, side, qty, price) {
+      openTradeModal();
+      document.getElementById('trade-ticker').value = ticker;
+      document.getElementById('trade-side').value = side;
+      document.getElementById('trade-qty').value = qty;
+      document.getElementById('trade-price').value = price;
+      calculateTradeNet();
+    }
+
+    function calculateTradeNet() {
+      const qty = parseFloat(document.getElementById('trade-qty').value) || 0;
+      const prc = parseFloat(document.getElementById('trade-price').value) || 0;
+      const fees = parseFloat(document.getElementById('trade-fees').value) || 0;
+      const side = document.getElementById('trade-side').value;
+
+      const gross = qty * prc;
+      const net = side === 'BUY' ? -(gross + fees) : (gross - fees);
+      const preview = document.getElementById('trade-net-preview');
+      preview.innerText = formatRs(net);
+      preview.className = `font-mono font-bold text-sm ${net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+    }
+
+    function calculateDividendNet() {
+      const shares = parseFloat(document.getElementById('div-shares').value) || 0;
+      const dps = parseFloat(document.getElementById('div-dps').value) || 0;
+      const taxRate = parseFloat(document.getElementById('div-tax-rate').value) || 15.0;
+
+      const gross = Math.round(shares * dps * 100) / 100;
+      const tax = Math.round(gross * (taxRate / 100.0) * 100) / 100;
+      const net = Math.round((gross - tax) * 100) / 100;
+
+      document.getElementById('div-gross-preview').innerText = formatRs(gross);
+      document.getElementById('div-tax-preview').innerText = `-${formatRs(tax)}`;
+      document.getElementById('div-net-preview').innerText = formatRs(net);
+    }
+
+    async function submitTrade(e) {
+      e.preventDefault();
+      try {
+        const payload = {
+          ticker: document.getElementById('trade-ticker').value.trim().toUpperCase(),
+          side: document.getElementById('trade-side').value,
+          quantity: parseFloat(document.getElementById('trade-qty').value),
+          price: parseFloat(document.getElementById('trade-price').value),
+          fees_and_tax: parseFloat(document.getElementById('trade-fees').value) || 0.0,
+          notes: document.getElementById('trade-notes').value.trim()
+        };
+        await apiFetch('/api/dashboard/trades', { method: 'POST', body: JSON.stringify(payload) });
+        closeTradeModal();
+        showToast(`Trade executed: ${payload.side} ${payload.quantity} ${payload.ticker}`, 'success');
+        loadPortfolioData();
+        loadOverviewData();
+      } catch (err) {
+        showToast(`Trade failed: ${err.message}`, 'error');
+      }
+    }
+
+    async function submitDividend(e) {
+      e.preventDefault();
+      try {
+        const payload = {
+          ticker: document.getElementById('div-ticker').value.trim().toUpperCase(),
+          shares_held: parseFloat(document.getElementById('div-shares').value),
+          dps_gross: parseFloat(document.getElementById('div-dps').value),
+          tax_rate_pct: parseFloat(document.getElementById('div-tax-rate').value),
+          ex_date: document.getElementById('div-ex-date').value || null,
+          payment_date: document.getElementById('div-pay-date').value || null,
+          status: document.getElementById('div-status').value,
+          notes: document.getElementById('div-notes').value.trim()
+        };
+        await apiFetch('/api/dashboard/dividends', { method: 'POST', body: JSON.stringify(payload) });
+        closeDividendModal();
+        showToast(`Dividend logged: ${payload.ticker} (Status: ${payload.status})`, 'success');
+        loadDividendsData();
+        loadOverviewData();
+      } catch (err) {
+        showToast(`Failed to log dividend: ${err.message}`, 'error');
+      }
+    }
+
+    async function submitCapital(e) {
+      e.preventDefault();
+      try {
+        const payload = {
+          tx_type: document.getElementById('cap-type').value,
+          amount: parseFloat(document.getElementById('cap-amount').value),
+          reference_note: document.getElementById('cap-note').value.trim()
+        };
+        await apiFetch('/api/dashboard/capital', { method: 'POST', body: JSON.stringify(payload) });
+        closeCapitalModal();
+        showToast(`Capital transaction recorded: ${payload.tx_type}`, 'success');
+        loadDividendsData();
+        loadOverviewData();
+      } catch (err) {
+        showToast(`Failed to record capital: ${err.message}`, 'error');
+      }
+    }
+
+    // INITIALIZATION & AUTO-REFRESH
+    window.addEventListener('DOMContentLoaded', () => {
+      loadOverviewData();
+      // Auto-refresh overview every 25 seconds
+      setInterval(() => {
+        if (currentTab === 'overview') loadOverviewData();
+        else if (currentTab === 'system') loadSystemOpsData();
+      }, 25000);
+    });
+  </script>
+</body>
+</html>

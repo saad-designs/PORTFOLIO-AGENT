@@ -347,10 +347,9 @@ async def run_business_portfolio_sweep():
         result = await asyncio.to_thread(graph.invoke, state)
         ai_verdict = result.get("analyst_thesis", "No analysis provided.")
         
-        # Output proactive thought
-        os.makedirs("memory_cache", exist_ok=True)
-        with open("memory_cache/proactive_thought.txt", "w", encoding="utf-8") as f:
-            f.write(f"Proactive thought generated at {datetime.now()}:\n{ai_verdict}")
+        # Output proactive thought (persisted to Supabase and mirrored to disk)
+        from portfolio_manager import save_desk_manager_thought
+        await asyncio.to_thread(save_desk_manager_thought, ai_verdict)
             
         # Send alert to pending_signals table
         from portfolio_manager import add_pending_signal

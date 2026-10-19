@@ -73,7 +73,7 @@ import urllib.parse
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import PlainTextResponse, HTMLResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -378,10 +378,329 @@ app = FastAPI(lifespan=lifespan)
 async def ping():
     return "OK"
 
-@app.get("/")
-@app.head("/")
-async def health_check():
-    return {"status": "alive", "service": "Portfolio Agent Watchdog"}
+DASHBOARD_KEY = os.getenv("DASHBOARD_KEY", "").strip()
+
+def verify_dashboard_auth(request: Request):
+    if not DASHBOARD_KEY:
+        return True
+    key = request.headers.get("x-dashboard-key") or request.query_params.get("key")
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        key = auth_header[7:].strip()
+    if key != DASHBOARD_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
+    return True
+
+class DividendCreatePayload(BaseModel):
+    ticker: str
+    shares_held: float
+    dps_gross: float
+    tax_rate_pct: Optional[float] = 15.00
+    ex_date: Optional[str] = None
+    payment_date: Optional[str] = None
+    status: Optional[str] = "ENTITLED"
+    notes: Optional[str] = None
+
+class DividendStatusUpdatePayload(BaseModel):
+    status: str
+
+class CapitalTransactionPayload(BaseModel):
+    tx_type: str
+    amount: float
+    reference_note: Optional[str] = None
+
+class TradeRecordPayload(BaseModel):
+    ticker: str
+    side: str
+    quantity: float
+    price: float
+    fees_and_tax: Optional[float] = 0.00
+    notes: Optional[str] = None
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
+async def serve_dashboard():
+    dashboard_path = os.path.join(os.path.dirname(__file__), "static", "dashboard.html")
+    if os.path.exists(dashboard_path):
+        return FileResponse(dashboard_path, media_type="text/html")
+    return HTMLResponse("<h1>PSX Co-Investor Dashboard</h1>", status_code=200)
+
+@app.get("/api/dashboard/overview")
+async def get_dashboard_overview(request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_complete_financial_summary, get_desk_manager_thought, get_db_connection
+    from model_router import MODEL_COOLDOWN_UNTIL, is_model_available, CURRENT_GOOGLE_KEY_INDEX
+    
+    summary = await asyncio.to_thread(get_complete_financial_summary)
+    
+    # WhatsApp bridge status
+    bridge_status = "OFFLINE"
+    monitored_chats = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                if resp.status == 200:
+                    b_data = await resp.json()
+                    bridge_status = b_data.get("status", "OFFLINE")
+                    monitored_chats = b_data.get("monitored_chats", [])
+    except Exception:
+        pass
+        
+    now = time.time()
+    model_cooldowns = {
+        m: round(t - now, 1) for m, t in MODEL_COOLDOWN_UNTIL.items() if t > now
+    }
+    
+    checkpoints = {}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT key, updated_at FROM agent_checkpoints;")
+        for k, u in cur.fetchall():
+            checkpoints[k] = u.isoformat() if u else None
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+    desk_thought = await asyncio.to_thread(get_desk_manager_thought)
+
+    return {
+        "status": "success",
+        "financial_summary": summary,
+        "system_health": {
+            "whatsapp_bridge": {
+                "status": bridge_status,
+                "monitored_chats": monitored_chats
+            },
+            "model_router": {
+                "active_google_key_index": CURRENT_GOOGLE_KEY_INDEX,
+                "cooldowns": model_cooldowns,
+                "models": {
+                    "llama-3.3-70b-versatile": is_model_available("llama-3.3-70b-versatile"),
+                    "gemini-3.5-flash-lite": is_model_available("gemini-3.5-flash-lite"),
+                    "gemini-3.5-flash": is_model_available("gemini-3.5-flash"),
+                    "gemini-3.8-flash": is_model_available("gemini-3.8-flash")
+                }
+            },
+            "checkpoints": checkpoints
+        },
+        "desk_manager_thought": desk_thought
+    }
+
+@app.get("/api/dashboard/dividends")
+async def get_dashboard_dividends(request: Request, limit: int = 100):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_all_dividends, get_complete_financial_summary
+    divs = await asyncio.to_thread(get_all_dividends, limit)
+    summary = await asyncio.to_thread(get_complete_financial_summary)
+    kpis = summary.get("financial_kpis", {})
+    return {
+        "dividends": divs,
+        "metrics": {
+            "total_gross_dividends": kpis.get("total_gross_dividends", 0.0),
+            "total_wht_tax_paid": kpis.get("total_wht_tax_paid", 0.0),
+            "net_dividends_in_bank": kpis.get("net_dividends_in_bank", 0.0),
+            "net_dividends_reinvested": kpis.get("net_dividends_reinvested", 0.0),
+            "pending_dividends": kpis.get("pending_dividends", 0.0)
+        }
+    }
+
+@app.post("/api/dashboard/dividends")
+async def create_dashboard_dividend(payload: DividendCreatePayload, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import record_dividend
+    entry = await asyncio.to_thread(
+        record_dividend,
+        ticker=payload.ticker,
+        shares_held=payload.shares_held,
+        dps_gross=payload.dps_gross,
+        tax_rate_pct=payload.tax_rate_pct if payload.tax_rate_pct is not None else 15.00,
+        ex_date=payload.ex_date,
+        payment_date=payload.payment_date,
+        status=payload.status or "ENTITLED",
+        notes=payload.notes
+    )
+    return {"status": "success", "dividend": entry}
+
+@app.patch("/api/dashboard/dividends/{id}")
+async def update_dashboard_dividend(id: int, payload: DividendStatusUpdatePayload, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import update_dividend_status
+    updated = await asyncio.to_thread(update_dividend_status, id, payload.status)
+    return {"status": "success", "dividend": updated}
+
+@app.get("/api/dashboard/capital")
+async def get_dashboard_capital(request: Request, limit: int = 100):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_capital_ledger_entries
+    entries = await asyncio.to_thread(get_capital_ledger_entries, limit)
+    return {"status": "success", "entries": entries}
+
+@app.post("/api/dashboard/capital")
+async def create_dashboard_capital(payload: CapitalTransactionPayload, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import record_capital_transaction
+    entry = await asyncio.to_thread(
+        record_capital_transaction,
+        tx_type=payload.tx_type,
+        amount=payload.amount,
+        reference_note=payload.reference_note
+    )
+    return {"status": "success", "entry": entry}
+
+@app.get("/api/dashboard/trades")
+async def get_dashboard_trades(request: Request, limit: int = 100):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_trade_history_entries
+    entries = await asyncio.to_thread(get_trade_history_entries, limit)
+    return {"status": "success", "trades": entries}
+
+@app.post("/api/dashboard/trades")
+async def create_dashboard_trade(payload: TradeRecordPayload, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import record_trade
+    trade = await asyncio.to_thread(
+        record_trade,
+        ticker=payload.ticker,
+        side=payload.side,
+        quantity=payload.quantity,
+        price=payload.price,
+        fees_and_tax=payload.fees_and_tax or 0.00,
+        notes=payload.notes
+    )
+    return {"status": "success", "trade": trade}
+
+@app.get("/api/dashboard/intelligence")
+async def get_dashboard_intelligence(request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import get_db_connection, get_desk_manager_thought
+    
+    def _fetch_intelligence():
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT id, chat_id, sender, body, timestamp, created_at, extension
+                FROM messages
+                ORDER BY created_at DESC
+                LIMIT 25;
+            """)
+            messages = [
+                {
+                    "id": r[0], "chat_id": r[1], "sender": r[2], "body": r[3],
+                    "timestamp": r[4], "created_at": r[5].isoformat() if r[5] else None,
+                    "extension": r[6]
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT id, source, signal_payload, status, created_at
+                FROM pending_signals
+                ORDER BY created_at DESC
+                LIMIT 20;
+            """)
+            pending_signals = [
+                {
+                    "id": r[0], "source": r[1], "payload": r[2], "status": r[3],
+                    "created_at": r[4].isoformat() if r[4] else None
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT id, source, ticker, subject, sentiment, summary, created_at
+                FROM institutional_reports
+                ORDER BY created_at DESC
+                LIMIT 20;
+            """)
+            institutional_reports = [
+                {
+                    "id": r[0], "source": r[1], "ticker": r[2], "subject": r[3],
+                    "sentiment": r[4], "summary": r[5], "created_at": r[6].isoformat() if r[6] else None
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT id, source, rule, created_at
+                FROM active_playbook
+                ORDER BY created_at DESC
+                LIMIT 20;
+            """)
+            active_playbook = [
+                {
+                    "id": r[0], "source": r[1], "rule": r[2],
+                    "created_at": r[3].isoformat() if r[3] else None
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT id, source_type, source_url, content, created_at
+                FROM agent_knowledge
+                ORDER BY created_at DESC
+                LIMIT 20;
+            """)
+            mentor_knowledge = [
+                {
+                    "id": r[0], "source_type": r[1], "source_url": r[2],
+                    "content": r[3], "created_at": r[4].isoformat() if r[4] else None
+                }
+                for r in cur.fetchall()
+            ]
+
+            return {
+                "messages": messages,
+                "pending_signals": pending_signals,
+                "institutional_reports": institutional_reports,
+                "active_playbook": active_playbook,
+                "mentor_knowledge": mentor_knowledge
+            }
+        finally:
+            cur.close()
+            conn.close()
+
+    intel_data = await asyncio.to_thread(_fetch_intelligence)
+    intel_data["desk_manager_thought"] = await asyncio.to_thread(get_desk_manager_thought)
+    return {"status": "success", **intel_data}
+
+@app.get("/api/dashboard/whatsapp-qr")
+async def get_dashboard_whatsapp_qr():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception:
+        pass
+    return {
+        "status": "OFFLINE",
+        "qr": None,
+        "monitored_chats": ALLOWED_KTRADE_CHATS
+    }
+
+@app.post("/api/dashboard/trigger-sweep/{sweep_type}")
+async def trigger_dashboard_sweep(sweep_type: str, background_tasks: BackgroundTasks, request: Request):
+    verify_dashboard_auth(request)
+    st = sweep_type.strip().lower()
+    if st in {"business", "desk_manager"}:
+        from schedulers import run_business_portfolio_sweep
+        background_tasks.add_task(run_business_portfolio_sweep)
+    elif st == "youtube":
+        from ingestion import sweep_youtube_transcripts
+        background_tasks.add_task(sweep_youtube_transcripts)
+    elif st == "news":
+        from news_scraper import run_news_sweep
+        background_tasks.add_task(run_news_sweep)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown sweep type: {sweep_type}. Use 'business', 'youtube', or 'news'.")
+    return {
+        "status": "triggered",
+        "sweep_type": st,
+        "timestamp": time.time()
+    }
 
 @app.get("/whatsapp-qr", response_class=HTMLResponse)
 async def whatsapp_qr_page():

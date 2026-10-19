@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: psx-portfolio-agent
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: standard
+    region: frankfurt
+    healthCheckPath: /ping
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: CLOUD_ENV
+        value: "true"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: ALERT_CHANNEL_ID
+        sync: false
+      - key: ADMIN_CHANNEL_ID
+        sync: false
+      - key: DASHBOARD_KEY
+        sync: false

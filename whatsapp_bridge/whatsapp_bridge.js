@@ -23,7 +23,9 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--single-process',
+            '--js-flags="--max-old-space-size=256"'
         ],
         protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
     }
@@ -195,8 +197,9 @@ app.get('/ping', (req, res) => {
 // Live QR code status endpoint for cloud browser rendering
 app.get('/qr', (req, res) => {
     res.json({
-        status: isClientReady ? "READY" : (latestQr ? "WAITING_FOR_QR" : "INITIALIZING"),
-        qr: latestQr
+        status: isClientReady ? "READY" : (latestQr ? "QR_READY" : "INITIALIZING"),
+        qr: latestQr,
+        monitored_chats: Array.from(ALLOWED_KTRADE_CHATS)
     });
 });
 
