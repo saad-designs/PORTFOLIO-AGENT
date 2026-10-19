@@ -368,6 +368,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+from fastapi.staticfiles import StaticFiles
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 # Microscopic health endpoint
 @app.get("/ping", response_class=PlainTextResponse)
 @app.head("/ping", response_class=PlainTextResponse)
@@ -886,15 +891,7 @@ async def whatsapp_qr_page():
 """
     return HTMLResponse(content=html)
 
-class WebhookPayload(BaseModel):
-    thread_id: str
-    action: str
 
-@app.post("/webhook/discord")
-async def discord_webhook(payload: WebhookPayload):
-    config = {"configurable": {"thread_id": payload.thread_id}}
-    await app.state.graph.ainvoke(Command(resume=payload.action), config=config)
-    return {"status": "success", "action": payload.action}
 
 async def process_webhook_alert(ticker: str, signal: str, price: float):
     import os

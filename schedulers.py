@@ -41,21 +41,6 @@ def update_last_run(task_name):
 async def send_long_message(channel, raw_message, max_chars: int = 1800):
     publish_agent_event('SYSTEM_ALERT', 'Scheduler Notice', str(raw_message))
 
-class DummyBot:
-    def get_channel(self, cid):
-        return None
-    async def fetch_channel(self, cid):
-        return None
-    async def wait_until_ready(self):
-        return True
-
-bot = DummyBot()
-
-# Define your admin channel ID here or pull from os.environ
-ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", 0))
-PROSPECT_CHANNEL_ID = int(os.getenv("PROSPECT_CHANNEL_ID", 0)) or ADMIN_CHANNEL_ID
-RESEARCH_CHANNEL_ID = int(os.getenv("RESEARCH_CHANNEL_ID", 0)) or ADMIN_CHANNEL_ID
-
 logger = logging.getLogger("PortfolioAgentSchedulers")
 
 import json
@@ -218,7 +203,6 @@ async def _run_youtube_sweep_inner():
             import re
             
             client = genai.Client(http_options={"timeout": 300000})
-            alert_channel = bot.get_channel(RESEARCH_CHANNEL_ID)
             
             for mentor, text in transcripts.items():
                 if "**Partner's Verdict" in text or "!rule" in text or "!target" in text:
@@ -688,7 +672,6 @@ async def run_intraday_price_loop():
         cursor.close()
         conn.close()
         
-        alert_channel = bot.get_channel(PROSPECT_CHANNEL_ID)
         now_ts = datetime.now().timestamp()
         
         for row in holdings:
@@ -1348,7 +1331,7 @@ async def start_scheduled_sweeps():
         # Check every 60 seconds to prevent tight CPU looping
         await asyncio.sleep(60)
 
-def initialize_background_schedulers(bot_loop):
-    """Hooks all tasks directly into the running Discord bot event loop."""
-    bot_loop.create_task(start_scheduled_sweeps())
-    logger.info("🚀 Scheduled sweeps task injected into bot event loop.")
+def initialize_background_schedulers(loop):
+    """Hooks all tasks directly into the master application event loop."""
+    loop.create_task(start_scheduled_sweeps())
+    logger.info("🚀 Master background schedulers online with autonomous Agent Feed logging.")

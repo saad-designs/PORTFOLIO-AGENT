@@ -118,6 +118,17 @@ async def process_dashboard_chat(user_message: str) -> dict:
     recent_feed = get_agent_feed(limit=5)
     recent_history = get_chat_history(limit=6)
 
+    playbook_rules = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT source, rule FROM active_playbook ORDER BY created_at DESC LIMIT 5;")
+        playbook_rules = [{"source": r[0], "rule": r[1]} for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
     context_str = f"""
 LIVE FINANCIAL CONTEXT:
 - Total Net Worth: Rs. {kpis.get('total_net_worth', 0):,.2f}
@@ -131,6 +142,9 @@ LIVE FINANCIAL CONTEXT:
 
 ACTIVE HOLDINGS:
 {json.dumps([{h['ticker']: f"{h['shares']} shs @ Rs. {h['avg_price']} (Cur: Rs. {h['current_price']})"} for h in holdings], indent=2)}
+
+ACTIVE PLAYBOOK RULES:
+{json.dumps(playbook_rules, indent=2)}
 
 RECENT RELEVANT SIGNALS / FEED:
 {json.dumps([{f['category']: f"{f['title']} - {f['content'][:120]}"} for f in recent_feed], indent=2)}
