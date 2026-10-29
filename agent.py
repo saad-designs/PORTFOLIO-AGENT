@@ -67,19 +67,15 @@ def get_screened_opportunities() -> list[dict]:
             # The Hard Stop: Anomaly alert for dividend heavyweights
             if dividend_yield <= 0.0 and ticker in ["HUBC", "EFERT", "MEBL", "LUCK", "FFC", "ENGRO", "POL", "OGDC", "PPL", "SYS", "MTL"]:
                 try:
-                    import os
-                    import asyncio
-                    from discord_bot import bot
-                    channel_id_str = os.getenv("ADMIN_CHANNEL_ID")
-                    if channel_id_str and bot and bot.loop and bot.is_ready():
-                        channel = bot.get_channel(int(channel_id_str))
-                        if channel:
-                            asyncio.run_coroutine_threadsafe(
-                                channel.send(f"⚠️ **ANOMALY ALERT:** `{ticker}` (Dividend Heavyweight) is returning 0.0% yield. Investigate pipeline failure immediately."),
-                                bot.loop
-                            )
+                    from portfolio_manager import publish_agent_event
+                    publish_agent_event(
+                        category='SYSTEM_ALERT',
+                        title=f"⚠️ ANOMALY ALERT: {ticker}",
+                        content=f"⚠️ **ANOMALY ALERT:** `{ticker}` (Dividend Heavyweight) is returning 0.0% yield. Investigate pipeline failure immediately.",
+                        metadata={"ticker": ticker, "issue": "zero_dividend_yield"}
+                    )
                 except Exception as e:
-                    print(f"[Agent] Failed to send anomaly alert for {ticker}: {e}")
+                    print(f"[Agent] Failed to record anomaly alert for {ticker}: {e}")
         
         # 1. Earnings Yield Check (Hurdle >= 15%)
         earnings_yield = eps / live_price
@@ -215,7 +211,13 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatResult
-from langchain_tavily import TavilySearch
+try:
+    from langchain_tavily import TavilySearch
+except ImportError:
+    try:
+        from langchain_community.tools.tavily_search import TavilySearchResults as TavilySearch
+    except ImportError:
+        TavilySearch = None
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 import psycopg
@@ -712,7 +714,7 @@ llm = get_langchain_llm(TASK_DEEP_REASONING)
 
 # Instantiate the search tool safely
 try:
-    search_tool = TavilySearch(name="web_search") if os.getenv("TAVILY_API_KEY") else None
+    search_tool = TavilySearch(name="web_search") if (TavilySearch and os.getenv("TAVILY_API_KEY")) else None
 except Exception:
     search_tool = None
 

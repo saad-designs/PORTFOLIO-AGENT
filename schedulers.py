@@ -1259,7 +1259,7 @@ async def start_scheduled_sweeps():
             update_last_run("weekly_fundamentals")
 
         # 1. YouTube Knowledge Sweep (12:00 AM)
-        # Replaced by discord_bot's midnight_mentor_sweep catch-up
+        # Replaced by autonomous background sweep catch-up
             
         # 2. Email Sweeps (12:00 PM and 4:00 PM)
         if should_run("email_noon", 12):

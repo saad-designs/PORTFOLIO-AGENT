@@ -25,21 +25,35 @@ import yfinance as yf
 import concurrent.futures
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from langchain.tools import tool
+try:
+    from langchain_core.tools import tool
+except ImportError:
+    from langchain.tools import tool
 from typing import List, Dict
 from cachetools import cached, TTLCache
 
 load_dotenv()
+
+# --- STRIP SURROUNDING QUOTES FROM CRITICAL ENV VARS ---
+for _k in ["SUPABASE_DB_URL", "SUPABASE_URL", "SUPABASE_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "YOUTUBE_API_KEY", "DATABASE_URL"]:
+    _v = os.getenv(_k)
+    if _v is not None:
+        os.environ[_k] = _v.strip().strip('"').strip("'").strip()
+
 DATABASE_URL = os.getenv("SUPABASE_DB_URL")
 
+supabase = None
 try:
     from supabase import create_client, Client
-    supabase_url: str = os.getenv("SUPABASE_URL")
-    supabase_key: str = os.getenv("SUPABASE_KEY")
-    supabase: Client = create_client(supabase_url, supabase_key)
-except ImportError:
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    if supabase_url and supabase_key:
+        supabase = create_client(supabase_url, supabase_key)
+    else:
+        print("ℹ️ [Supabase] SUPABASE_URL or SUPABASE_KEY missing. Supabase Client disabled.", flush=True)
+except Exception as sb_err:
     supabase = None
-    print("Warning: supabase-py not installed.")
+    print(f"⚠️ [Supabase Warning] Failed to initialize Supabase client: {sb_err}", flush=True)
 
 import aiohttp
 import json
@@ -111,9 +125,11 @@ def create_dashboard_and_ledger_tables():
     4. trade_history (with RLS enabled)
     5. chat_messages (with RLS enabled)
     """
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         # 1. agent_feed
         cur.execute("""
             CREATE TABLE IF NOT EXISTS agent_feed (
@@ -221,34 +237,58 @@ def create_dashboard_and_ledger_tables():
 
         conn.commit()
     except Exception as e:
-        conn.rollback()
-        print(f"⚠️ [Database Setup] Could not ensure dashboard tables: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        print(f"⚠️ [Database Setup Warning] Could not ensure dashboard tables: {e}", flush=True)
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def get_whatsapp_checkpoint() -> int:
     """Returns the unix timestamp of the last analyzed WhatsApp message."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'whatsapp_last_timestamp'")
         res = cur.fetchone()
         if res:
             return int(res[0])
         return 0
     except Exception as e:
-        print(f"[ERROR] fetching whatsapp checkpoint: {e}")
+        print(f"⚠️ [Checkpoints Warning] fetching whatsapp checkpoint: {e}", flush=True)
         return 0
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def update_whatsapp_checkpoint(timestamp: int):
     """Advances the WhatsApp watermark forward."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("""
             INSERT INTO agent_checkpoints (key, value, updated_at)
             VALUES ('whatsapp_last_timestamp', %s, NOW())
@@ -256,17 +296,31 @@ def update_whatsapp_checkpoint(timestamp: int):
         """, (str(timestamp),))
         conn.commit()
     except Exception as e:
-        print(f"[ERROR] updating whatsapp checkpoint: {e}")
-        conn.rollback()
+        print(f"⚠️ [Checkpoints Warning] updating whatsapp checkpoint: {e}", flush=True)
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def get_checkpoint(task_key: str) -> int:
     """Fetches the Unix timestamp watermark for a specific ingestion pipeline."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("SELECT value FROM agent_checkpoints WHERE key = %s", (task_key,))
         res = cur.fetchone()
         if res:
@@ -281,17 +335,27 @@ def get_checkpoint(task_key: str) -> int:
                 return raw_val
         return 0
     except Exception as e:
-        print(f"[ERROR] fetching checkpoint {task_key}: {e}")
+        print(f"⚠️ [Checkpoints Warning] fetching checkpoint {task_key}: {e}", flush=True)
         return 0
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def update_checkpoint(task_key: str, timestamp: int):
     """Advances the watermark forward after successful ingestion."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("""
             INSERT INTO agent_checkpoints (key, value, updated_at)
             VALUES (%s, %s, NOW())
@@ -299,26 +363,48 @@ def update_checkpoint(task_key: str, timestamp: int):
         """, (task_key, str(timestamp)))
         conn.commit()
     except Exception as e:
-        print(f"[ERROR] updating checkpoint {task_key}: {e}")
-        conn.rollback()
+        print(f"⚠️ [Checkpoints Warning] updating checkpoint {task_key}: {e}", flush=True)
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def get_whatsapp_monitored_chats() -> list[str]:
     """Dynamically fetches active mentor WhatsApp IDs from the database."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("SELECT chat_id FROM whatsapp_monitored_chats WHERE is_active = TRUE")
         res = cur.fetchall()
         return [r[0] for r in res]
     except Exception as e:
-        print(f"[ERROR] fetching monitored chats: {e}")
+        print(f"⚠️ [Checkpoints Warning] fetching monitored chats: {e}", flush=True)
         return []
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def sanitize_price(raw_price) -> float:
     """Strips commas and handles raw API strings to prevent PnL hallucinations."""

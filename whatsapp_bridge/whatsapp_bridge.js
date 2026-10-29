@@ -25,7 +25,8 @@ const client = new Client({
             '--no-zygote',
             '--disable-gpu',
             '--single-process',
-            '--js-flags="--max-old-space-size=256"'
+            '--renderer-process-limit=1',
+            '--js-flags=--max-old-space-size=128'
         ],
         protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
     }

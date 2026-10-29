@@ -1,6 +1,9 @@
 import os
 import re
-from langchain.tools import tool
+try:
+    from langchain_core.tools import tool
+except ImportError:
+    from langchain.tools import tool
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from youtube_scraper import get_transcript
@@ -11,10 +14,16 @@ import sqlite3
 
 load_dotenv()
 
-# Initialize embeddings exactly as requested
+# --- STRIP SURROUNDING QUOTES FROM CRITICAL ENV VARS ---
+for _k in ["SUPABASE_DB_URL", "GOOGLE_API_KEY", "TAVILY_API_KEY", "DATABASE_URL"]:
+    _v = os.getenv(_k)
+    if _v is not None:
+        os.environ[_k] = _v.strip().strip('"').strip("'").strip()
+
+g_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 embeddings = GoogleGenerativeAIEmbeddings(
     model="models/gemini-embedding-001",
-    google_api_key=os.getenv("GOOGLE_API_KEY")
+    google_api_key=g_key or "DUMMY_KEY"
 )
 
 from langchain_postgres import PGVector
@@ -53,20 +62,45 @@ def get_web_search_tool():
         return None
 
     try:
-        from langchain_tavily import TavilySearch
-        return TavilySearch(max_results=3)
+        try:
+            from langchain_tavily import TavilySearch
+        except ImportError:
+            from langchain_community.tools.tavily_search import TavilySearchResults as TavilySearch
+        return TavilySearch(max_results=3) if TavilySearch else None
     except Exception as e:
         print(f"[ERROR] Failed to initialize Tavily search: {e}")
         return None
 
-# Persistent Supabase pgvector Storage
-db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
-vector_db = PGVector(
-    embeddings=embeddings,
-    collection_name="financial_knowledge",
-    connection=db_url,
-    use_jsonb=True,
-)
+# Persistent Supabase pgvector Storage (Safe Lazy Initialization)
+vector_db = None
+
+def get_vector_db():
+    global vector_db
+    if vector_db is not None:
+        return vector_db
+    try:
+        db_url = os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+        if db_url:
+            db_url = db_url.strip().strip('"').strip("'").strip()
+            if db_url.startswith("postgres://"):
+                db_url = db_url.replace("postgres://", "postgresql://", 1)
+            elif db_url.startswith("postgresql+psycopg://"):
+                db_url = db_url.replace("postgresql+psycopg://", "postgresql://", 1)
+        vector_db = PGVector(
+            embeddings=embeddings,
+            collection_name="financial_knowledge",
+            connection=db_url,
+            use_jsonb=True,
+        )
+        return vector_db
+    except Exception as e:
+        print(f"⚠️ [Vector Brain Warning] PGVector connection/initialization postponed: {e}", flush=True)
+        return None
+
+try:
+    vector_db = get_vector_db()
+except Exception as _v_err:
+    vector_db = None
 
 @tool
 async def ingest_knowledge_tool(input_text_or_url: str) -> str:
@@ -100,9 +134,12 @@ async def ingest_knowledge_tool(input_text_or_url: str) -> str:
         metadatas = [{"source": source_id} for _ in chunks]
         
         # Push to Vector DB
+        vdb = get_vector_db()
+        if not vdb:
+            return "⚠️ Vector database currently unavailable. Ingestion skipped."
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _add_texts():
-            vector_db.add_texts(texts=chunks, metadatas=metadatas)
+            vdb.add_texts(texts=chunks, metadatas=metadatas)
             
         _add_texts()
         
@@ -116,9 +153,12 @@ async def ingest_knowledge_tool(input_text_or_url: str) -> str:
 def query_mentor_brain_tool(query: str) -> str:
     """Queries the AI Vector Brain for past financial mentor advice. Use this when the user asks a question about strategies, market conditions, or mentor insights to ground your reasoning."""
     try:
+        vdb = get_vector_db()
+        if not vdb:
+            return "🧠 **Memory Blank:** Vector database currently offline."
         @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
         def _similarity_search():
-            return vector_db.similarity_search(query, k=6)
+            return vdb.similarity_search(query, k=6)
             
         results = _similarity_search()
         
@@ -178,15 +218,19 @@ async def get_market_context(ticker: str) -> str:
         import time
         from langchain_core.documents import Document
         
+        vdb = get_vector_db()
+        if not vdb:
+            return []
+        
         # Temporal Filter: Get documents within last 72 hours
         seventy_two_hours_ago = int(time.time()) - (72 * 3600)
         filter_dict = {"timestamp": {"$gte": seventy_two_hours_ago}}
         
         try:
-            return vector_db.similarity_search(ticker, k=6, filter=filter_dict)
+            return vdb.similarity_search(ticker, k=6, filter=filter_dict)
         except Exception as e:
             print(f"Filter failed, falling back to basic search: {e}")
-            return vector_db.similarity_search(ticker, k=6)
+            return vdb.similarity_search(ticker, k=6)
             
     results = await asyncio.to_thread(_similarity_search)
     

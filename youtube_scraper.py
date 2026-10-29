@@ -21,10 +21,17 @@ from google import genai
 from google.genai import types
 
 # Pulling keys from your local environment
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY") 
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+if YOUTUBE_API_KEY:
+    YOUTUBE_API_KEY = YOUTUBE_API_KEY.strip().strip('"').strip("'")
 raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-clean_key = raw_key.strip() if raw_key else None
-client = genai.Client(api_key=clean_key, http_options={"timeout": 300000})
+clean_key = raw_key.strip().strip('"').strip("'") if raw_key else None
+client = None
+try:
+    if clean_key:
+        client = genai.Client(api_key=clean_key, http_options={"timeout": 300000})
+except Exception as c_err:
+    print(f"⚠️ [YouTube Scraper Warning] genai.Client init: {c_err}", flush=True)
 
 def get_channel_id(channel_name: str) -> str | None:
     """Cloud-safe channel ID lookup using YouTube Data API v3 over googleapis.com."""

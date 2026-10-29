@@ -25,11 +25,15 @@ def get_google_api_keys() -> List[str]:
     keys = []
     primary = os.getenv("GOOGLE_API_KEY")
     if primary and primary.strip():
-        keys.append(primary.strip())
+        cleaned = primary.strip().strip('"').strip("'").strip()
+        if cleaned:
+            keys.append(cleaned)
     for env_var in ["GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_BACKUP"]:
         val = os.getenv(env_var)
-        if val and val.strip() and val.strip() not in keys:
-            keys.append(val.strip())
+        if val and val.strip():
+            cleaned = val.strip().strip('"').strip("'").strip()
+            if cleaned and cleaned not in keys:
+                keys.append(cleaned)
     return keys
 
 def get_active_google_api_key() -> Optional[str]:
@@ -473,8 +477,10 @@ def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
     all_llms = groq_llms + gemini_llms
     if not all_llms:
         fallback_model = GEMINI_TASK_ROUTING[task][0]
-        fallback_key = get_active_google_api_key()
-        return ChatGoogleGenerativeAI(model=fallback_model, google_api_key=fallback_key, **kwargs)
+        fallback_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
+        if fallback_key:
+            fallback_key = fallback_key.strip().strip('"').strip("'").strip()
+        return ChatGoogleGenerativeAI(model=fallback_model, google_api_key=fallback_key or "DUMMY_KEY", **kwargs)
 
     if len(all_llms) == 1:
         return all_llms[0]

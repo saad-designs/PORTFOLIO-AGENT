@@ -18,15 +18,23 @@ try:
     sys.modules['psycopg2'] = psycopg2
     sys.modules['psycopg2.extras'] = psycopg2.extras
 except ImportError as e:
-    print(f"FATAL: psycopg2-binary is missing: {e}")
-    sys.exit(1)
+    print(f"⚠️ [Startup Warning] psycopg2-binary import issue: {e}", flush=True)
 # ---------------------------------------
 from dotenv import load_dotenv
 load_dotenv()
 
-# --- API KEY ENVIRONMENT SANITIZATION ---
-# Prevent Google GenAI and LangChain from spamming duplicate key warning
+# --- API KEY & CRITICAL ENVIRONMENT SANITIZATION ---
 import os
+CRITICAL_ENV_VARS = [
+    "SUPABASE_DB_URL", "SUPABASE_URL", "SUPABASE_KEY",
+    "GOOGLE_API_KEY", "GROQ_API_KEY", "YOUTUBE_API_KEY",
+    "DATABASE_URL", "PORT", "GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_BACKUP"
+]
+for _k in CRITICAL_ENV_VARS:
+    _v = os.getenv(_k)
+    if _v is not None:
+        os.environ[_k] = _v.strip().strip('"').strip("'").strip()
+
 if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
 os.environ.pop("GEMINI_API_KEY", None)
@@ -39,29 +47,38 @@ import uuid
 import json
 import re
 
+node_process = None
 bridge_dir = os.path.join(os.getcwd(), "whatsapp_bridge")
-print("🚀 Booting Node.js WhatsApp Bridge concurrently in background...")
+if os.getenv("DISABLE_WHATSAPP_BRIDGE", "false").lower() not in ("true", "1") and os.path.exists(bridge_dir):
+    print("🚀 Booting Node.js WhatsApp Bridge concurrently in background...", flush=True)
+    try:
+        node_process = subprocess.Popen(
+            ["node", "whatsapp_bridge.js"],
+            cwd=bridge_dir, 
+            shell=(os.name == 'nt')
+        )
+    except Exception as bridge_err:
+        print(f"⚠️ [WhatsApp Bridge] Failed to launch background bridge subprocess: {bridge_err}", flush=True)
 
-# Fast non-blocking boot (removed 3s sleep)
-node_process = subprocess.Popen(
-    ["node", "whatsapp_bridge.js"],
-    cwd=bridge_dir, 
-    shell=True
-)
-
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 def cleanup_node_process():
     """Ruthlessly hunts down and terminates the WhatsApp Node bridge on exit."""
     global node_process
     if node_process:
-        print("🛑 Terminating background Node.js WhatsApp Bridge...")
+        print("🛑 Terminating background Node.js WhatsApp Bridge...", flush=True)
         try:
-            parent = psutil.Process(node_process.pid)
-            for child in parent.children(recursive=True):
-                child.kill()
-            parent.kill()
-        except psutil.NoSuchProcess:
+            if psutil:
+                parent = psutil.Process(node_process.pid)
+                for child in parent.children(recursive=True):
+                    child.kill()
+                parent.kill()
+            else:
+                node_process.kill()
+        except Exception:
             pass
 
 atexit.register(cleanup_node_process)
@@ -77,9 +94,15 @@ from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from google import genai
-raw_key = os.getenv("GOOGLE_API_KEY")
-client = genai.Client(api_key=raw_key.strip() if raw_key else None, http_options={"timeout": 300000})
+client = None
+try:
+    from google import genai
+    raw_key = os.getenv("GOOGLE_API_KEY")
+    if raw_key:
+        clean_key = raw_key.strip().strip('"').strip("'")
+        client = genai.Client(api_key=clean_key, http_options={"timeout": 300000})
+except Exception as genai_err:
+    print(f"⚠️ [GenAI Warning] Could not initialize genai.Client: {genai_err}", flush=True)
 
 import agent
 from langgraph.types import Command
@@ -370,8 +393,10 @@ app = FastAPI(lifespan=lifespan)
 
 from fastapi.staticfiles import StaticFiles
 static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.exists(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+memory_cache_dir = os.path.join(os.path.dirname(__file__), "memory_cache")
+os.makedirs(static_dir, exist_ok=True)
+os.makedirs(memory_cache_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Microscopic health endpoint
 @app.get("/ping", response_class=PlainTextResponse)
@@ -1026,7 +1051,10 @@ if __name__ == "__main__":
         if sys.version_info < (3, 14):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    port = int(os.getenv("PORT", 8000))
+    try:
+        port = int(str(os.getenv("PORT", "8000")).strip().strip('"').strip("'"))
+    except (ValueError, TypeError):
+        port = 8000
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
     asyncio.run(server.serve())
