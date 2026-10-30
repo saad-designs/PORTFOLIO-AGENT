@@ -28,7 +28,8 @@ import os
 CRITICAL_ENV_VARS = [
     "SUPABASE_DB_URL", "SUPABASE_URL", "SUPABASE_KEY",
     "GOOGLE_API_KEY", "GROQ_API_KEY", "YOUTUBE_API_KEY",
-    "DATABASE_URL", "PORT", "GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_BACKUP"
+    "DATABASE_URL", "PORT", "GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_BACKUP",
+    "ENABLE_WHATSAPP_BRIDGE", "DISABLE_WHATSAPP_BRIDGE"
 ]
 for _k in CRITICAL_ENV_VARS:
     _v = os.getenv(_k)
@@ -54,12 +55,21 @@ if os.name != "nt":
 node_process = None
 bridge_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whatsapp_bridge")
 
-def start_whatsapp_bridge():
+def is_whatsapp_bridge_enabled() -> bool:
+    """Checks ENABLE_WHATSAPP_BRIDGE (default 'true') and legacy DISABLE_WHATSAPP_BRIDGE."""
+    if os.getenv("DISABLE_WHATSAPP_BRIDGE", "false").lower() in ("true", "1"):
+        return False
+    return os.getenv("ENABLE_WHATSAPP_BRIDGE", "true").lower() == "true"
+
+def start_whatsapp_bridge() -> bool:
     """Launches the Node.js WhatsApp Bridge subprocess inside FastAPI startup lifecycle."""
     global node_process
+    if not is_whatsapp_bridge_enabled():
+        print("ℹ️ WhatsApp bridge disabled by configuration", flush=True)
+        return False
     if node_process is not None and node_process.poll() is None:
-        return
-    if os.getenv("DISABLE_WHATSAPP_BRIDGE", "false").lower() not in ("true", "1") and os.path.exists(bridge_dir):
+        return True
+    if os.path.exists(bridge_dir):
         print("🚀 Booting Node.js WhatsApp Bridge concurrently in background (127.0.0.1:3000)...", flush=True)
         try:
             node_process = subprocess.Popen(
@@ -67,8 +77,10 @@ def start_whatsapp_bridge():
                 cwd=bridge_dir,
                 shell=(os.name == 'nt')
             )
+            return True
         except Exception as bridge_err:
             print(f"⚠️ [WhatsApp Bridge] Failed to launch background bridge subprocess: {bridge_err}", flush=True)
+    return False
 
 try:
     import psutil
@@ -320,9 +332,12 @@ async def boot_and_poll_whatsapp_bridge():
     Waits briefly after FastAPI lifespan yields so Uvicorn binds 0.0.0.0:8000 first,
     then launches whatsapp_bridge.js on 127.0.0.1:3000 and starts catch-up polling.
     """
+    if not is_whatsapp_bridge_enabled():
+        print("ℹ️ WhatsApp bridge disabled by configuration", flush=True)
+        return
     await asyncio.sleep(2)
-    start_whatsapp_bridge()
-    await poll_and_catchup_whatsapp()
+    if start_whatsapp_bridge():
+        await poll_and_catchup_whatsapp()
 
 async def run_startup_orchestration():
     """
@@ -489,17 +504,18 @@ async def get_dashboard_overview(request: Request):
     summary = await asyncio.to_thread(get_complete_financial_summary)
     
     # WhatsApp bridge status
-    bridge_status = "OFFLINE"
+    bridge_status = "DISABLED" if not is_whatsapp_bridge_enabled() else "OFFLINE"
     monitored_chats = []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                if resp.status == 200:
-                    b_data = await resp.json()
-                    bridge_status = b_data.get("status", "OFFLINE")
-                    monitored_chats = b_data.get("monitored_chats", [])
-    except Exception:
-        pass
+    if is_whatsapp_bridge_enabled():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    if resp.status == 200:
+                        b_data = await resp.json()
+                        bridge_status = b_data.get("status", "OFFLINE")
+                        monitored_chats = b_data.get("monitored_chats", [])
+        except Exception:
+            pass
         
     now = time.time()
     model_cooldowns = {
@@ -781,6 +797,12 @@ async def get_dashboard_chat_history_endpoint(request: Request, limit: int = 50)
 
 @app.get("/api/dashboard/whatsapp-qr")
 async def get_dashboard_whatsapp_qr():
+    if not is_whatsapp_bridge_enabled():
+        return {
+            "status": "DISABLED",
+            "qr": None,
+            "monitored_chats": ALLOWED_KTRADE_CHATS
+        }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=3)) as resp:
@@ -818,19 +840,30 @@ async def trigger_dashboard_sweep(sweep_type: str, background_tasks: BackgroundT
 @app.get("/whatsapp-qr", response_class=HTMLResponse)
 async def whatsapp_qr_page():
     qr_data = None
-    status = "INITIALIZING"
+    status = "DISABLED" if not is_whatsapp_bridge_enabled() else "INITIALIZING"
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=3)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    status = data.get("status", "INITIALIZING")
-                    qr_data = data.get("qr")
-    except Exception:
-        status = "CONNECTING"
+    if is_whatsapp_bridge_enabled():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        status = data.get("status", "INITIALIZING")
+                        qr_data = data.get("qr")
+        except Exception:
+            status = "CONNECTING"
 
-    if status == "READY":
+    if status == "DISABLED":
+        content_html = """
+        <div class="card">
+            <div class="icon">ℹ️</div>
+            <h2>WhatsApp Bridge Disabled</h2>
+            <p class="subtitle">Set <b>ENABLE_WHATSAPP_BRIDGE=true</b> in your environment configuration to run headless Chromium.</p>
+            <div class="badge badge-init">STATUS: DISABLED BY CONFIG</div>
+        </div>
+        """
+        refresh_tag = ""
+    elif status == "READY":
         content_html = """
         <div class="card">
             <div class="icon">✅</div>

@@ -197,7 +197,7 @@ function createWhatsAppClient() {
                 '--disable-gpu',
                 '--single-process',
                 '--renderer-process-limit=1',
-                '--js-flags=--max-old-space-size=128'
+                '--js-flags=--max-old-space-size=96'
             ],
             protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
         }

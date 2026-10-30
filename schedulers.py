@@ -1084,6 +1084,9 @@ import aiohttp
 import asyncio
 
 async def run_whatsapp_startup_catchup():
+    if os.getenv("ENABLE_WHATSAPP_BRIDGE", "true").strip().lower() != "true":
+        print("ℹ️ WhatsApp bridge disabled by configuration")
+        return
     print("📱 Waiting for WhatsApp Bridge Chromium engine to boot...")
     timeout = aiohttp.ClientTimeout(total=5)
     sweep_timeout = aiohttp.ClientTimeout(total=120)
