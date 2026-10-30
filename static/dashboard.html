@@ -800,48 +800,34 @@
         </div>
       </div>
 
-      <!-- Chat Input Bar -->
-      <div class="p-3 border-t border-[#1E232D] bg-[#12151B]">
-        <div id="file-preview-banner" style="display: none;" class="mb-2 px-2.5 py-1.5 bg-sky-500/10 border border-sky-500/30 rounded-lg text-[11px] text-sky-400 font-mono flex items-center justify-between gap-2">
-          <span id="file-preview-name" class="truncate">📎 Attached</span>
-          <button type="button" onclick="clearSelectedFile()" title="Remove attachment" class="text-slate-400 hover:text-white font-bold px-1">&times;</button>
-        </div>
-        <form id="copilot-form" onsubmit="handleCopilotSubmit(event)" class="chat-input-container relative flex items-center gap-1.5">
-          <input
-            type="file"
-            id="chat-file-input"
-            accept="application/pdf,image/*"
-            style="display: none;"
-            onchange="handleFileSelected(event)"
-          />
-          <button
-            type="button"
-            onclick="document.getElementById('chat-file-input').click()"
-            title="Upload KTrade PDF Statement, Broker Report, or Chart Screenshot"
-            class="p-2 bg-[#0B0D10] hover:bg-[#1E232D] border border-[#1E232D] hover:border-emerald-500/40 text-slate-300 hover:text-emerald-400 rounded-xl text-sm transition shrink-0"
-          >
+      <!-- Chat Input & Preview Container -->
+      <div class="chat-footer p-3 border-t border-[#1E232D] bg-[#0B0D10]">
+        <!-- Thumbnail Preview Tray -->
+        <div id="file-preview-tray" class="flex flex-wrap gap-2 mb-2 empty:mb-0"></div>
+
+        <div class="flex items-center gap-2">
+          <!-- Hidden Multi-file Input -->
+          <input type="file" id="chat-file-input" multiple accept="application/pdf,image/*" class="hidden" onchange="handleFilesSelected(event)">
+
+          <!-- Attachment Button -->
+          <button type="button" onclick="document.getElementById('chat-file-input').click()"
+                  class="p-2 rounded-lg bg-[#12151B] border border-[#1E232D] text-gray-400 hover:text-white hover:border-gray-600 transition shrink-0"
+                  title="Attach Images or PDFs">
             📎
           </button>
-          <div class="relative flex-1 flex items-center">
-            <input
-              type="text"
-              id="copilot-input"
-              placeholder="Ask a question, log trade, or upload PDF/chart..."
-              class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl pl-3 pr-9 py-2.5 text-white text-xs placeholder:text-slate-500 font-sans transition"
-              autocomplete="off"
-            />
-            <button
-              type="submit"
-              id="copilot-send-btn"
-              class="absolute right-1.5 p-1.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-black rounded-lg transition shadow-md shadow-emerald-500/20"
-            >
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
-              </svg>
-            </button>
-          </div>
-        </form>
-        <p class="text-[10px] text-slate-500 text-center mt-1.5 font-mono">Attach PDFs/charts with 📎 (or Ctrl+V image) • Press Enter to send</p>
+
+          <!-- Message Text Input -->
+          <input type="text" id="chat-message-input" placeholder="Ask a question or upload reports/charts..."
+                 autocomplete="off"
+                 class="flex-1 min-w-0 bg-[#12151B] border border-[#1E232D] rounded-lg px-3 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
+                 onkeydown="if(event.key === 'Enter') { event.preventDefault(); sendChatMessage(); }">
+
+          <!-- Send Button -->
+          <button type="button" onclick="sendChatMessage()"
+                  class="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition font-mono shrink-0">
+            Send
+          </button>
+        </div>
       </div>
     </aside>
   </div>
@@ -1851,37 +1837,72 @@
       }
     }
 
-    // CHAT COPILOT CONTROLLER & MULTIMODAL FILE UPLOADER
+    // CHAT COPILOT CONTROLLER & MULTIMODAL MULTI-FILE UPLOADER
     let copilotDrawerOpen = true;
-    let selectedFile = null;
+    let attachedFiles = []; // Global array holding selected files
+    let previewObjectUrls = [];
 
-    function handleFileSelected(event) {
-      const file = event.target && event.target.files ? event.target.files[0] : null;
-      if (file) {
-        selectedFile = file;
-        const banner = document.getElementById('file-preview-banner');
-        const bannerName = document.getElementById('file-preview-name');
-        if (bannerName) {
-          const sizeKb = (file.size / 1024).toFixed(1);
-          bannerName.innerText = `📎 Attached: ${file.name} (${sizeKb} KB)`;
+    function handleFilesSelected(event) {
+      const files = Array.from((event.target && event.target.files) || []);
+      files.forEach(file => {
+        attachedFiles.push(file);
+      });
+      renderFilePreviews();
+      // Reset input so selecting the same file again triggers change
+      if (event.target) event.target.value = '';
+    }
+
+    function renderFilePreviews() {
+      const tray = document.getElementById('file-preview-tray');
+      if (!tray) return;
+
+      previewObjectUrls.forEach(url => {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+      });
+      previewObjectUrls = [];
+      tray.innerHTML = '';
+
+      attachedFiles.forEach((file, index) => {
+        const card = document.createElement('div');
+        card.className = "relative flex items-center gap-2 bg-[#12151B] border border-[#1E232D] rounded-lg p-1.5 pr-6 text-xs text-white max-w-[200px]";
+
+        if (file.type && file.type.startsWith('image/')) {
+          // Image Thumbnail
+          const img = document.createElement('img');
+          const objUrl = URL.createObjectURL(file);
+          previewObjectUrls.push(objUrl);
+          img.src = objUrl;
+          img.className = "w-8 h-8 object-cover rounded border border-[#1E232D] shrink-0";
+          card.appendChild(img);
+        } else {
+          // PDF / File Icon Badge
+          const badge = document.createElement('div');
+          badge.className = "w-8 h-8 flex items-center justify-center bg-red-900/30 text-red-400 font-bold rounded border border-red-800/50 text-[10px] shrink-0";
+          badge.innerText = "PDF";
+          card.appendChild(badge);
         }
-        if (banner) {
-          banner.style.display = 'flex';
-        }
-      }
+
+        // File Name Label
+        const nameSpan = document.createElement('span');
+        nameSpan.className = "truncate font-mono";
+        nameSpan.innerText = file.name;
+        card.appendChild(nameSpan);
+
+        // Remove Button (X)
+        const removeBtn = document.createElement('button');
+        removeBtn.type = "button";
+        removeBtn.className = "absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-400 px-1 text-sm font-bold";
+        removeBtn.innerHTML = "&times;";
+        removeBtn.onclick = () => {
+          attachedFiles.splice(index, 1);
+          renderFilePreviews();
+        };
+        card.appendChild(removeBtn);
+
+        tray.appendChild(card);
+      });
     }
 
-    function clearSelectedFile() {
-      selectedFile = null;
-      const fileInput = document.getElementById('chat-file-input');
-      if (fileInput) fileInput.value = '';
-      const banner = document.getElementById('file-preview-banner');
-      if (banner) banner.style.display = 'none';
-    }
-
-    function sendChatMessage() {
-      handleCopilotSubmit();
-    }
     function toggleCopilotDrawer() {
       const drawer = document.getElementById('copilot-drawer');
       if (!drawer) return;
@@ -1901,7 +1922,7 @@
         
         container.innerHTML = '';
         data.history.forEach(msg => {
-          appendChatMessage(msg.role, msg.content, msg.actions_taken, false);
+          appendChatMessage(msg.role, msg.content, [], msg.actions_taken || [], false);
         });
         scrollChatToBottom();
       } catch (err) {
@@ -1909,45 +1930,80 @@
       }
     }
 
-    function appendChatMessage(role, content, actions = [], scroll = true) {
+    function appendChatMessage(role, content, files = [], actions = [], scroll = true) {
       const container = document.getElementById('copilot-messages');
       if (!container) return;
       const isUser = role === 'user';
+
+      // Backwards compatibility if 3rd arg is an actions array instead of File[]
+      if (Array.isArray(files) && files.length && !(files[0] instanceof Blob) && (files[0].type || files[0].status) && (!actions || !actions.length)) {
+        actions = files;
+        files = [];
+      }
       
       const msgDiv = document.createElement('div');
       msgDiv.className = `flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-1`;
 
-      let badgesHtml = '';
-      if (actions && actions.length) {
-        badgesHtml = `
-          <div class="flex flex-wrap gap-1 mt-1.5">
-            ${actions.map(act => `
-              <span class="px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase ${
-                act.status === 'FAILED' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
-                (act.type === 'TRADE' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
-                 act.type === 'CAPITAL' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' :
-                 act.type === 'RESEARCH' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
-                 act.type === 'CHART' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' :
-                 'bg-violet-500/20 text-violet-300 border border-violet-500/30')
-              }">
-                ⚡ ${act.label || act.type}
-              </span>
-            `).join('')}
-          </div>
-        `;
+      const bubbleDiv = document.createElement('div');
+      bubbleDiv.className = `max-w-[90%] rounded-xl p-3 text-xs leading-relaxed ${
+        isUser 
+          ? 'bg-[#1E232D] text-white border border-[#2A313E] rounded-br-none' 
+          : 'bg-[#0B0D10] text-slate-200 border border-[#1E232D] rounded-bl-none shadow-md'
+      }`;
+
+      // Render attached image thumbnails / PDF chips inside sent bubble
+      if (Array.isArray(files) && files.length > 0) {
+        const trayDiv = document.createElement('div');
+        trayDiv.className = `flex flex-wrap gap-1.5 ${content ? 'mb-2' : ''}`;
+        files.forEach(file => {
+          const chip = document.createElement('div');
+          chip.className = "flex items-center gap-1.5 bg-[#0B0D10] border border-[#2A313E] rounded-lg p-1 pr-2 text-[11px] text-slate-200 max-w-[180px]";
+          if (file.type && file.type.startsWith('image/')) {
+            const thumb = document.createElement('img');
+            thumb.src = URL.createObjectURL(file);
+            thumb.className = "w-7 h-7 object-cover rounded border border-[#1E232D] shrink-0";
+            chip.appendChild(thumb);
+          } else {
+            const pdfIcon = document.createElement('div');
+            pdfIcon.className = "w-7 h-7 flex items-center justify-center bg-red-900/30 text-red-400 font-bold rounded border border-red-800/50 text-[9px] shrink-0";
+            pdfIcon.innerText = "PDF";
+            chip.appendChild(pdfIcon);
+          }
+          const fn = document.createElement('span');
+          fn.className = "truncate font-mono";
+          fn.innerText = file.name || 'attachment';
+          chip.appendChild(fn);
+          trayDiv.appendChild(chip);
+        });
+        bubbleDiv.appendChild(trayDiv);
       }
 
-      msgDiv.innerHTML = `
-        <div class="max-w-[90%] rounded-xl p-3 text-xs leading-relaxed ${
-          isUser 
-            ? 'bg-[#1E232D] text-white border border-[#2A313E] rounded-br-none' 
-            : 'bg-[#0B0D10] text-slate-200 border border-[#1E232D] rounded-bl-none shadow-md'
-        }">
-          <p class="whitespace-pre-wrap">${escapeHtml(content)}</p>
-          ${badgesHtml}
-        </div>
-      `;
+      if (content) {
+        const textP = document.createElement('p');
+        textP.className = 'whitespace-pre-wrap';
+        textP.textContent = content;
+        bubbleDiv.appendChild(textP);
+      }
 
+      if (actions && actions.length) {
+        const badgesWrap = document.createElement('div');
+        badgesWrap.className = 'flex flex-wrap gap-1 mt-1.5';
+        badgesWrap.innerHTML = actions.map(act => `
+          <span class="px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase ${
+            act.status === 'FAILED' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
+            (act.type === 'TRADE' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
+             act.type === 'CAPITAL' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' :
+             act.type === 'RESEARCH' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+             act.type === 'CHART' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' :
+             'bg-violet-500/20 text-violet-300 border border-violet-500/30')
+          }">
+            ⚡ ${escapeHtml(act.label || act.type)}
+          </span>
+        `).join('');
+        bubbleDiv.appendChild(badgesWrap);
+      }
+
+      msgDiv.appendChild(bubbleDiv);
       container.appendChild(msgDiv);
       if (scroll) scrollChatToBottom();
     }
@@ -1964,77 +2020,97 @@
       if (container) container.scrollTop = container.scrollHeight;
     }
 
-    async function handleCopilotSubmit(e) {
-      if (e) e.preventDefault();
-      const input = document.getElementById('copilot-input');
-      const text = input.value.trim();
-      const fileToSend = selectedFile;
-      if (!text && !fileToSend) return;
+    async function sendChatMessage() {
+      const input = document.getElementById('chat-message-input');
+      const message = input ? input.value.trim() : '';
+      if (!message && attachedFiles.length === 0) return;
 
-      input.value = '';
-      clearSelectedFile();
+      const filesToSend = [...attachedFiles];
 
-      const displayUserMsg = fileToSend
-        ? (text ? `📎 [Attached: ${fileToSend.name}]\n${text}` : `📎 [Attached: ${fileToSend.name}]`)
-        : text;
-      appendChatMessage('user', displayUserMsg);
+      // Build FormData payload
+      const formData = new FormData();
+      formData.append("message", message || "Analyze attached files.");
+      filesToSend.forEach(file => {
+        formData.append("files", file); // Appends multiple files under 'files'
+      });
+
+      // Render user message & thumbnails in chat UI
+      appendChatMessage('user', message, filesToSend);
+
+      // Clear inputs & tray
+      if (input) input.value = '';
+      attachedFiles = [];
+      renderFilePreviews();
 
       const container = document.getElementById('copilot-messages');
       const loaderId = 'loader-' + Date.now();
       const loaderDiv = document.createElement('div');
       loaderDiv.id = loaderId;
       loaderDiv.className = 'flex items-start';
-      const loaderLabel = fileToSend
-        ? `Analyzing ${escapeHtml(fileToSend.name)} via Gemini Multimodal...`
+      const loaderLabel = filesToSend.length > 0
+        ? `Analyzing ${filesToSend.length} attachment${filesToSend.length > 1 ? 's' : ''} via Gemini Multimodal...`
         : 'Processing ledger action...';
       loaderDiv.innerHTML = `
         <div class="bg-[#0B0D10] border border-[#1E232D] rounded-xl p-3 text-xs text-slate-400 flex items-center gap-2">
-          <div class="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0"></div>
+          <div class="w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin shrink-0"></div>
           <span class="font-mono text-[11px]">${loaderLabel}</span>
         </div>
       `;
-      container.appendChild(loaderDiv);
+      if (container) container.appendChild(loaderDiv);
       scrollChatToBottom();
 
-      try {
-        const formData = new FormData();
-        formData.append('message', text);
-        if (fileToSend) {
-          formData.append('file', fileToSend);
-        }
+      const abortCtrl = new AbortController();
+      const clientTimeoutId = setTimeout(() => abortCtrl.abort(), 35000);
 
-        const res = await apiFetch('/api/dashboard/chat', {
+      try {
+        const data = await apiFetch('/api/dashboard/chat', {
           method: 'POST',
-          body: formData
+          body: formData, // Sent as multipart/form-data automatically
+          signal: abortCtrl.signal
         });
+        clearTimeout(clientTimeoutId);
 
         const l = document.getElementById(loaderId);
         if (l) l.remove();
 
-        appendChatMessage('assistant', res.reply || 'Command processed.', res.actions_taken || []);
+        appendChatMessage('assistant', data.reply || 'Command processed.', [], data.actions_taken || []);
 
-        // Immediately refresh dashboard metrics!
-        loadOverviewData();
-        if (currentTab === 'portfolio') loadPortfolioData();
-        if (currentTab === 'dividends') loadDividendsData();
-        if (currentTab === 'whatsapp') loadIntelligenceData();
-        if (currentTab === 'research') loadResearchData();
+        if (data.status === 'timeout') {
+          showToast('Copilot multimodal call timed out (30s).', 'error');
+        } else {
+          // Immediately refresh dashboard metrics!
+          loadOverviewData();
+          if (currentTab === 'portfolio') loadPortfolioData();
+          if (currentTab === 'dividends') loadDividendsData();
+          if (currentTab === 'whatsapp') loadIntelligenceData();
+          if (currentTab === 'research') loadResearchData();
 
-        if (res.actions_taken && res.actions_taken.length) {
-          showToast('Ledger / Research updated successfully!', 'success');
+          if (data.actions_taken && data.actions_taken.length) {
+            showToast('Ledger / Research updated successfully!', 'success');
+          }
         }
       } catch (err) {
+        clearTimeout(clientTimeoutId);
         const l = document.getElementById(loaderId);
         if (l) l.remove();
-        appendChatMessage('assistant', `⚠️ Error executing command: ${err.message}`, [{ type: 'ERROR', label: 'FAILED', status: 'FAILED' }]);
-        showToast(`Copilot Error: ${err.message}`, 'error');
+        const isTimeout = err && err.name === 'AbortError';
+        const errMsg = isTimeout
+          ? '⚠️ Gemini multimodal processing timed out. Please try sending a smaller image or text only.'
+          : `❌ Error communicating with AI Copilot: ${err.message}`;
+        appendChatMessage('assistant', errMsg, [], [{ type: 'ERROR', label: isTimeout ? 'TIMEOUT' : 'FAILED', status: 'FAILED' }]);
+        showToast(isTimeout ? 'Copilot timed out.' : `Copilot Error: ${err.message}`, 'error');
       }
     }
 
+    function handleCopilotSubmit(e) {
+      if (e) e.preventDefault();
+      return sendChatMessage();
+    }
+
     function sendQuickPrompt(promptText) {
-      const input = document.getElementById('copilot-input');
-      input.value = promptText;
-      handleCopilotSubmit();
+      const input = document.getElementById('chat-message-input');
+      if (input) input.value = promptText;
+      sendChatMessage();
     }
 
     function clearChatUI() {
@@ -2056,25 +2132,30 @@
       loadOverviewData();
       loadChatHistory();
 
-      // Allow Ctrl+V pasting chart screenshots directly into Copilot input
-      const copilotInput = document.getElementById('copilot-input');
-      if (copilotInput) {
-        copilotInput.addEventListener('paste', (e) => {
+      // Allow Ctrl+V pasting one or more chart screenshots directly into #file-preview-tray
+      const chatInput = document.getElementById('chat-message-input');
+      if (chatInput) {
+        chatInput.addEventListener('paste', (e) => {
           const items = e.clipboardData && e.clipboardData.items ? e.clipboardData.items : [];
+          let addedCount = 0;
           for (let i = 0; i < items.length; i++) {
             if (items[i].type && items[i].type.startsWith('image/')) {
               const pastedFile = items[i].getAsFile();
               if (pastedFile) {
                 const ext = (pastedFile.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
-                selectedFile = new File([pastedFile], `chart_screenshot_${Date.now()}.${ext}`, { type: pastedFile.type });
-                const banner = document.getElementById('file-preview-banner');
-                const bannerName = document.getElementById('file-preview-name');
-                if (bannerName) bannerName.innerText = `📎 Attached: ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`;
-                if (banner) banner.style.display = 'flex';
-                showToast('Chart screenshot attached from clipboard!', 'info');
+                const namedFile = new File(
+                  [pastedFile],
+                  `chart_screenshot_${Date.now()}_${addedCount + 1}.${ext}`,
+                  { type: pastedFile.type }
+                );
+                attachedFiles.push(namedFile);
+                addedCount++;
               }
-              break;
             }
+          }
+          if (addedCount > 0) {
+            renderFilePreviews();
+            showToast(`Attached ${addedCount} screenshot${addedCount > 1 ? 's' : ''} from clipboard!`, 'info');
           }
         });
       }

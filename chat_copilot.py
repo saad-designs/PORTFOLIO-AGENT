@@ -42,8 +42,12 @@ You must respond ONLY with a valid JSON object matching this schema:
 {
   "action_type": "BUY_STOCK" | "SELL_STOCK" | "LOG_KTRADE_STATEMENT" | "DEPOSIT_CASH" | "WITHDRAW_CASH" | "LOG_DIVIDEND_IN_BANK" | "LOG_DIVIDEND_ENTITLED" | "TRANSFER_DIVIDEND_TO_KTRADE" | "LOG_RESEARCH_REPORT" | "CHART_ANALYSIS" | "GENERAL_QUERY",
   "action_data": { ... },
+  "additional_actions": [
+    {"action_type": "...", "action_data": { ... }}
+  ],
   "reply": "Executive, concise direct response."
 }
+(Note: "additional_actions" is optional—include it when the user uploads multiple files that warrant multiple distinct actions, such as two broker reports, multiple chart screenshots, or a KTrade PDF statement alongside a chart screenshot.)
 
 ACTION DEFINITIONS:
 1. BUY_STOCK:
@@ -199,14 +203,14 @@ RECENT RELEVANT SIGNALS / FEED:
 {json.dumps([{f['category']: f"{f['title']} - {f['content'][:120]}"} for f in recent_feed], indent=2)}"""
 
 
-def parse_copilot_response(raw_response: str, persisted_user_msg: str) -> dict:
+def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User query") -> dict:
     """
-    Parses structured JSON copilot output, executes ledger/research/feed actions,
-    persists chat history, and formats the response for the frontend drawer.
+    Parses structured JSON copilot output, executes ledger/research/feed actions
+    (including multi-file batch actions), persists chat history, and formats the response.
     """
     parsed = extract_json_payload(raw_response or "")
-    action_type = parsed.get("action_type", "GENERAL_QUERY")
-    action_data = parsed.get("action_data", {}) or {}
+    primary_action_type = parsed.get("action_type", "GENERAL_QUERY")
+    primary_action_data = parsed.get("action_data", {}) or {}
     reply_text = parsed.get("reply", "")
     if not parsed and raw_response and raw_response.strip():
         reply_text = raw_response.strip()
@@ -248,7 +252,11 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str) -> dict:
             return trade_res
         return None
 
-    try:
+    def _execute_action(action_type: str, action_data: dict):
+        nonlocal reply_text
+        if not action_type or action_type == "GENERAL_QUERY":
+            return
+
         if action_type in {"BUY_STOCK", "SELL_STOCK"}:
             default_side = "BUY" if action_type == "BUY_STOCK" else "SELL"
             trade_res = _execute_single_trade(action_data, default_side=default_side)
@@ -364,69 +372,92 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str) -> dict:
                     reply_text = f"🚀 Transferred **{trans_res['ticker']}** dividend of **Rs. {trans_res['net_amount']:,.2f}** from bank into KTrade cash. Available cash is now deployed and ready."
 
         elif action_type == "LOG_RESEARCH_REPORT":
-            source = str(action_data.get("source") or "Uploaded Broker PDF").strip()
-            ticker = str(action_data.get("ticker") or "MACRO").strip().upper()
-            subject = str(action_data.get("subject") or f"{ticker} Research Report").strip()
-            sentiment = str(action_data.get("sentiment") or "NEUTRAL").strip().upper()
-            if sentiment not in {"BULLISH", "BEARISH", "NEUTRAL"}:
-                sentiment = "NEUTRAL"
-            summary_body = str(action_data.get("summary") or reply_text or "Institutional research report analyzed.").strip()
+            report_items = action_data.get("reports") if isinstance(action_data.get("reports"), list) else [action_data]
+            for rep in report_items:
+                if not isinstance(rep, dict):
+                    continue
+                source = str(rep.get("source") or "Uploaded Broker PDF").strip()
+                ticker = str(rep.get("ticker") or "MACRO").strip().upper()
+                subject = str(rep.get("subject") or f"{ticker} Research Report").strip()
+                sentiment = str(rep.get("sentiment") or "NEUTRAL").strip().upper()
+                if sentiment not in {"BULLISH", "BEARISH", "NEUTRAL"}:
+                    sentiment = "NEUTRAL"
+                summary_body = str(rep.get("summary") or reply_text or "Institutional research report analyzed.").strip()
 
-            try:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO institutional_reports (source, ticker, subject, sentiment, summary)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (source, ticker, subject, sentiment, summary_body)
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO institutional_reports (source, ticker, subject, sentiment, summary)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (source, ticker, subject, sentiment, summary_body)
+                    )
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                except Exception as rep_err:
+                    print(f"⚠️ [Chat Copilot] Could not insert into institutional_reports: {rep_err}")
+
+                publish_agent_event(
+                    category="MACRO_NEWS",
+                    title=f"📑 Broker Report ({source}): {ticker} [{sentiment}]",
+                    content=summary_body[:4000],
+                    metadata=rep
                 )
-                conn.commit()
-                cur.close()
-                conn.close()
-            except Exception as rep_err:
-                print(f"⚠️ [Chat Copilot] Could not insert into institutional_reports: {rep_err}")
-
-            publish_agent_event(
-                category="MACRO_NEWS",
-                title=f"📑 Broker Report ({source}): {ticker} [{sentiment}]",
-                content=summary_body[:4000],
-                metadata=action_data
-            )
-            actions_taken.append({
-                "type": "RESEARCH",
-                "label": f"Logged {ticker} Report ({sentiment})",
-                "status": "COMPLETED"
-            })
+                actions_taken.append({
+                    "type": "RESEARCH",
+                    "label": f"Logged {ticker} Report ({sentiment})",
+                    "status": "COMPLETED"
+                })
 
         elif action_type == "CHART_ANALYSIS":
-            ticker = str(action_data.get("ticker") or "PSX").strip().upper()
-            setup = str(action_data.get("setup") or "TECHNICAL_REVIEW").strip().upper()
-            summary_body = str(action_data.get("summary") or reply_text or "Technical chart evaluated.").strip()
-            publish_agent_event(
-                category="DESK_MANAGER",
-                title=f"📈 Technical Chart Review: {ticker} ({setup})",
-                content=summary_body[:4000],
-                metadata=action_data
-            )
-            actions_taken.append({
-                "type": "CHART",
-                "label": f"Chart Evaluated: {ticker} ({setup})",
-                "status": "COMPLETED"
-            })
+            chart_items = action_data.get("charts") if isinstance(action_data.get("charts"), list) else [action_data]
+            for ch in chart_items:
+                if not isinstance(ch, dict):
+                    continue
+                ticker = str(ch.get("ticker") or "PSX").strip().upper()
+                setup = str(ch.get("setup") or "TECHNICAL_REVIEW").strip().upper()
+                summary_body = str(ch.get("summary") or reply_text or "Technical chart evaluated.").strip()
+                publish_agent_event(
+                    category="DESK_MANAGER",
+                    title=f"📈 Technical Chart Review: {ticker} ({setup})",
+                    content=summary_body[:4000],
+                    metadata=ch
+                )
+                actions_taken.append({
+                    "type": "CHART",
+                    "label": f"Chart Evaluated: {ticker} ({setup})",
+                    "status": "COMPLETED"
+                })
 
-    except Exception as exec_err:
-        print(f"❌ [Chat Copilot Action Execution Error]: {exec_err}")
-        actions_taken.append({
-            "type": "ERROR",
-            "label": f"Action Failed: {str(exec_err)[:50]}",
-            "status": "FAILED"
-        })
-        reply_text += f"\n\n*(Note: Automated ledger adjustment failed: {exec_err})*"
+    action_queue: List[tuple] = []
+    if isinstance(parsed.get("actions"), list):
+        for item in parsed["actions"]:
+            if isinstance(item, dict) and item.get("action_type"):
+                action_queue.append((str(item["action_type"]), item.get("action_data") or {}))
+    else:
+        action_queue.append((primary_action_type, primary_action_data))
+        if isinstance(parsed.get("additional_actions"), list):
+            for extra in parsed["additional_actions"]:
+                if isinstance(extra, dict) and extra.get("action_type"):
+                    action_queue.append((str(extra["action_type"]), extra.get("action_data") or {}))
+
+    for act_type, act_data in action_queue:
+        try:
+            _execute_action(act_type, act_data)
+        except Exception as exec_err:
+            print(f"❌ [Chat Copilot Action Execution Error ({act_type})]: {exec_err}")
+            actions_taken.append({
+                "type": "ERROR",
+                "label": f"Action Failed: {str(exec_err)[:50]}",
+                "status": "FAILED"
+            })
+            reply_text += f"\n\n*(Note: Automated ledger adjustment failed: {exec_err})*"
 
     if not reply_text:
-        reply_text = "I have processed your portfolio command and attachment. All records and ledgers are synchronized."
+        reply_text = "I have processed your portfolio command and attachments. All records and ledgers are synchronized."
 
     try:
         save_chat_message("user", persisted_user_msg, [])
@@ -437,127 +468,209 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str) -> dict:
     return {
         "reply": reply_text,
         "actions_taken": actions_taken,
-        "action_type": action_type,
+        "action_type": primary_action_type,
         "status": "success"
     }
 
 
+CHAT_MULTIMODAL_TIMEOUT_SECONDS = 30.0
+
+
 async def process_dashboard_chat_with_multimodal(
     user_message: str,
-    file_bytes: Optional[bytes] = None,
-    mime_type: Optional[str] = None,
-    filename: Optional[str] = None
+    processed_files: Optional[List[Dict[str, Any]]] = None
 ) -> dict:
     """
     Multimodal & conversational AI copilot for the Matte Dark Dashboard:
-    - Text + PDF/Image attachments route directly to Gemini (gemini-3.8-flash cascade via google-genai SDK)
-      using types.Part.from_bytes (with automatic Files API fallback for large PDFs).
-    - Pure text queries route to Groq fast text cascade first, with Gemini fallback.
+    - Runs inside `user_priority_context()` so user-initiated chat bypasses background sweep
+      semaphores (YouTube / news / sentinel) instead of waiting behind Concurrency=2.
+    - Enforces a hard 30.0s `asyncio.wait_for` timeout on Gemini multimodal calls, releasing
+      concurrency locks immediately and returning a clean JSON timeout reply.
     """
-    clean_msg = (user_message or "").strip()
-    has_attachment = bool(file_bytes and mime_type)
+    from rate_limiter import user_priority_context
 
-    if not clean_msg and not has_attachment:
-        return {"reply": "Please enter a message or attach a PDF/image.", "actions_taken": [], "status": "empty"}
+    with user_priority_context():
+        clean_msg = (user_message or "").strip()
+        valid_files = [
+            f for f in (processed_files or [])
+            if isinstance(f, dict) and f.get("bytes") and f.get("mime_type")
+        ]
+        has_attachments = len(valid_files) > 0
 
-    if has_attachment and not clean_msg:
-        clean_msg = (
-            f"Analyze this uploaded file ({filename or mime_type}). "
-            f"If it is a KTrade daily trade confirmation PDF, extract and log all executed trades via LOG_KTRADE_STATEMENT. "
-            f"If it is a PSX broker research report PDF, evaluate the thesis against our internal valuation targets and log via LOG_RESEARCH_REPORT. "
-            f"If it is a technical chart screenshot, evaluate RSI/MACD/price structure and breakout levels via CHART_ANALYSIS."
-        )
+        if not clean_msg and not has_attachments:
+            return {"reply": "Please enter a message or attach PDFs/images.", "actions_taken": [], "status": "empty"}
 
-    persisted_user_msg = (
-        f"📎 [Attached: {filename or mime_type}]\n{(user_message or '').strip()}".strip()
-        if has_attachment
-        else clean_msg
-    )
-
-    context_str = await asyncio.to_thread(get_live_financial_context)
-    prompt = f"{context_str}\n\nUSER MESSAGE:\n\"{clean_msg}\"\n\nRespond with strict JSON."
-
-    raw_response = None
-
-    if has_attachment:
-        from google import genai
-        from google.genai import types
-
-        active_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
-        clean_key = active_key.strip().strip('"').strip("'") if active_key else None
-        client = genai.Client(api_key=clean_key, http_options={"timeout": 300000}) if clean_key else None
-
-        full_multimodal_prompt = (
-            f"{SYSTEM_COPILOT_PROMPT}\n\n"
-            f"ATTACHED FILE: {filename or 'attachment'} ({mime_type}, {len(file_bytes)} bytes)\n\n"
-            f"{prompt}"
-        )
-
-        try:
-            print(f"📎 [Chat Copilot] Analyzing multimodal upload '{filename or 'attachment'}' ({mime_type}, {len(file_bytes)} bytes) via Gemini...", flush=True)
-            media_part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-            raw_response = await generate_with_fallback(
-                client,
-                [media_part, full_multimodal_prompt],
-                task=TASK_DEEP_REASONING
+        if has_attachments and (not clean_msg or clean_msg == "Analyze attached files."):
+            names_str = ", ".join(str(f.get("filename") or f["mime_type"]) for f in valid_files)
+            clean_msg = (
+                f"Analyze all {len(valid_files)} uploaded file(s) ({names_str}). "
+                f"For any KTrade daily trade confirmation PDF, extract and log all executed trades via LOG_KTRADE_STATEMENT. "
+                f"For any PSX broker research report PDF, evaluate the thesis against our internal valuation targets and log via LOG_RESEARCH_REPORT. "
+                f"For any technical chart screenshot, evaluate RSI/MACD/price structure and breakout levels via CHART_ANALYSIS. "
+                f"If multiple files require different actions, include additional_actions so every file is logged properly."
             )
-        except Exception as inline_err:
-            print(f"⚠️ [Chat Copilot] Inline Part.from_bytes threw ({inline_err}). Falling back to Gemini Files API...", flush=True)
-            if client is not None:
-                safe_ext = os.path.splitext(filename or "")[1] or (".pdf" if "pdf" in (mime_type or "").lower() else ".png")
-                temp_path = f"temp_copilot_{uuid.uuid4().hex[:8]}{safe_ext}"
-                try:
-                    with open(temp_path, "wb") as tf:
-                        tf.write(file_bytes)
-                    uploaded_file = await asyncio.to_thread(
-                        client.files.upload,
-                        file=temp_path,
-                        config=types.UploadFileConfig(mime_type=mime_type)
+
+        if has_attachments:
+            attached_label = ", ".join(str(f.get("filename") or f["mime_type"]) for f in valid_files)
+            raw_user_text = (user_message or "").strip()
+            if raw_user_text and raw_user_text != "Analyze attached files.":
+                persisted_user_msg = f"📎 [Attached ({len(valid_files)}): {attached_label}]\n{raw_user_text}"
+            else:
+                persisted_user_msg = f"📎 [Attached ({len(valid_files)}): {attached_label}]"
+        else:
+            persisted_user_msg = clean_msg
+
+        context_str = await asyncio.to_thread(get_live_financial_context)
+        prompt = f"{context_str}\n\nUser Query: {clean_msg}\n\nRespond with strict JSON."
+
+        raw_response = None
+
+        if has_attachments:
+            from google import genai
+            from google.genai import types
+
+            active_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
+            clean_key = active_key.strip().strip('"').strip("'") if active_key else None
+            client = genai.Client(api_key=clean_key, http_options={"timeout": 28000}) if clean_key else None
+            if client is not None and clean_key:
+                client._active_google_key = clean_key
+
+            file_manifest = "\n".join(
+                f"- File {idx + 1}: {f.get('filename') or f'attachment_{idx + 1}'} ({f['mime_type']}, {len(f['bytes'])} bytes)"
+                for idx, f in enumerate(valid_files)
+            )
+            full_multimodal_prompt = (
+                f"{SYSTEM_COPILOT_PROMPT}\n\n"
+                f"ATTACHED FILES ({len(valid_files)}):\n{file_manifest}\n\n"
+                f"{prompt}"
+            )
+
+            # Construct multi-part contents payload for Gemini (gemini-3.8-flash cascade via google-genai SDK)
+            contents: List[Any] = [full_multimodal_prompt]
+            for file_obj in valid_files:
+                contents.append(
+                    types.Part.from_bytes(
+                        data=file_obj["bytes"],
+                        mime_type=file_obj["mime_type"]
                     )
+                )
+
+            async def _invoke_multimodal_gemini() -> Optional[str]:
+                try:
+                    print(
+                        f"📎 [Chat Copilot] Priority multimodal call for {len(valid_files)} attachment(s) (timeout={CHAT_MULTIMODAL_TIMEOUT_SECONDS}s)...",
+                        flush=True
+                    )
+                    return await generate_with_fallback(
+                        client,
+                        contents,
+                        task=TASK_DEEP_REASONING,
+                        priority=True
+                    )
+                except (asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):
+                    raise
+                except Exception as inline_err:
+                    print(f"⚠️ [Chat Copilot] Inline Part.from_bytes threw ({inline_err}). Trying Gemini Files API fallback...", flush=True)
+                    if client is None:
+                        raise
+                    temp_paths: List[str] = []
+                    uploaded_refs: List[Any] = []
                     try:
-                        raw_response = await generate_with_fallback(
+                        for file_obj in valid_files:
+                            fname = str(file_obj.get("filename") or "")
+                            mtype = str(file_obj["mime_type"])
+                            safe_ext = os.path.splitext(fname)[1] or (".pdf" if "pdf" in mtype.lower() else ".png")
+                            temp_path = f"temp_copilot_{uuid.uuid4().hex[:8]}{safe_ext}"
+                            with open(temp_path, "wb") as tf:
+                                tf.write(file_obj["bytes"])
+                            temp_paths.append(temp_path)
+                            uploaded_file = await asyncio.to_thread(
+                                client.files.upload,
+                                file=temp_path,
+                                config=types.UploadFileConfig(mime_type=mtype)
+                            )
+                            uploaded_refs.append(uploaded_file)
+
+                        return await generate_with_fallback(
                             client,
-                            [uploaded_file, full_multimodal_prompt],
-                            task=TASK_MULTIMODAL
+                            [full_multimodal_prompt, *uploaded_refs],
+                            task=TASK_MULTIMODAL,
+                            priority=True
                         )
                     finally:
-                        try:
-                            client.files.delete(name=uploaded_file.name)
-                        except Exception:
-                            pass
-                except Exception as upload_err:
-                    print(f"❌ [Chat Copilot] Gemini Files API fallback failed: {upload_err}", flush=True)
-                finally:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except Exception:
-                            pass
-    else:
-        # Pure text command: fast Groq cascade first, then Gemini deep reasoning fallback
-        try:
-            raw_response = await asyncio.to_thread(generate_text_groq, prompt, SYSTEM_COPILOT_PROMPT)
-        except Exception as g_err:
-            print(f"⚠️ [Chat Copilot] Groq generation failed: {g_err}")
+                        for u_ref in uploaded_refs:
+                            try:
+                                client.files.delete(name=u_ref.name)
+                            except Exception:
+                                pass
+                        for t_path in temp_paths:
+                            if os.path.exists(t_path):
+                                try:
+                                    os.remove(t_path)
+                                except Exception:
+                                    pass
 
-        if not raw_response or not raw_response.strip():
-            print("ℹ️ [Chat Copilot] Cascading to Gemini fallback for copilot...")
             try:
-                raw_response = await generate_with_fallback(
-                    None,
-                    [f"{SYSTEM_COPILOT_PROMPT}\n\n{prompt}"],
-                    task=TASK_DEEP_REASONING
+                raw_response = await asyncio.wait_for(
+                    _invoke_multimodal_gemini(),
+                    timeout=CHAT_MULTIMODAL_TIMEOUT_SECONDS
                 )
-            except Exception as fb_err:
-                print(f"❌ [Chat Copilot] Gemini fallback failed: {fb_err}")
-                raw_response = None
+            except (asyncio.TimeoutError, TimeoutError):
+                print(
+                    f"⏱️ [Chat Copilot] Gemini multimodal call timed out after {CHAT_MULTIMODAL_TIMEOUT_SECONDS}s; priority lock released.",
+                    flush=True
+                )
+                return {
+                    "reply": "⚠️ Gemini multimodal processing timed out. Please try sending a smaller image or text only.",
+                    "actions_taken": [],
+                    "status": "timeout"
+                }
+            except Exception as mm_err:
+                print(f"❌ [Chat Copilot] Gemini multimodal generation failed: {mm_err}", flush=True)
+                return {
+                    "reply": f"⚠️ Gemini multimodal processing encountered an error: {mm_err}",
+                    "actions_taken": [],
+                    "status": "error"
+                }
+        else:
+            # Pure text command: fast Groq cascade first, then priority Gemini fallback with 30s timeout
+            try:
+                raw_response = await asyncio.to_thread(generate_text_groq, prompt, SYSTEM_COPILOT_PROMPT)
+            except Exception as g_err:
+                print(f"⚠️ [Chat Copilot] Groq generation failed: {g_err}")
 
-    return await asyncio.to_thread(parse_copilot_response, raw_response or "", persisted_user_msg)
+            if not raw_response or not raw_response.strip():
+                print("ℹ️ [Chat Copilot] Cascading to priority Gemini fallback for copilot...")
+                try:
+                    raw_response = await asyncio.wait_for(
+                        generate_with_fallback(
+                            None,
+                            [f"{SYSTEM_COPILOT_PROMPT}\n\n{prompt}"],
+                            task=TASK_DEEP_REASONING,
+                            priority=True
+                        ),
+                        timeout=CHAT_MULTIMODAL_TIMEOUT_SECONDS
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    print(
+                        f"⏱️ [Chat Copilot] Gemini text fallback timed out after {CHAT_MULTIMODAL_TIMEOUT_SECONDS}s; priority lock released.",
+                        flush=True
+                    )
+                    return {
+                        "reply": "⚠️ AI Copilot request timed out while waiting for Gemini. Please retry in a moment.",
+                        "actions_taken": [],
+                        "status": "timeout"
+                    }
+                except Exception as fb_err:
+                    print(f"❌ [Chat Copilot] Gemini fallback failed: {fb_err}")
+                    raw_response = None
+
+        return await asyncio.to_thread(parse_copilot_response, raw_response or "", persisted_user_msg)
 
 
 async def process_dashboard_chat(user_message: str) -> dict:
     """Backwards-compatible wrapper for text-only copilot calls."""
-    return await process_dashboard_chat_with_multimodal(user_message=user_message)
+    return await process_dashboard_chat_with_multimodal(user_message=user_message, processed_files=[])
 
 
 if __name__ == "__main__":

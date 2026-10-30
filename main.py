@@ -123,7 +123,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 client = None
 try:
@@ -785,33 +785,43 @@ class DashboardChatPayload(BaseModel):
 async def dashboard_chat_endpoint(
     request: Request,
     message: str = Form(""),
+    files: Optional[List[UploadFile]] = File(None),
     file: Optional[UploadFile] = File(None)
 ):
     verify_dashboard_auth(request)
     import mimetypes
     from chat_copilot import process_dashboard_chat_with_multimodal
 
-    file_bytes = None
-    mime_type = None
-    filename = None
+    incoming_uploads: List[UploadFile] = []
+    if files:
+        incoming_uploads.extend(files)
+    if file:
+        incoming_uploads.append(file)
 
-    if file and file.filename:
-        file_bytes = await file.read()
-        filename = file.filename
-        guessed_mime, _ = mimetypes.guess_type(filename)
-        raw_ct = (file.content_type or "").strip()
+    processed_files = []
+    for f in incoming_uploads:
+        if not f or not f.filename:
+            continue
+        content = await f.read()
+        if not content:
+            continue
+        guessed_mime, _ = mimetypes.guess_type(f.filename)
+        raw_ct = (f.content_type or "").strip()
         if raw_ct and raw_ct != "application/octet-stream":
-            mime_type = raw_ct
+            resolved_mime = raw_ct
         else:
-            mime_type = guessed_mime or ("application/pdf" if filename.lower().endswith(".pdf") else "image/png")
+            resolved_mime = guessed_mime or (
+                "application/pdf" if f.filename.lower().endswith(".pdf") else "image/png"
+            )
+        processed_files.append({
+            "filename": f.filename,
+            "mime_type": resolved_mime,
+            "bytes": content
+        })
 
-    result = await process_dashboard_chat_with_multimodal(
-        user_message=message or "",
-        file_bytes=file_bytes,
-        mime_type=mime_type,
-        filename=filename
-    )
-    return result
+    with rate_limiter.user_priority_context():
+        response = await process_dashboard_chat_with_multimodal(message or "", processed_files)
+    return response
 
 @app.get("/api/dashboard/chat-history")
 async def get_dashboard_chat_history_endpoint(request: Request, limit: int = 50):

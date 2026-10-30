@@ -414,82 +414,104 @@ def extract_prompt_string(contents: Any) -> str:
     return str(contents)
 
 # --- UNIFIED MULTI-PROVIDER GENERATION CASCADE ---
-async def generate_with_fallback(client, contents: list, task: str = TASK_FAST_INGESTION) -> str:
+async def generate_with_fallback(
+    client,
+    contents: list,
+    task: str = TASK_FAST_INGESTION,
+    priority: bool = False
+) -> str:
     """
-    Multi-provider generation with circuit breaker and quota preservation:
+    Multi-provider generation with circuit breaker, priority queueing, and quota preservation:
     1. If GROQ_API_KEY is configured: For text-only TASK_FAST_INGESTION, routes first to Groq
        (llama-3.3-70b-versatile -> llama-3.1-8b-instant -> open-weights).
     2. Falls back to Gemini cascade (gemini-3.5-flash-lite -> gemini-3.5-flash).
     3. Multimodal contents (images, PDFs, video URLs) and TASK_DEEP_REASONING route strictly
        to Gemini (gemini-3.8-flash -> gemini-3.5-flash -> gemini-3.5-flash-lite).
-    4. Automatically rotates across GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3
-       if 429 RESOURCE_EXHAUSTED occurs.
+    4. When `priority=True` (interactive user chat), enters `user_priority_context()` and uses
+       native async `client.aio.models.generate_content` so `asyncio.wait_for` cancels cleanly
+       and releases concurrency locks immediately without waiting behind background sweeps.
     """
-    is_text = is_pure_text_contents(contents)
+    from contextlib import nullcontext
+    from rate_limiter import user_priority_context, is_user_priority
 
-    # 1. Text-only FAST_INGESTION offloaded to Groq if configured
-    groq_key = os.getenv("GROQ_API_KEY")
-    if task == TASK_FAST_INGESTION and is_text and groq_key and groq_key.strip():
-        prompt_str = extract_prompt_string(contents)
-        groq_result = await asyncio.to_thread(generate_text_groq, prompt_str)
-        if groq_result:
-            return groq_result
-        if is_model_available("groq"):
-            print("ℹ️ [Model Router] Groq text models unavailable or exhausted. Cascading to Gemini...")
+    effective_priority = priority or is_user_priority()
+    ctx_mgr = user_priority_context() if effective_priority else nullcontext()
 
-    # 2. Gemini Cascade with Multi-Key Rotation
-    effective_task = task
-    if not is_text and task == TASK_FAST_INGESTION:
-        effective_task = TASK_MULTIMODAL
+    with ctx_mgr:
+        is_text = is_pure_text_contents(contents)
 
-    google_keys = get_google_api_keys()
-    max_key_attempts = max(1, len(google_keys))
-    last_error = None
+        # 1. Text-only FAST_INGESTION offloaded to Groq if configured
+        groq_key = os.getenv("GROQ_API_KEY")
+        if task == TASK_FAST_INGESTION and is_text and groq_key and groq_key.strip():
+            prompt_str = extract_prompt_string(contents)
+            groq_result = await asyncio.to_thread(generate_text_groq, prompt_str)
+            if groq_result:
+                return groq_result
+            if is_model_available("groq"):
+                print("ℹ️ [Model Router] Groq text models unavailable or exhausted. Cascading to Gemini...")
 
-    for key_idx in range(max_key_attempts):
-        active_key = get_active_google_api_key()
-        active_client = client
-        if active_client is None or getattr(active_client, "_active_google_key", None) != active_key:
-            from google import genai
-            active_client = genai.Client(api_key=active_key, http_options={"timeout": 300000})
-            active_client._active_google_key = active_key
+        # 2. Gemini Cascade with Multi-Key Rotation
+        effective_task = task
+        if not is_text and task == TASK_FAST_INGESTION:
+            effective_task = TASK_MULTIMODAL
 
-        candidates = get_candidate_models(effective_task)
-        now = time.time()
+        google_keys = get_google_api_keys()
+        max_key_attempts = max(1, len(google_keys))
+        last_error = None
+        client_timeout_ms = 28000 if effective_priority else 300000
 
-        for model_name in candidates:
-            if not is_model_available(model_name):
-                remaining = int(MODEL_COOLDOWN_UNTIL.get(model_name, 0.0) - now)
-                print(f"⚡ [Circuit Breaker] Skipping '{model_name}' (cooling down for {remaining}s more).")
-                continue
+        for key_idx in range(max_key_attempts):
+            active_key = get_active_google_api_key()
+            active_client = client
+            if active_client is None or getattr(active_client, "_active_google_key", None) != active_key:
+                from google import genai
+                active_client = genai.Client(api_key=active_key, http_options={"timeout": client_timeout_ms})
+                active_client._active_google_key = active_key
 
-            max_attempts = 2
-            for attempt in range(max_attempts):
-                try:
-                    chat = active_client.chats.create(model=model_name)
-                    response = await asyncio.to_thread(chat.send_message, contents)
-                    return response.text.strip()
-                except Exception as e:
-                    last_error = e
-                    record_model_error(model_name, e)
+            candidates = get_candidate_models(effective_task)
+            now = time.time()
 
-                    # If error put model into cooldown, stop retrying this model immediately
-                    if not is_model_available(model_name):
-                        print(f"⚠️ [Model Router] '{model_name}' entered cooldown after error. Moving to next candidate...")
-                        break
+            for model_name in candidates:
+                if not is_model_available(model_name):
+                    remaining = int(MODEL_COOLDOWN_UNTIL.get(model_name, 0.0) - now)
+                    print(f"⚡ [Circuit Breaker] Skipping '{model_name}' (cooling down for {remaining}s more).")
+                    continue
 
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(2 * (attempt + 1))
+                max_attempts = 1 if effective_priority else 2
+                for attempt in range(max_attempts):
+                    try:
+                        if effective_priority:
+                            response = await active_client.aio.models.generate_content(
+                                model=model_name,
+                                contents=contents
+                            )
+                        else:
+                            chat = active_client.chats.create(model=model_name)
+                            response = await asyncio.to_thread(chat.send_message, contents)
+                        return (response.text or "").strip()
+                    except (asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):
+                        raise
+                    except Exception as e:
+                        last_error = e
+                        record_model_error(model_name, e)
 
-        # Check if 429 / daily quota limits caused all candidates on this key to fail
-        err_lower = str(last_error).lower() if last_error else ""
-        if ("429" in err_lower or "resource_exhausted" in err_lower or "quota" in err_lower) and len(google_keys) > 1:
-            next_k = rotate_to_next_google_key(reason="All candidate models on active key hit 429 quota exhaustion")
-            if next_k and key_idx < max_key_attempts - 1:
-                client = None
-                continue
+                        # If error put model into cooldown, stop retrying this model immediately
+                        if not is_model_available(model_name):
+                            print(f"⚠️ [Model Router] '{model_name}' entered cooldown after error. Moving to next candidate...")
+                            break
 
-    raise RuntimeError(f"❌ All models (Groq & Gemini across {len(google_keys)} keys) failed in generate_with_fallback for {task}. Last error: {repr(last_error)}")
+                        if attempt < max_attempts - 1:
+                            await asyncio.sleep(2 * (attempt + 1))
+
+            # Check if 429 / daily quota limits caused all candidates on this key to fail
+            err_lower = str(last_error).lower() if last_error else ""
+            if ("429" in err_lower or "resource_exhausted" in err_lower or "quota" in err_lower) and len(google_keys) > 1:
+                next_k = rotate_to_next_google_key(reason="All candidate models on active key hit 429 quota exhaustion")
+                if next_k and key_idx < max_key_attempts - 1:
+                    client = None
+                    continue
+
+        raise RuntimeError(f"❌ All models (Groq & Gemini across {len(google_keys)} keys) failed in generate_with_fallback for {task}. Last error: {repr(last_error)}")
 
 # --- LANGCHAIN LLM ROUTER ---
 def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
