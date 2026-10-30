@@ -47,18 +47,28 @@ import uuid
 import json
 import re
 
+if os.name != "nt":
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
 node_process = None
-bridge_dir = os.path.join(os.getcwd(), "whatsapp_bridge")
-if os.getenv("DISABLE_WHATSAPP_BRIDGE", "false").lower() not in ("true", "1") and os.path.exists(bridge_dir):
-    print("🚀 Booting Node.js WhatsApp Bridge concurrently in background...", flush=True)
-    try:
-        node_process = subprocess.Popen(
-            ["node", "whatsapp_bridge.js"],
-            cwd=bridge_dir, 
-            shell=(os.name == 'nt')
-        )
-    except Exception as bridge_err:
-        print(f"⚠️ [WhatsApp Bridge] Failed to launch background bridge subprocess: {bridge_err}", flush=True)
+bridge_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whatsapp_bridge")
+
+def start_whatsapp_bridge():
+    """Launches the Node.js WhatsApp Bridge subprocess inside FastAPI startup lifecycle."""
+    global node_process
+    if node_process is not None and node_process.poll() is None:
+        return
+    if os.getenv("DISABLE_WHATSAPP_BRIDGE", "false").lower() not in ("true", "1") and os.path.exists(bridge_dir):
+        print("🚀 Booting Node.js WhatsApp Bridge concurrently in background (127.0.0.1:3000)...", flush=True)
+        try:
+            node_process = subprocess.Popen(
+                ["node", "whatsapp_bridge.js"],
+                cwd=bridge_dir,
+                shell=(os.name == 'nt')
+            )
+        except Exception as bridge_err:
+            print(f"⚠️ [WhatsApp Bridge] Failed to launch background bridge subprocess: {bridge_err}", flush=True)
 
 try:
     import psutil
@@ -70,10 +80,12 @@ def cleanup_node_process():
     """Ruthlessly hunts down and terminates the WhatsApp Node bridge on exit."""
     global node_process
     if node_process:
+        proc = node_process
+        node_process = None
         print("🛑 Terminating background Node.js WhatsApp Bridge...", flush=True)
         if psutil is not None and hasattr(psutil, "Process"):
             try:
-                parent = psutil.Process(node_process.pid)
+                parent = psutil.Process(proc.pid)
                 for child in parent.children(recursive=True):
                     try:
                         child.kill()
@@ -84,7 +96,7 @@ def cleanup_node_process():
             except Exception:
                 pass
         try:
-            node_process.kill()
+            proc.kill()
         except Exception:
             pass
 
@@ -303,18 +315,27 @@ async def poll_and_catchup_whatsapp():
         else:
             print("ℹ️ [Startup Orchestrator] WhatsApp Bridge still initializing after 90s. Bridge will process live messages on connect.")
 
+async def boot_and_poll_whatsapp_bridge():
+    """
+    Waits briefly after FastAPI lifespan yields so Uvicorn binds 0.0.0.0:8000 first,
+    then launches whatsapp_bridge.js on 127.0.0.1:3000 and starts catch-up polling.
+    """
+    await asyncio.sleep(2)
+    start_whatsapp_bridge()
+    await poll_and_catchup_whatsapp()
+
 async def run_startup_orchestration():
     """
     Sequential Startup Orchestrator with Lazily Staggered Checks:
     Prevents boot stampede and quota exhaustion.
-    1. WhatsApp polling & catch-up runs in background as soon as bridge is ready.
+    1. WhatsApp Bridge launch + catch-up polling runs in background after Uvicorn binds 0.0.0.0:8000.
     2. At t+30s: Business Sweep runs ONLY IF last sweep was > 4 hours ago.
     3. At t+90s: YouTube Sweep runs ONLY IF last sweep was > 6 hours ago.
     """
     print("🚀 [Startup Orchestrator] Initializing non-blocking startup sequences...")
 
-    # 1. Non-blocking WhatsApp Bridge polling task
-    asyncio.create_task(poll_and_catchup_whatsapp())
+    # 1. Non-blocking WhatsApp Bridge delayed launch & catch-up polling task
+    asyncio.create_task(boot_and_poll_whatsapp_bridge())
 
     # 2. Lazily staggered Business & Portfolio Sweep at t+30s
     await asyncio.sleep(30)
@@ -390,10 +411,11 @@ async def lifespan(app: FastAPI):
     initialize_background_schedulers(loop)
     print("🚀 Portfolio Agent core running with autonomous background learning.")
     
-    # Trigger sequential startup orchestration in background task
+    # Trigger sequential startup orchestration (including WhatsApp Bridge launch after port 8000 bind)
     asyncio.create_task(run_startup_orchestration())
     yield
     # Shutdown
+    cleanup_node_process()
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)

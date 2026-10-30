@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CLOUD_ENV=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    MPLCONFIGDIR=/tmp/matplotlib \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
@@ -27,9 +28,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Install Python dependencies
+# 3. Install Python dependencies and pre-build Matplotlib font cache in /tmp/matplotlib
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && mkdir -p /tmp/matplotlib \
+    && (python -c "import matplotlib.pyplot" || true)
 
 # 4. Install Node.js dependencies for whatsapp_bridge
 COPY whatsapp_bridge/package*.json ./whatsapp_bridge/

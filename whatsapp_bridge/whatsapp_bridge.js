@@ -6,6 +6,8 @@ const express = require('express');
 
 const app = express();
 app.use(express.json());
+const BRIDGE_PORT = 3000; // Hardcoded internal bridge port (NEVER process.env.PORT)
+const PYTHON_PORT = Number(process.env.PORT) || 8000;
 let latestQr = null;
 let isClientReady = false;
 
@@ -144,7 +146,7 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                             filename: filename
                         };
 
-                        await axios.post('http://127.0.0.1:8000/api/ingest-whatsapp-message', payload, {
+                        await axios.post(`http://127.0.0.1:${PYTHON_PORT}/api/ingest-whatsapp-message`, payload, {
                             maxContentLength: 50 * 1024 * 1024,
                             maxBodyLength: 50 * 1024 * 1024,
                             timeout: 15000
@@ -177,7 +179,7 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                 is_group: true,
                 has_media: false
             };
-            await axios.post('http://127.0.0.1:8000/api/ingest-whatsapp-message', payload, {
+            await axios.post(`http://127.0.0.1:${PYTHON_PORT}/api/ingest-whatsapp-message`, payload, {
                 timeout: 15000
             });
         }
@@ -429,8 +431,10 @@ app.post('/api/catchup', async (req, res) => {
     res.json({ status: 'ok', replayed: processedCount });
 });
 
-// START EXPRESS IMMEDIATELY
-app.listen(3000, () => console.log('⚙️  [WhatsApp Bridge] Local API listening on port 3000. Waiting for Chrome...'));
+// START EXPRESS STRICTLY ON LOOPBACK (127.0.0.1:3000) SO CLOUD PORT SCANNERS IGNORE IT
+app.listen(BRIDGE_PORT, '127.0.0.1', () => {
+    console.log(`⚙️  [WhatsApp Bridge] Local API listening on 127.0.0.1:${BRIDGE_PORT}. Waiting for Chrome...`);
+});
 
 // Live Event Listener strictly gated to ALLOWED_KTRADE_CHATS
 client.on('message_create', async (msg) => {
