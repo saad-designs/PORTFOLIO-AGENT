@@ -62,22 +62,29 @@ if os.getenv("DISABLE_WHATSAPP_BRIDGE", "false").lower() not in ("true", "1") an
 
 try:
     import psutil
-except ImportError:
+except Exception as psutil_err:
     psutil = None
+    print(f"⚠️ [Startup Warning] psutil unavailable ({psutil_err}); falling back to standard subprocess cleanup.", flush=True)
 
 def cleanup_node_process():
     """Ruthlessly hunts down and terminates the WhatsApp Node bridge on exit."""
     global node_process
     if node_process:
         print("🛑 Terminating background Node.js WhatsApp Bridge...", flush=True)
-        try:
-            if psutil:
+        if psutil is not None and hasattr(psutil, "Process"):
+            try:
                 parent = psutil.Process(node_process.pid)
                 for child in parent.children(recursive=True):
-                    child.kill()
+                    try:
+                        child.kill()
+                    except Exception:
+                        pass
                 parent.kill()
-            else:
-                node_process.kill()
+                return
+            except Exception:
+                pass
+        try:
+            node_process.kill()
         except Exception:
             pass
 
