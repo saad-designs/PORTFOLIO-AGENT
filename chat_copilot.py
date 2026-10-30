@@ -474,6 +474,86 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
 
 
 CHAT_MULTIMODAL_TIMEOUT_SECONDS = 30.0
+MAX_IMAGE_DIMENSION_PX = 1024
+JPEG_COMPRESSION_QUALITY = 85
+
+
+def optimize_uploaded_file_for_gemini(
+    file_obj: Dict[str, Any],
+    max_dim: int = MAX_IMAGE_DIMENSION_PX,
+    jpeg_quality: int = JPEG_COMPRESSION_QUALITY
+) -> Dict[str, Any]:
+    """
+    Downscales and compresses `image/*` uploads in memory (`io.BytesIO`) to <=1024px JPEG (quality=85)
+    using `PIL.Image` to prevent OOM crashes on Render's 512MB RAM tier. Leaves PDFs untouched as-is.
+    """
+    if not isinstance(file_obj, dict) or file_obj.get("_optimized"):
+        return file_obj
+
+    raw_bytes = file_obj.get("bytes")
+    mime_type = str(file_obj.get("mime_type") or "").strip().lower()
+    filename = str(file_obj.get("filename") or "attachment").strip()
+
+    # Keep PDFs and non-image documents untouched as-is
+    if not raw_bytes or not mime_type.startswith("image/"):
+        out = dict(file_obj)
+        out["_optimized"] = True
+        return out
+
+    try:
+        import io
+        from PIL import Image, ImageOps
+
+        orig_size_kb = len(raw_bytes) / 1024.0
+        with io.BytesIO(raw_bytes) as in_buf:
+            with Image.open(in_buf) as img:
+                img = ImageOps.exif_transpose(img)
+                orig_w, orig_h = img.size
+
+                # Convert RGBA / palette / non-RGB modes cleanly before JPEG encoding
+                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                    alpha_rgba = img.convert("RGBA")
+                    bg = Image.new("RGB", alpha_rgba.size, (255, 255, 255))
+                    bg.paste(alpha_rgba, mask=alpha_rgba.split()[3])
+                    rgb_img = bg
+                    alpha_rgba.close()
+                elif img.mode != "RGB":
+                    rgb_img = img.convert("RGB")
+                else:
+                    rgb_img = img.copy()
+
+        try:
+            resample_filter = getattr(Image, "Resampling", Image).LANCZOS
+            rgb_img.thumbnail((max_dim, max_dim), resample_filter)
+            new_w, new_h = rgb_img.size
+
+            out_buf = io.BytesIO()
+            rgb_img.save(out_buf, format="JPEG", quality=jpeg_quality, optimize=True)
+            compressed_bytes = out_buf.getvalue()
+            out_buf.close()
+        finally:
+            rgb_img.close()
+
+        new_size_kb = len(compressed_bytes) / 1024.0
+        base_stem, _ = os.path.splitext(filename)
+        new_filename = f"{base_stem or 'image'}.jpg"
+        reduction_pct = ((1.0 - (len(compressed_bytes) / max(1, len(raw_bytes)))) * 100.0)
+        print(
+            f"🖼️ [Image Optimizer] Compressed '{filename}' ({orig_w}x{orig_h} -> {new_w}x{new_h}): "
+            f"{orig_size_kb:,.1f} KB -> {new_size_kb:,.1f} KB ({reduction_pct:+.1f}% saved)",
+            flush=True
+        )
+        return {
+            "filename": new_filename,
+            "mime_type": "image/jpeg",
+            "bytes": compressed_bytes,
+            "_optimized": True
+        }
+    except Exception as img_err:
+        print(f"⚠️ [Image Optimizer] Could not compress '{filename}' ({img_err}); sending original bytes.", flush=True)
+        fallback = dict(file_obj)
+        fallback["_optimized"] = True
+        return fallback
 
 
 async def process_dashboard_chat_with_multimodal(
@@ -482,6 +562,8 @@ async def process_dashboard_chat_with_multimodal(
 ) -> dict:
     """
     Multimodal & conversational AI copilot for the Matte Dark Dashboard:
+    - Automatically downscales/compresses `image/*` attachments to <=1024px JPEG (quality=85)
+      while keeping PDFs as-is.
     - Runs inside `user_priority_context()` so user-initiated chat bypasses background sweep
       semaphores (YouTube / news / sentinel) instead of waiting behind Concurrency=2.
     - Enforces a hard 30.0s `asyncio.wait_for` timeout on Gemini multimodal calls, releasing
@@ -491,10 +573,16 @@ async def process_dashboard_chat_with_multimodal(
 
     with user_priority_context():
         clean_msg = (user_message or "").strip()
-        valid_files = [
+        raw_valid_files = [
             f for f in (processed_files or [])
             if isinstance(f, dict) and f.get("bytes") and f.get("mime_type")
         ]
+        valid_files = []
+        for f_item in raw_valid_files:
+            if f_item.get("_optimized"):
+                valid_files.append(f_item)
+            else:
+                valid_files.append(await asyncio.to_thread(optimize_uploaded_file_for_gemini, f_item))
         has_attachments = len(valid_files) > 0
 
         if not clean_msg and not has_attachments:

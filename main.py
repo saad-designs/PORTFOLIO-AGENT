@@ -790,7 +790,7 @@ async def dashboard_chat_endpoint(
 ):
     verify_dashboard_auth(request)
     import mimetypes
-    from chat_copilot import process_dashboard_chat_with_multimodal
+    from chat_copilot import process_dashboard_chat_with_multimodal, optimize_uploaded_file_for_gemini
 
     incoming_uploads: List[UploadFile] = []
     if files:
@@ -813,11 +813,15 @@ async def dashboard_chat_endpoint(
             resolved_mime = guessed_mime or (
                 "application/pdf" if f.filename.lower().endswith(".pdf") else "image/png"
             )
-        processed_files.append({
+        raw_entry = {
             "filename": f.filename,
             "mime_type": resolved_mime,
             "bytes": content
-        })
+        }
+        del content  # Drop outer reference before in-memory PIL downscale/JPEG compression
+        optimized_entry = await asyncio.to_thread(optimize_uploaded_file_for_gemini, raw_entry)
+        del raw_entry
+        processed_files.append(optimized_entry)
 
     with rate_limiter.user_priority_context():
         response = await process_dashboard_chat_with_multimodal(message or "", processed_files)
