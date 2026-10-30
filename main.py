@@ -484,7 +484,7 @@ async def serve_dashboard():
 async def get_dashboard_overview(request: Request):
     verify_dashboard_auth(request)
     from portfolio_manager import get_complete_financial_summary, get_desk_manager_thought, get_db_connection
-    from model_router import MODEL_COOLDOWN_UNTIL, is_model_available, CURRENT_GOOGLE_KEY_INDEX
+    from model_router import MODEL_COOLDOWN_UNTIL, is_model_available, is_any_groq_text_model_available, CURRENT_GOOGLE_KEY_INDEX
     
     summary = await asyncio.to_thread(get_complete_financial_summary)
     
@@ -532,7 +532,7 @@ async def get_dashboard_overview(request: Request):
                 "active_google_key_index": CURRENT_GOOGLE_KEY_INDEX,
                 "cooldowns": model_cooldowns,
                 "models": {
-                    "llama-3.3-70b-versatile": is_model_available("llama-3.3-70b-versatile"),
+                    "llama-3.3-70b-versatile": is_any_groq_text_model_available(),
                     "gemini-3.5-flash-lite": is_model_available("gemini-3.5-flash-lite"),
                     "gemini-3.5-flash": is_model_available("gemini-3.5-flash"),
                     "gemini-3.8-flash": is_model_available("gemini-3.8-flash")
@@ -840,7 +840,7 @@ async def whatsapp_qr_page():
         </div>
         """
         refresh_tag = '<meta http-equiv="refresh" content="30">'
-    elif status == "WAITING_FOR_QR" and qr_data:
+    elif status in ("WAITING_FOR_QR", "QR_READY") and qr_data and qr_data != "AUTH_TIMEOUT_RETRYING":
         encoded_qr = urllib.parse.quote(qr_data)
         qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=320x320&data={encoded_qr}&margin=10"
         content_html = f"""
@@ -856,6 +856,17 @@ async def whatsapp_qr_page():
         </div>
         """
         refresh_tag = '<meta http-equiv="refresh" content="6">'
+    elif status == "AUTH_TIMEOUT_RETRYING" or qr_data == "AUTH_TIMEOUT_RETRYING":
+        content_html = """
+        <div class="card">
+            <div class="icon">🔄</div>
+            <h2>Auth Timeout &mdash; Retrying...</h2>
+            <p class="subtitle">WhatsApp QR/session timed out. Restarting headless Chromium cleanly for a fresh QR code &mdash; reload or wait a few seconds.</p>
+            <div class="spinner"></div>
+            <div class="badge badge-waiting">STATUS: AUTH_TIMEOUT_RETRYING</div>
+        </div>
+        """
+        refresh_tag = '<meta http-equiv="refresh" content="5">'
     else:
         content_html = f"""
         <div class="card">

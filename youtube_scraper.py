@@ -190,13 +190,13 @@ def get_latest_videos(channel_id: str, max_results: int = 5) -> list[dict]:
 
 def synthesize_groq_psx_summary(content_text: str, mentor_name: str = "Mentor", title: str = "") -> str | None:
     """
-    Offload post-transcription or metadata synthesis strictly to Groq (llama-3.3-70b-versatile).
+    Offload post-transcription or metadata synthesis strictly to Groq active fast text models.
     Formats response using SWEEP_FORMAT_PROMPT with 0 Gemini quota consumed.
     """
-    from model_router import generate_text_groq, is_model_available
+    from model_router import generate_text_groq, is_any_groq_text_model_available
     from ingestion import SWEEP_FORMAT_PROMPT
 
-    if not is_model_available("llama-3.3-70b-versatile"):
+    if not is_any_groq_text_model_available():
         return None
 
     try:

@@ -73,26 +73,44 @@ def rotate_to_next_google_key(reason: str = "Quota Exhausted") -> Optional[str]:
     CURRENT_GOOGLE_KEY_INDEX = (CURRENT_GOOGLE_KEY_INDEX + 1) % len(keys)
     new_key = keys[CURRENT_GOOGLE_KEY_INDEX]
 
-    # Reset Gemini model cooldowns for the fresh key
+    # Reset Gemini model cooldowns for the fresh key (excluding permanently blacklisted 404 strings)
     for model_list in GEMINI_TASK_ROUTING.values():
         for m in model_list:
-            MODEL_COOLDOWN_UNTIL.pop(m, None)
+            if m not in BLACKLISTED_MODELS:
+                MODEL_COOLDOWN_UNTIL.pop(m, None)
 
     print(f"🔄 [Key Rotation] Google Key #{old_idx + 1} marked on cooldown ({reason}). Rotated to Key #{CURRENT_GOOGLE_KEY_INDEX + 1} (quota refreshed).")
     return new_key
 
 # --- GROQ CLIENT INITIALIZATION ---
 groq_client = None
+_groq_models_probed = False
 
 def get_groq_client():
-    global groq_client
+    global groq_client, _groq_models_probed
+    if not is_model_available("groq"):
+        return None
     if groq_client is not None:
         return groq_client
     key = os.getenv("GROQ_API_KEY")
-    if key and key.strip() and is_model_available("groq"):
+    if key and key.strip():
         try:
             from groq import Groq
             groq_client = Groq(api_key=key.strip())
+            if not _groq_models_probed:
+                _groq_models_probed = True
+                try:
+                    live_models = {m.id for m in groq_client.models.list().data if getattr(m, "id", None)}
+                    if live_models:
+                        for candidate in list(GROQ_TEXT_MODELS):
+                            if candidate not in live_models:
+                                BLACKLISTED_MODELS.add(candidate)
+                                print(f"ℹ️ [Groq Init] Model '{candidate}' not in active Groq catalog; pre-blacklisted cleanly.", flush=True)
+                except Exception as probe_err:
+                    record_model_error("groq", probe_err)
+                    if not is_model_available("groq"):
+                        groq_client = None
+                        return None
             return groq_client
         except Exception:
             return None
@@ -161,13 +179,14 @@ TASK_FAST_INGESTION = "TASK_FAST_INGESTION"
 TASK_DEEP_REASONING = "TASK_DEEP_REASONING"
 TASK_MULTIMODAL = "TASK_MULTIMODAL"
 
-# Groq text models: High-speed free text models.
+# Groq text models: Current supported Groq production models with resilient fallback cascade.
 GROQ_TEXT_MODELS: List[str] = [
-    "llama-3.3-70b-versatile",     # Llama 3.3 70B
-    "llama-3.1-8b-instant",        # Llama 3.1 8B instant
-    "openai/gpt-oss-120b",         # High-capacity open weights on Groq
-    "openai/gpt-oss-20b",          # High-speed open weights on Groq
-    "qwen/qwen3.8-27b"             # Fast reasoning open weights on Groq
+    "llama-3.3-70b-versatile",                     # Llama 3.3 70B versatile (primary if active on tier)
+    "meta-llama/llama-4-scout-17b-16e-instruct",   # Active Meta Llama 4 Scout on Groq
+    "openai/gpt-oss-120b",                         # Active Groq 120B MoE replacement for Llama 3.3 70B
+    "qwen/qwen3-32b",                              # Active Qwen 3 32B production model on Groq
+    "openai/gpt-oss-20b",                          # Active Groq ultra-fast 20B replacement for Llama 3.1 8B
+    "llama-3.1-8b-instant"                         # Llama 3.1 8B instant fallback
 ]
 
 # Gemini fallback cascade:
@@ -188,21 +207,32 @@ GEMINI_TASK_ROUTING: Dict[str, List[str]] = {
     ]
 }
 
-# --- IN-MEMORY CIRCUIT BREAKER ---
+# --- IN-MEMORY CIRCUIT BREAKER & DEAD-MODEL BLACKLIST ---
 # Maps model_name -> timestamp until which model is on cooldown
 MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
+# Permanently blacklists individual 404 / decommissioned model IDs without locking out other models
+BLACKLISTED_MODELS: set[str] = set()
 
 def is_model_available(model: str) -> bool:
-    """Returns True if the model is currently active and not in cooldown."""
+    """Returns True if the model is not blacklisted and not currently in cooldown."""
+    if model in BLACKLISTED_MODELS:
+        return False
     cooldown_until = MODEL_COOLDOWN_UNTIL.get(model, 0.0)
     return time.time() >= cooldown_until
+
+def is_any_groq_text_model_available() -> bool:
+    """Returns True if GROQ_API_KEY is configured, Groq auth is valid, and at least one Groq text model is available."""
+    if not is_model_available("groq"):
+        return False
+    return any(is_model_available(m) for m in GROQ_TEXT_MODELS)
 
 def get_candidate_models(task: str = TASK_FAST_INGESTION) -> List[str]:
     """
     Returns candidate Gemini models for a given task, dynamically filtering out
-    any model currently in MODEL_COOLDOWN_UNTIL.
+    any blacklisted 404 model or model currently in MODEL_COOLDOWN_UNTIL.
     """
-    models = GEMINI_TASK_ROUTING.get(task, GEMINI_TASK_ROUTING[TASK_FAST_INGESTION])
+    raw_models = GEMINI_TASK_ROUTING.get(task, GEMINI_TASK_ROUTING[TASK_FAST_INGESTION])
+    models = [m for m in raw_models if m not in BLACKLISTED_MODELS] or raw_models
     now = time.time()
     available = [m for m in models if MODEL_COOLDOWN_UNTIL.get(m, 0.0) <= now]
     
@@ -217,29 +247,46 @@ def get_candidate_models(task: str = TASK_FAST_INGESTION) -> List[str]:
 def record_model_error(model: str, error: Any):
     """
     Inspects an error thrown by Groq or Gemini and sets circuit breaker cooldowns:
-    - 404 NOT_FOUND: 24-hour disable
+    - 404 NOT_FOUND / decommissioned: Blacklists ONLY the dead model string (never locks out other models)
+    - 401 Invalid API Key: 24-hour disable for that provider's invalid key
     - 429 Daily Limit (GenerateRequestsPerDay or retryDelay > 120s): 1-hour (3600s) cooldown
     - 429 RPM/TPM Limit: 45s cooldown
     """
     err_str = str(error)
     err_lower = err_str.lower()
     now = time.time()
+    status_code = getattr(error, "status_code", None) or getattr(error, "code", None)
 
-    # 401 Unauthorized / Invalid API Key
-    if "401" in err_lower or "invalid_api_key" in err_lower or "invalid api key" in err_lower or "unauthorized" in err_lower:
+    # 1. Check 404 NOT_FOUND / decommissioned FIRST so request IDs/timestamps containing "401" never trigger global lockout!
+    is_not_found = (
+        status_code == 404
+        or bool(re.search(r"\b(?:error[_\s]*code|status[_\s]*code|http)\s*[:=]?\s*404\b", err_lower))
+        or any(k in err_lower for k in [
+            "not_found", "model_not_found", "does not exist",
+            "decommissioned", "model_decommissioned", "no longer supported"
+        ])
+    )
+    if is_not_found:
+        if model != "groq":
+            BLACKLISTED_MODELS.add(model)
+            print(f"🚫 [Circuit Breaker] Model '{model}' returned 404 / decommissioned. Blacklisted '{model}' ONLY (other models unaffected).", flush=True)
+        return
+
+    # 2. Check strict 401 Unauthorized / Invalid API Key (no loose substring match on "401" inside IDs/numbers)
+    is_unauthorized = (
+        status_code == 401
+        or bool(re.search(r"\b(?:error[_\s]*code|status[_\s]*code|http)\s*[:=]?\s*401\b", err_lower))
+        or any(k in err_lower for k in ["invalid_api_key", "invalid api key", "authenticationerror"])
+    )
+    if is_unauthorized:
         MODEL_COOLDOWN_UNTIL[model] = now + 86400.0
-        if any(m in model for m in ["llama", "groq", "gpt-oss", "qwen", "whisper"]):
+        if model == "groq" or any(m in model for m in ["llama", "groq", "gpt-oss", "qwen", "whisper"]):
+            MODEL_COOLDOWN_UNTIL["groq"] = now + 86400.0
             for gm in GROQ_TEXT_MODELS + ["whisper-large-v3-turbo", "whisper-large-v3"]:
                 MODEL_COOLDOWN_UNTIL[gm] = now + 86400.0
             print(f"🚫 [Circuit Breaker] Groq API key is invalid or unauthorized (401). Disabling Groq models; cascading cleanly to Gemini.")
         else:
             print(f"🚫 [Circuit Breaker] Model '{model}' authorization failed (401). Cooldown set for 24 hours.")
-        return
-
-    # 404 NOT_FOUND / decommissioned
-    if "404" in err_lower or "not_found" in err_lower or "model_not_found" in err_lower or "decommissioned" in err_lower:
-        MODEL_COOLDOWN_UNTIL[model] = now + 86400.0
-        print(f"🚫 [Circuit Breaker] Model '{model}' not found / decommissioned. Cooldown set for 24 hours.")
         return
 
     # 429 RESOURCE_EXHAUSTED / Quota limits / Rate limits

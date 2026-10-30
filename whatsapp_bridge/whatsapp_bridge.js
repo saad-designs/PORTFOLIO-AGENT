@@ -1,3 +1,29 @@
+// Global process handlers: prevent unhandled Puppeteer / whatsapp-web.js rejections from crashing the container
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
+    const reasonStr = String((reason && reason.message) ? reason.message : reason || '').toLowerCase();
+    if (
+        typeof isClientReady !== 'undefined' && !isClientReady &&
+        (reasonStr.includes('auth') ||
+         reasonStr.includes('timeout') ||
+         reasonStr.includes('qrcode') ||
+         reasonStr.includes('navigation') ||
+         reasonStr.includes('protocolerror') ||
+         reasonStr.includes('target closed') ||
+         reasonStr.includes('execution context') ||
+         reasonStr.includes('session closed'))
+    ) {
+        latestQr = 'AUTH_TIMEOUT_RETRYING';
+        if (typeof scheduleClientRetry === 'function') {
+            scheduleClientRetry('unhandledRejection', 8000);
+        }
+    }
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('⚠️ Uncaught Exception in WhatsApp Bridge (process kept alive):', (err && err.message) ? err.message : err);
+});
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const axios = require('axios');
@@ -10,67 +36,175 @@ const BRIDGE_PORT = 3000; // Hardcoded internal bridge port (NEVER process.env.P
 const PYTHON_PORT = Number(process.env.PORT) || 8000;
 let latestQr = null;
 let isClientReady = false;
+let client = null;
+let isInitializing = false;
+let retryTimer = null;
+let authWatchdogTimer = null;
 
-const client = new Client({
-    authStrategy: new LocalAuth({
-        dataPath: './.wwebjs_auth'
-    }),
-    puppeteer: {
-        headless: true, // Silent background operation
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
-            '--single-process',
-            '--renderer-process-limit=1',
-            '--js-flags=--max-old-space-size=128'
-        ],
-        protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
+function clearAuthWatchdog() {
+    if (authWatchdogTimer) {
+        clearTimeout(authWatchdogTimer);
+        authWatchdogTimer = null;
     }
-});
+}
 
-client.on('qr', (qr) => {
-    latestQr = qr;
-    console.log('\n======================================================');
-    console.log('🔗 [WhatsApp Bridge] SCAN THIS QR CODE');
-    qrcode.generate(qr, {small: true});
-    console.log('======================================================\n');
-});
+function resetAuthWatchdog(timeoutMs = 180000) {
+    clearAuthWatchdog();
+    authWatchdogTimer = setTimeout(() => {
+        if (!isClientReady) {
+            console.warn('⚠️ [WhatsApp Bridge] Client auth/QR watchdog timed out. Updating QR status to AUTH_TIMEOUT_RETRYING...');
+            latestQr = 'AUTH_TIMEOUT_RETRYING';
+            scheduleClientRetry('auth_watchdog_timeout', 5000);
+        }
+    }, timeoutMs);
+}
 
-client.on('ready', async () => {
-    console.log('✅ [WhatsApp Bridge] Client authenticated. Live listener active.');
-    isClientReady = true;
-    latestQr = null;
-});
+function scheduleClientRetry(reason = 'retry', delayMs = 8000) {
+    if (retryTimer || isClientReady) {
+        return;
+    }
+    console.log(`🔄 [WhatsApp Bridge] Scheduling client re-initialization in ${delayMs}ms (reason: ${reason})...`);
+    retryTimer = setTimeout(async () => {
+        retryTimer = null;
+        await safeInitializeClient(reason);
+    }, delayMs);
+}
 
-client.on('authenticated', () => {
-    console.log('🔑 [WhatsApp Bridge] Session authenticated.');
-    latestQr = null;
-});
+function attachClientListeners(waClient) {
+    waClient.on('qr', (qr) => {
+        try {
+            latestQr = qr;
+            resetAuthWatchdog(180000);
+            console.log('\n======================================================');
+            console.log('🔗 [WhatsApp Bridge] SCAN THIS QR CODE');
+            qrcode.generate(qr, { small: true });
+            console.log('======================================================\n');
+        } catch (err) {
+            console.error('⚠️ [WhatsApp Bridge] Error in qr listener:', err.message || err);
+        }
+    });
 
-client.on('auth_failure', (msg) => {
-    console.error('❌ [WhatsApp Bridge] Auth failure:', msg);
-    latestQr = null;
-    isClientReady = false;
-});
+    waClient.on('ready', async () => {
+        try {
+            clearAuthWatchdog();
+            console.log('✅ [WhatsApp Bridge] Client authenticated. Live listener active.');
+            isClientReady = true;
+            latestQr = null;
+        } catch (err) {
+            console.error('⚠️ [WhatsApp Bridge] Error in ready listener:', err.message || err);
+        }
+    });
 
-client.on('disconnected', (reason) => {
-    console.warn('⚠️ [WhatsApp Bridge] Client disconnected:', reason);
-    isClientReady = false;
-    latestQr = null;
-});
+    waClient.on('authenticated', () => {
+        try {
+            clearAuthWatchdog();
+            console.log('🔑 [WhatsApp Bridge] Session authenticated.');
+            latestQr = null;
+        } catch (err) {
+            console.error('⚠️ [WhatsApp Bridge] Error in authenticated listener:', err.message || err);
+        }
+    });
 
-client.on('code', (code) => {
-    console.log('\n======================================================');
-    console.log('🔗 [WhatsApp Bridge] LINK WITH PHONE NUMBER');
-    console.log(`Type this Pairing Code into your WhatsApp app: ${code}`);
-    console.log('======================================================\n');
-});
+    waClient.on('auth_failure', (msg) => {
+        try {
+            clearAuthWatchdog();
+            console.error('❌ [WhatsApp Bridge] Auth failure:', msg);
+            isClientReady = false;
+            latestQr = 'AUTH_TIMEOUT_RETRYING';
+            scheduleClientRetry('auth_failure', 6000);
+        } catch (err) {
+            console.error('⚠️ [WhatsApp Bridge] Error in auth_failure listener:', err.message || err);
+        }
+    });
+
+    waClient.on('disconnected', (reason) => {
+        try {
+            clearAuthWatchdog();
+            console.warn('⚠️ [WhatsApp Bridge] Client disconnected:', reason);
+            isClientReady = false;
+            latestQr = 'AUTH_TIMEOUT_RETRYING';
+            scheduleClientRetry(`disconnected:${reason}`, 6000);
+        } catch (err) {
+            console.error('⚠️ [WhatsApp Bridge] Error in disconnected listener:', err.message || err);
+        }
+    });
+
+    waClient.on('code', (code) => {
+        try {
+            console.log('\n======================================================');
+            console.log('🔗 [WhatsApp Bridge] LINK WITH PHONE NUMBER');
+            console.log(`Type this Pairing Code into your WhatsApp app: ${code}`);
+            console.log('======================================================\n');
+        } catch (err) {
+            console.error('⚠️ [WhatsApp Bridge] Error in code listener:', err.message || err);
+        }
+    });
+
+    // Live Event Listener strictly gated to ALLOWED_KTRADE_CHATS
+    waClient.on('message_create', async (msg) => {
+        try {
+            if (!msg) return;
+            const fromId = getSerializedId(msg.from);
+            const toId = getSerializedId(msg.to);
+            const chatId = msg.fromMe ? toId : fromId;
+
+            // STRICT GATE: Never process non-whitelisted chats
+            if (!ALLOWED_KTRADE_CHATS.has(chatId)) {
+                return;
+            }
+            if (msg.isStatus) {
+                return;
+            }
+
+            const allowedTypes = ['chat', 'image', 'document', 'audio', 'ptt', 'video', 'voice'];
+            if (!allowedTypes.includes(msg.type) && !msg.hasMedia) {
+                return;
+            }
+
+            let chatName = CHAT_NAMES[chatId] || 'KTrade';
+            try {
+                const chat = await msg.getChat();
+                if (chat && chat.name) chatName = chat.name;
+            } catch (_) {
+                // Keep default chatName from CHAT_NAMES map
+            }
+
+            console.log(`[Diagnostic] Live KTrade Message! Chat: "${chatName}", ID: ${chatId}, Type: ${msg.type}, Media: ${msg.hasMedia}`);
+            await forwardMessageToPython(msg, chatName, chatId);
+        } catch (err) {
+            console.warn(`⚠️ [WhatsApp Bridge] Live event skipped: ${(err && err.message) ? err.message : err}`);
+        }
+    });
+}
+
+function createWhatsAppClient() {
+    const waClient = new Client({
+        authStrategy: new LocalAuth({
+            dataPath: './.wwebjs_auth'
+        }),
+        qrMaxRetries: 10,
+        authTimeoutMs: 180000,
+        puppeteer: {
+            headless: true, // Silent background operation
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--single-process',
+                '--renderer-process-limit=1',
+                '--js-flags=--max-old-space-size=128'
+            ],
+            protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
+        }
+    });
+    attachClientListeners(waClient);
+    return waClient;
+}
 
 // STRICT WHITELIST: Only the two authentic KTrade group IDs
 const ALLOWED_KTRADE_CHATS = new Set([
@@ -199,11 +333,27 @@ app.get('/ping', (req, res) => {
 
 // Live QR code status endpoint for cloud browser rendering
 app.get('/qr', (req, res) => {
-    res.json({
-        status: isClientReady ? "READY" : (latestQr ? "QR_READY" : "INITIALIZING"),
-        qr: latestQr,
-        monitored_chats: Array.from(ALLOWED_KTRADE_CHATS)
-    });
+    try {
+        if (latestQr === 'AUTH_TIMEOUT_RETRYING' && !isInitializing && !isClientReady) {
+            scheduleClientRetry('qr_endpoint_reload', 500);
+        }
+        const status = isClientReady
+            ? 'READY'
+            : (latestQr === 'AUTH_TIMEOUT_RETRYING'
+                ? 'AUTH_TIMEOUT_RETRYING'
+                : (latestQr ? 'QR_READY' : 'INITIALIZING'));
+        res.json({
+            status: status,
+            qr: latestQr,
+            monitored_chats: Array.from(ALLOWED_KTRADE_CHATS)
+        });
+    } catch (err) {
+        res.json({
+            status: 'AUTH_TIMEOUT_RETRYING',
+            qr: 'AUTH_TIMEOUT_RETRYING',
+            monitored_chats: Array.from(ALLOWED_KTRADE_CHATS)
+        });
+    }
 });
 
 // List all group chats with their serialized @g.us IDs (diagnostic)
@@ -436,42 +586,37 @@ app.listen(BRIDGE_PORT, '127.0.0.1', () => {
     console.log(`⚙️  [WhatsApp Bridge] Local API listening on 127.0.0.1:${BRIDGE_PORT}. Waiting for Chrome...`);
 });
 
-// Live Event Listener strictly gated to ALLOWED_KTRADE_CHATS
-client.on('message_create', async (msg) => {
-    // 1. Determine actual chat ID
-    const fromId = getSerializedId(msg.from);
-    const toId = getSerializedId(msg.to);
-    const chatId = msg.fromMe ? toId : fromId;
-
-    // STRICT GATE: If !ALLOWED_KTRADE_CHATS.has(chatId), RETURN IMMEDIATELY.
-    // Never process @c.us private DMs, @lid messages, @newsletter channels, or any other @g.us group!
-    if (!ALLOWED_KTRADE_CHATS.has(chatId)) {
+async function safeInitializeClient(reason = 'startup') {
+    if (isInitializing || isClientReady) {
         return;
     }
-
-    if (msg.isStatus) {
-        return;
-    }
-
-    const allowedTypes = ['chat', 'image', 'document', 'audio', 'ptt', 'video', 'voice'];
-    if (!allowedTypes.includes(msg.type) && !msg.hasMedia) {
-        return;
-    }
-
+    isInitializing = true;
     try {
-        let chatName = CHAT_NAMES[chatId] || 'KTrade';
-        try {
-            const chat = await msg.getChat();
-            if (chat && chat.name) chatName = chat.name;
-        } catch (getChatErr) {
-            // Keep default chatName from CHAT_NAMES map
+        if (client) {
+            try {
+                await client.destroy();
+            } catch (_) {
+                // Ignore cleanup errors on stale Puppeteer browser
+            }
+            client = null;
         }
-
-        console.log(`[Diagnostic] Live KTrade Message! Chat: "${chatName}", ID: ${chatId}, Type: ${msg.type}, Media: ${msg.hasMedia}`);
-        await forwardMessageToPython(msg, chatName, chatId);
-    } catch (err) {
-        console.warn(`⚠️ [WhatsApp Bridge] Live event skipped: ${err.message || err}`);
+        console.log(`🚀 [WhatsApp Bridge] Initializing Puppeteer WhatsApp client (reason: ${reason})...`);
+        client = createWhatsAppClient();
+        resetAuthWatchdog(180000);
+        await client.initialize();
+    } catch (initErr) {
+        clearAuthWatchdog();
+        console.error(`⚠️ [WhatsApp Bridge] Client initialization/auth error (${reason}):`, (initErr && initErr.message) ? initErr.message : initErr);
+        isClientReady = false;
+        latestQr = 'AUTH_TIMEOUT_RETRYING';
+        scheduleClientRetry('initialize_error', 8000);
+    } finally {
+        isInitializing = false;
     }
-});
+}
 
-client.initialize();
+safeInitializeClient('startup').catch((err) => {
+    console.error('⚠️ [WhatsApp Bridge] Startup init wrapper caught error:', (err && err.message) ? err.message : err);
+    latestQr = 'AUTH_TIMEOUT_RETRYING';
+    scheduleClientRetry('startup_wrapper', 8000);
+});
