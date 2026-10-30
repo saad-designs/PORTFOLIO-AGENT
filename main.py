@@ -782,10 +782,35 @@ class DashboardChatPayload(BaseModel):
     message: str
 
 @app.post("/api/dashboard/chat")
-async def dashboard_chat_endpoint(payload: DashboardChatPayload, request: Request):
+async def dashboard_chat_endpoint(
+    request: Request,
+    message: str = Form(""),
+    file: Optional[UploadFile] = File(None)
+):
     verify_dashboard_auth(request)
-    from chat_copilot import process_dashboard_chat
-    result = await process_dashboard_chat(payload.message)
+    import mimetypes
+    from chat_copilot import process_dashboard_chat_with_multimodal
+
+    file_bytes = None
+    mime_type = None
+    filename = None
+
+    if file and file.filename:
+        file_bytes = await file.read()
+        filename = file.filename
+        guessed_mime, _ = mimetypes.guess_type(filename)
+        raw_ct = (file.content_type or "").strip()
+        if raw_ct and raw_ct != "application/octet-stream":
+            mime_type = raw_ct
+        else:
+            mime_type = guessed_mime or ("application/pdf" if filename.lower().endswith(".pdf") else "image/png")
+
+    result = await process_dashboard_chat_with_multimodal(
+        user_message=message or "",
+        file_bytes=file_bytes,
+        mime_type=mime_type,
+        filename=filename
+    )
     return result
 
 @app.get("/api/dashboard/chat-history")

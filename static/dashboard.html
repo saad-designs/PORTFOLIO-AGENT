@@ -802,25 +802,46 @@
 
       <!-- Chat Input Bar -->
       <div class="p-3 border-t border-[#1E232D] bg-[#12151B]">
-        <form id="copilot-form" onsubmit="handleCopilotSubmit(event)" class="relative flex items-center">
+        <div id="file-preview-banner" style="display: none;" class="mb-2 px-2.5 py-1.5 bg-sky-500/10 border border-sky-500/30 rounded-lg text-[11px] text-sky-400 font-mono flex items-center justify-between gap-2">
+          <span id="file-preview-name" class="truncate">📎 Attached</span>
+          <button type="button" onclick="clearSelectedFile()" title="Remove attachment" class="text-slate-400 hover:text-white font-bold px-1">&times;</button>
+        </div>
+        <form id="copilot-form" onsubmit="handleCopilotSubmit(event)" class="chat-input-container relative flex items-center gap-1.5">
           <input
-            type="text"
-            id="copilot-input"
-            placeholder="Type command (e.g. Bought 500 HUBC at 118.50)..."
-            class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl pl-3.5 pr-10 py-2.5 text-white text-xs placeholder:text-slate-500 font-sans transition"
-            autocomplete="off"
+            type="file"
+            id="chat-file-input"
+            accept="application/pdf,image/*"
+            style="display: none;"
+            onchange="handleFileSelected(event)"
           />
           <button
-            type="submit"
-            id="copilot-send-btn"
-            class="absolute right-1.5 p-1.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-black rounded-lg transition shadow-md shadow-emerald-500/20"
+            type="button"
+            onclick="document.getElementById('chat-file-input').click()"
+            title="Upload KTrade PDF Statement, Broker Report, or Chart Screenshot"
+            class="p-2 bg-[#0B0D10] hover:bg-[#1E232D] border border-[#1E232D] hover:border-emerald-500/40 text-slate-300 hover:text-emerald-400 rounded-xl text-sm transition shrink-0"
           >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
-            </svg>
+            📎
           </button>
+          <div class="relative flex-1 flex items-center">
+            <input
+              type="text"
+              id="copilot-input"
+              placeholder="Ask a question, log trade, or upload PDF/chart..."
+              class="w-full bg-[#0B0D10] border border-[#1E232D] focus:border-emerald-500 focus:outline-none rounded-xl pl-3 pr-9 py-2.5 text-white text-xs placeholder:text-slate-500 font-sans transition"
+              autocomplete="off"
+            />
+            <button
+              type="submit"
+              id="copilot-send-btn"
+              class="absolute right-1.5 p-1.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-black rounded-lg transition shadow-md shadow-emerald-500/20"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
+              </svg>
+            </button>
+          </div>
         </form>
-        <p class="text-[10px] text-slate-500 text-center mt-1.5 font-mono">Press Enter to dispatch to Ledger & AI Copilot</p>
+        <p class="text-[10px] text-slate-500 text-center mt-1.5 font-mono">Attach PDFs/charts with 📎 (or Ctrl+V image) • Press Enter to send</p>
       </div>
     </aside>
   </div>
@@ -1065,7 +1086,9 @@
         headers['x-dashboard-key'] = authKey;
         headers['Authorization'] = `Bearer ${authKey}`;
       }
-      headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+      if (!(options.body instanceof FormData)) {
+        headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+      }
 
       try {
         const res = await fetch(endpoint, { ...options, headers });
@@ -1828,8 +1851,37 @@
       }
     }
 
-    // CHAT COPILOT CONTROLLER
+    // CHAT COPILOT CONTROLLER & MULTIMODAL FILE UPLOADER
     let copilotDrawerOpen = true;
+    let selectedFile = null;
+
+    function handleFileSelected(event) {
+      const file = event.target && event.target.files ? event.target.files[0] : null;
+      if (file) {
+        selectedFile = file;
+        const banner = document.getElementById('file-preview-banner');
+        const bannerName = document.getElementById('file-preview-name');
+        if (bannerName) {
+          const sizeKb = (file.size / 1024).toFixed(1);
+          bannerName.innerText = `📎 Attached: ${file.name} (${sizeKb} KB)`;
+        }
+        if (banner) {
+          banner.style.display = 'flex';
+        }
+      }
+    }
+
+    function clearSelectedFile() {
+      selectedFile = null;
+      const fileInput = document.getElementById('chat-file-input');
+      if (fileInput) fileInput.value = '';
+      const banner = document.getElementById('file-preview-banner');
+      if (banner) banner.style.display = 'none';
+    }
+
+    function sendChatMessage() {
+      handleCopilotSubmit();
+    }
     function toggleCopilotDrawer() {
       const drawer = document.getElementById('copilot-drawer');
       if (!drawer) return;
@@ -1874,6 +1926,8 @@
                 act.status === 'FAILED' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
                 (act.type === 'TRADE' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
                  act.type === 'CAPITAL' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' :
+                 act.type === 'RESEARCH' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+                 act.type === 'CHART' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' :
                  'bg-violet-500/20 text-violet-300 border border-violet-500/30')
               }">
                 ⚡ ${act.label || act.type}
@@ -1914,29 +1968,44 @@
       if (e) e.preventDefault();
       const input = document.getElementById('copilot-input');
       const text = input.value.trim();
-      if (!text) return;
+      const fileToSend = selectedFile;
+      if (!text && !fileToSend) return;
 
       input.value = '';
-      appendChatMessage('user', text);
+      clearSelectedFile();
+
+      const displayUserMsg = fileToSend
+        ? (text ? `📎 [Attached: ${fileToSend.name}]\n${text}` : `📎 [Attached: ${fileToSend.name}]`)
+        : text;
+      appendChatMessage('user', displayUserMsg);
 
       const container = document.getElementById('copilot-messages');
       const loaderId = 'loader-' + Date.now();
       const loaderDiv = document.createElement('div');
       loaderDiv.id = loaderId;
       loaderDiv.className = 'flex items-start';
+      const loaderLabel = fileToSend
+        ? `Analyzing ${escapeHtml(fileToSend.name)} via Gemini Multimodal...`
+        : 'Processing ledger action...';
       loaderDiv.innerHTML = `
         <div class="bg-[#0B0D10] border border-[#1E232D] rounded-xl p-3 text-xs text-slate-400 flex items-center gap-2">
-          <div class="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-          <span class="font-mono text-[11px]">Processing ledger action...</span>
+          <div class="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0"></div>
+          <span class="font-mono text-[11px]">${loaderLabel}</span>
         </div>
       `;
       container.appendChild(loaderDiv);
       scrollChatToBottom();
 
       try {
+        const formData = new FormData();
+        formData.append('message', text);
+        if (fileToSend) {
+          formData.append('file', fileToSend);
+        }
+
         const res = await apiFetch('/api/dashboard/chat', {
           method: 'POST',
-          body: JSON.stringify({ message: text })
+          body: formData
         });
 
         const l = document.getElementById(loaderId);
@@ -1949,9 +2018,10 @@
         if (currentTab === 'portfolio') loadPortfolioData();
         if (currentTab === 'dividends') loadDividendsData();
         if (currentTab === 'whatsapp') loadIntelligenceData();
+        if (currentTab === 'research') loadResearchData();
 
         if (res.actions_taken && res.actions_taken.length) {
-          showToast('Ledger updated successfully!', 'success');
+          showToast('Ledger / Research updated successfully!', 'success');
         }
       } catch (err) {
         const l = document.getElementById(loaderId);
@@ -1985,6 +2055,30 @@
     window.addEventListener('DOMContentLoaded', () => {
       loadOverviewData();
       loadChatHistory();
+
+      // Allow Ctrl+V pasting chart screenshots directly into Copilot input
+      const copilotInput = document.getElementById('copilot-input');
+      if (copilotInput) {
+        copilotInput.addEventListener('paste', (e) => {
+          const items = e.clipboardData && e.clipboardData.items ? e.clipboardData.items : [];
+          for (let i = 0; i < items.length; i++) {
+            if (items[i].type && items[i].type.startsWith('image/')) {
+              const pastedFile = items[i].getAsFile();
+              if (pastedFile) {
+                const ext = (pastedFile.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
+                selectedFile = new File([pastedFile], `chart_screenshot_${Date.now()}.${ext}`, { type: pastedFile.type });
+                const banner = document.getElementById('file-preview-banner');
+                const bannerName = document.getElementById('file-preview-name');
+                if (bannerName) bannerName.innerText = `📎 Attached: ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`;
+                if (banner) banner.style.display = 'flex';
+                showToast('Chart screenshot attached from clipboard!', 'info');
+              }
+              break;
+            }
+          }
+        });
+      }
+
       // Auto-refresh overview every 25 seconds
       setInterval(() => {
         if (currentTab === 'overview') loadOverviewData();
