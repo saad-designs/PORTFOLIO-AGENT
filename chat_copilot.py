@@ -30,17 +30,22 @@ from portfolio_manager import (
     record_capital_transaction,
     record_dividend,
     transfer_dividend_to_ktrade,
+    sync_full_portfolio_state,
+    REAL_KTRADE_CASH_BALANCE,
+    REAL_KTRADE_WORKING_CAPITAL,
+    REAL_KTRADE_HOLDINGS,
     save_chat_message,
     get_chat_history,
     get_db_connection
 )
+from learning_engine import record_prediction
 
 SYSTEM_COPILOT_PROMPT = """You are the Senior PSX Portfolio Co-Investor & Automated Multimodal Ledger Operator.
-Your job is to parse the user's natural language updates, questions, OR uploaded multimodal attachments (KTrade PDF trade confirmation statements, PSX Broker Research Report PDFs, and Technical Chart Screenshots) regarding the Pakistan Stock Exchange (PSX) portfolio, execute structured financial/research actions, and provide concise, executive, numbers-backed answers.
+Your job is to parse the user's natural language updates, questions, OR uploaded multimodal attachments (KTrade PDF trade confirmation statements, KTrade portfolio custody screenshots, PSX Broker Research Report PDFs, and Technical Chart Screenshots) regarding the Pakistan Stock Exchange (PSX) portfolio, execute structured financial/research actions, and provide concise, executive, numbers-backed answers.
 
 You must respond ONLY with a valid JSON object matching this schema:
 {
-  "action_type": "BUY_STOCK" | "SELL_STOCK" | "LOG_KTRADE_STATEMENT" | "DEPOSIT_CASH" | "WITHDRAW_CASH" | "LOG_DIVIDEND_IN_BANK" | "LOG_DIVIDEND_ENTITLED" | "TRANSFER_DIVIDEND_TO_KTRADE" | "LOG_RESEARCH_REPORT" | "CHART_ANALYSIS" | "GENERAL_QUERY",
+  "action_type": "SYNC_PORTFOLIO" | "BUY_STOCK" | "SELL_STOCK" | "LOG_KTRADE_STATEMENT" | "DEPOSIT_CASH" | "WITHDRAW_CASH" | "LOG_DIVIDEND_IN_BANK" | "LOG_DIVIDEND_ENTITLED" | "TRANSFER_DIVIDEND_TO_KTRADE" | "LOG_RESEARCH_REPORT" | "CHART_ANALYSIS" | "UPDATE_PLAYBOOK" | "GENERAL_QUERY",
   "action_data": { ... },
   "additional_actions": [
     {"action_type": "...", "action_data": { ... }}
@@ -50,6 +55,16 @@ You must respond ONLY with a valid JSON object matching this schema:
 (Note: "additional_actions" is optional—include it when the user uploads multiple files that warrant multiple distinct actions, such as two broker reports, multiple chart screenshots, or a KTrade PDF statement alongside a chart screenshot.)
 
 ACTION DEFINITIONS:
+0. SYNC_PORTFOLIO:
+   - Bulk portfolio reset & custody synchronization when the user pastes or uploads their full KTrade holdings snapshot, asks to replace mock/stale rows, or asks to synchronize their exact holdings and cash balance in one atomic transaction.
+   - action_data: {
+       "cash_balance": 4357.38,
+       "total_working_capital": 51446.75,
+       "holdings": [
+         {"ticker": "EFERT", "shares": 8.0, "avg_buy_price": 194.99},
+         {"ticker": "FABL", "shares": 5.0, "avg_buy_price": 91.40}
+       ]
+     }
 1. BUY_STOCK:
    - Single share purchase (e.g. "Bought 500 HUBC at 118.50" or a 1-trade BUY confirmation slip)
    - action_data: {"ticker": "HUBC", "side": "BUY", "quantity": 500.0, "price": 118.50, "fees": 0.0, "notes": "Trade note if any"}
@@ -94,16 +109,28 @@ ACTION DEFINITIONS:
    - action_data: {
        "ticker": "SYS",
        "setup": "BULLISH_BREAKOUT" | "PULLBACK_SUPPORT" | "OVERBOUGHT_CAUTION" | "BEARISH_BREAKDOWN" | "NEUTRAL_CONSOLIDATION",
+       "entry_price": 109.15,
+       "target_price": 132.0,
+       "stop_loss": 99.0,
        "summary": "Concise technical setup note (RSI/MACD/key levels)."
      }
-11. GENERAL_QUERY:
+11. UPDATE_PLAYBOOK:
+   - User explicitly teaches or refines a standing portfolio rule (e.g. "Add rule: never let any single sector exceed 30%").
+   - action_data: {
+       "source": "Co-Investor Directive",
+       "rule": "Clear, reusable quantitative rule.",
+       "regime_tag": "ALL",
+       "confidence_weight": 0.85
+     }
+12. GENERAL_QUERY:
    - Portfolio inquiries, thesis review, valuations, macro queries, mentor research questions, or health checks.
    - action_data: {}
 
 CRITICAL RULES:
 - Output STRICT JSON only. Do not wrap in markdown or prefix with text.
-- Be exact with PSX ticker symbols (SYS, HUBC, LUCK, FFC, EFERT, MEBL, MARI, OGDC, PPL, PSO, HBL, UBL, MCB, SAZEW, etc.).
-- Never invent trades if the user is merely asking a question or uploading a research report/chart (only log trades when the user explicitly states an executed trade or uploads an actual broker trade confirmation statement).
+- Do NOT use emojis in your reply—maintain crisp, institutional desk tone with exact PKR figures and percentages.
+- Be exact with PSX ticker symbols (SYS, HUBC, LUCK, FFC, EFERT, FABL, MEBL, MARI, OGDC, PPL, PSO, HBL, UBL, MCB, SAZEW, etc.).
+- Never invent trades if the user is merely asking a question or uploading a research report/chart (only log trades when the user explicitly states an executed trade or uploads an actual broker trade confirmation statement, or use SYNC_PORTFOLIO when syncing full custody holdings).
 - Responses must be sharp, highly confident, and numbers-backed.
 """
 
@@ -131,10 +158,10 @@ def extract_json_payload(raw_text: str) -> dict:
 
 
 def get_live_financial_context() -> str:
-    """Gathers live holdings, cash ledgers, valuation/DCF targets, playbook rules, and recent feed."""
+    """Gathers live holdings, cash ledgers, valuation/DCF targets, playbook rules, and recent feed in <150ms using cached prices."""
     summary = {}
     try:
-        summary = get_complete_financial_summary()
+        summary = get_complete_financial_summary(use_cached_prices=True)
     except Exception as e:
         print(f"⚠️ [Chat Copilot] Failed fetching financial summary: {e}")
 
@@ -238,15 +265,15 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
             )
             action_badge = {
                 "type": "TRADE",
-                "label": f"{side} {qty:,.0f} {ticker} @ Rs. {price:,.2f}",
+                "label": f"LOGGED TRADE // {side} {qty:g} {ticker} @ {price:,.2f}",
                 "details": f"Net Total: Rs. {trade_res['net_total']:,.2f}",
                 "status": "COMPLETED"
             }
             actions_taken.append(action_badge)
             publish_agent_event(
                 category="SYSTEM_ALERT",
-                title=f"Trade Executed: {side} {qty:,.0f} {ticker}",
-                content=f"{side} {qty:,.0f} {ticker} executed at Rs. {price:,.2f} (Fees: Rs. {fees:,.2f}). Cash adjusted by Rs. {trade_res['net_total']:,.2f}.",
+                title=f"Trade Executed: {side} {qty:g} {ticker}",
+                content=f"{side} {qty:g} {ticker} executed at Rs. {price:,.2f} (Fees: Rs. {fees:,.2f}). Cash adjusted by Rs. {trade_res['net_total']:,.2f}.",
                 metadata=trade_res
             )
             return trade_res
@@ -257,13 +284,54 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
         if not action_type or action_type == "GENERAL_QUERY":
             return
 
-        if action_type in {"BUY_STOCK", "SELL_STOCK"}:
+        if action_type == "SYNC_PORTFOLIO":
+            raw_holdings = action_data.get("holdings")
+            holdings_list = raw_holdings if isinstance(raw_holdings, list) and len(raw_holdings) > 0 else REAL_KTRADE_HOLDINGS
+            cash_bal = (
+                float(action_data["cash_balance"])
+                if action_data.get("cash_balance") is not None
+                else REAL_KTRADE_CASH_BALANCE
+            )
+            working_cap = (
+                float(action_data["total_working_capital"])
+                if action_data.get("total_working_capital") is not None
+                else (REAL_KTRADE_WORKING_CAPITAL if holdings_list is REAL_KTRADE_HOLDINGS else None)
+            )
+            sync_res = sync_full_portfolio_state(
+                cash_balance=cash_bal,
+                holdings=holdings_list,
+                total_working_capital=working_cap,
+            )
+            actions_taken.append({
+                "type": "SYNC_PORTFOLIO",
+                "label": f"SYNCED {sync_res['holdings_synced']} HOLDINGS",
+                "details": f"Cash: Rs. {sync_res['ktrade_available_cash']:,.2f} | Working Cap: Rs. {sync_res['fresh_capital_invested']:,.2f}",
+                "status": "COMPLETED"
+            })
+            publish_agent_event(
+                category="SYSTEM_ALERT",
+                title=f"KTrade Custody Synced: {sync_res['holdings_synced']} Positions",
+                content=(
+                    f"Full atomic custody reset completed. Synced {sync_res['holdings_synced']} holdings "
+                    f"({', '.join(sync_res['tickers'])}), KTrade liquid cash set to Rs. {sync_res['ktrade_available_cash']:,.2f}, "
+                    f"working capital baseline Rs. {sync_res['fresh_capital_invested']:,.2f}."
+                ),
+                metadata=sync_res,
+            )
+            if not reply_text:
+                reply_text = (
+                    f"Synchronized **{sync_res['holdings_synced']} KTrade positions** atomically. "
+                    f"Available Cash: **Rs. {sync_res['ktrade_available_cash']:,.2f}** | "
+                    f"Working Capital: **Rs. {sync_res['fresh_capital_invested']:,.2f}**."
+                )
+
+        elif action_type in {"BUY_STOCK", "SELL_STOCK"}:
             default_side = "BUY" if action_type == "BUY_STOCK" else "SELL"
             trade_res = _execute_single_trade(action_data, default_side=default_side)
             if trade_res and not reply_text:
                 reply_text = (
-                    f"✅ Executed **{trade_res['side']} {trade_res['quantity']:,.0f} {trade_res['ticker']}** "
-                    f"at **Rs. {trade_res['price']:,.2f}** (Net Total: Rs. {trade_res['net_total']:,.2f}). Holdings & cash updated."
+                    f"Executed **{trade_res['side']} {trade_res['quantity']:g} {trade_res['ticker']}** "
+                    f"at **Rs. {trade_res['price']:,.2f}** (Net Total: Rs. {trade_res['net_total']:,.2f}). Holdings and liquid cash updated."
                 )
 
         elif action_type == "LOG_KTRADE_STATEMENT":
@@ -277,7 +345,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                     if res:
                         logged_count += 1
             if logged_count > 0 and not reply_text:
-                reply_text = f"✅ Parsed KTrade PDF statement and logged **{logged_count}** trade execution(s) into `trade_history` and updated live holdings."
+                reply_text = f"Parsed KTrade PDF statement and logged **{logged_count}** trade execution(s) into `trade_history` and updated live holdings."
 
         elif action_type == "DEPOSIT_CASH":
             amount = float(action_data.get("amount", 0))
@@ -286,7 +354,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                 cap_res = record_capital_transaction("DEPOSIT_TO_KTRADE", amount, notes=notes)
                 actions_taken.append({
                     "type": "CAPITAL",
-                    "label": f"Deposited Rs. {amount:,.2f} to KTrade",
+                    "label": f"DEPOSITED PKR {amount:,.2f}",
                     "status": "COMPLETED"
                 })
                 publish_agent_event(
@@ -296,7 +364,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                     metadata=cap_res
                 )
                 if not reply_text:
-                    reply_text = f"💵 Deposited **Rs. {amount:,.2f}** into KTrade available cash. Total fresh capital updated."
+                    reply_text = f"Deposited **Rs. {amount:,.2f}** into KTrade available cash. Total working capital updated."
 
         elif action_type == "WITHDRAW_CASH":
             amount = float(action_data.get("amount", 0))
@@ -305,7 +373,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                 cap_res = record_capital_transaction("WITHDRAWAL_FROM_KTRADE", amount, notes=notes)
                 actions_taken.append({
                     "type": "CAPITAL",
-                    "label": f"Withdrew Rs. {amount:,.2f} to Bank",
+                    "label": f"WITHDREW PKR {amount:,.2f}",
                     "status": "COMPLETED"
                 })
                 publish_agent_event(
@@ -315,7 +383,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                     metadata=cap_res
                 )
                 if not reply_text:
-                    reply_text = f"📤 Withdrew **Rs. {amount:,.2f}** from KTrade to bank account. Available cash balance debited."
+                    reply_text = f"Withdrew **Rs. {amount:,.2f}** from KTrade to personal bank account. Available cash balance debited."
 
         elif action_type in {"LOG_DIVIDEND_IN_BANK", "LOG_DIVIDEND_ENTITLED"}:
             ticker = str(action_data.get("ticker", "")).strip().upper()
@@ -340,7 +408,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                 )
                 actions_taken.append({
                     "type": "DIVIDEND",
-                    "label": f"{ticker} Div: Rs. {div_res['net_amount']:,.2f} ({status})",
+                    "label": f"LOGGED DIVIDEND // {ticker} PKR {div_res['net_amount']:,.2f}",
                     "status": "COMPLETED"
                 })
                 publish_agent_event(
@@ -350,8 +418,8 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                     metadata=div_res
                 )
                 if not reply_text:
-                    stage_label = "in your personal bank account" if status == "CREDITED_TO_BANK" else "as entitled (pending bank credit)"
-                    reply_text = f"💰 Logged **{ticker}** dividend of **Rs. {div_res['net_amount']:,.2f}** net {stage_label} (WHT Rs. {div_res['tax_withheld']:,.2f} deducted at {div_res['tax_rate_pct']}%)."
+                    stage_label = "in personal bank account" if status == "CREDITED_TO_BANK" else "as entitled (pending bank credit)"
+                    reply_text = f"Logged **{ticker}** dividend of **Rs. {div_res['net_amount']:,.2f}** net {stage_label} (WHT Rs. {div_res['tax_withheld']:,.2f} at {div_res['tax_rate_pct']}%)."
 
         elif action_type == "TRANSFER_DIVIDEND_TO_KTRADE":
             target = action_data.get("dividend_id") or action_data.get("ticker")
@@ -359,7 +427,7 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                 trans_res = transfer_dividend_to_ktrade(target)
                 actions_taken.append({
                     "type": "DIVIDEND_REINVEST",
-                    "label": f"Transferred {trans_res['ticker']} Div Rs. {trans_res['net_amount']:,.2f} to KTrade",
+                    "label": f"REINVESTED DIV // {trans_res['ticker']} PKR {trans_res['net_amount']:,.2f}",
                     "status": "COMPLETED"
                 })
                 publish_agent_event(
@@ -369,14 +437,14 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                     metadata=trans_res
                 )
                 if not reply_text:
-                    reply_text = f"🚀 Transferred **{trans_res['ticker']}** dividend of **Rs. {trans_res['net_amount']:,.2f}** from bank into KTrade cash. Available cash is now deployed and ready."
+                    reply_text = f"Transferred **{trans_res['ticker']}** dividend of **Rs. {trans_res['net_amount']:,.2f}** from bank into KTrade buying power."
 
         elif action_type == "LOG_RESEARCH_REPORT":
             report_items = action_data.get("reports") if isinstance(action_data.get("reports"), list) else [action_data]
             for rep in report_items:
                 if not isinstance(rep, dict):
                     continue
-                source = str(rep.get("source") or "Uploaded Broker PDF").strip()
+                source = str(rep.get("source") or "Broker_Research").strip()
                 ticker = str(rep.get("ticker") or "MACRO").strip().upper()
                 subject = str(rep.get("subject") or f"{ticker} Research Report").strip()
                 sentiment = str(rep.get("sentiment") or "NEUTRAL").strip().upper()
@@ -400,15 +468,31 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                 except Exception as rep_err:
                     print(f"⚠️ [Chat Copilot] Could not insert into institutional_reports: {rep_err}")
 
+                broker_tp = rep.get("broker_target_price")
+                if ticker not in {"MACRO", "PSX", "NONE"} and broker_tp and sentiment in {"BULLISH", "BEARISH"}:
+                    try:
+                        snap = get_complete_financial_summary(use_cached_prices=True)
+                        h_lookup = {h["ticker"]: h["current_price"] for h in snap.get("holdings", [])}
+                        ref_entry = float(h_lookup.get(ticker) or float(broker_tp) * 0.88)
+                        record_prediction(
+                            source=source,
+                            ticker=ticker,
+                            entry_price=ref_entry,
+                            target_price=float(broker_tp),
+                            direction=sentiment,
+                        )
+                    except Exception:
+                        pass
+
                 publish_agent_event(
                     category="MACRO_NEWS",
-                    title=f"📑 Broker Report ({source}): {ticker} [{sentiment}]",
+                    title=f"Broker Report ({source}): {ticker} [{sentiment}]",
                     content=summary_body[:4000],
                     metadata=rep
                 )
                 actions_taken.append({
                     "type": "RESEARCH",
-                    "label": f"Logged {ticker} Report ({sentiment})",
+                    "label": f"LOGGED REPORT // {ticker} [{sentiment}]",
                     "status": "COMPLETED"
                 })
 
@@ -420,17 +504,61 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                 ticker = str(ch.get("ticker") or "PSX").strip().upper()
                 setup = str(ch.get("setup") or "TECHNICAL_REVIEW").strip().upper()
                 summary_body = str(ch.get("summary") or reply_text or "Technical chart evaluated.").strip()
+
+                if ticker not in {"PSX", "MACRO", "NONE"} and ch.get("entry_price") and ch.get("target_price"):
+                    try:
+                        direction = "BEARISH" if "BEARISH" in setup else "BULLISH"
+                        record_prediction(
+                            source="Technical_Scanner",
+                            ticker=ticker,
+                            entry_price=float(ch["entry_price"]),
+                            target_price=float(ch["target_price"]),
+                            stop_loss=float(ch["stop_loss"]) if ch.get("stop_loss") else None,
+                            direction=direction,
+                        )
+                    except Exception:
+                        pass
+
                 publish_agent_event(
                     category="DESK_MANAGER",
-                    title=f"📈 Technical Chart Review: {ticker} ({setup})",
+                    title=f"Technical Chart Review: {ticker} ({setup})",
                     content=summary_body[:4000],
                     metadata=ch
                 )
                 actions_taken.append({
                     "type": "CHART",
-                    "label": f"Chart Evaluated: {ticker} ({setup})",
+                    "label": f"CHART ANALYZED // {ticker} ({setup})",
                     "status": "COMPLETED"
                 })
+
+        elif action_type == "UPDATE_PLAYBOOK":
+            rule_text = str(action_data.get("rule") or "").strip()
+            src_name = str(action_data.get("source") or "Co-Investor Directive").strip()
+            reg_tag = str(action_data.get("regime_tag") or "ALL").strip().upper()
+            cw_val = float(action_data.get("confidence_weight") or 0.85)
+            if rule_text:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                try:
+                    cur.execute("""
+                        INSERT INTO active_playbook (source, rule, confidence_weight, times_applied, regime_tag, teaching_note, created_at)
+                        VALUES (%s, %s, %s, 1, %s, %s, NOW());
+                    """, (src_name, rule_text, cw_val, reg_tag, "Explicitly codified via Execution Copilot."))
+                    conn.commit()
+                finally:
+                    cur.close()
+                    conn.close()
+                actions_taken.append({
+                    "type": "PLAYBOOK",
+                    "label": "UPDATED PLAYBOOK",
+                    "status": "COMPLETED"
+                })
+                publish_agent_event(
+                    category="DESK_MANAGER",
+                    title=f"Playbook Rule Added ({src_name})",
+                    content=rule_text,
+                    metadata={"source": src_name, "confidence_weight": cw_val},
+                )
 
     action_queue: List[tuple] = []
     if isinstance(parsed.get("actions"), list):
@@ -633,7 +761,7 @@ async def process_dashboard_chat_with_multimodal(
                 f"{prompt}"
             )
 
-            # Construct multi-part contents payload for Gemini (gemini-3.8-flash cascade via google-genai SDK)
+            # Construct multi-part contents payload for Gemini (gemini-2.5-flash cascade via google-genai SDK)
             contents: List[Any] = [full_multimodal_prompt]
             for file_obj in valid_files:
                 contents.append(
@@ -652,7 +780,7 @@ async def process_dashboard_chat_with_multimodal(
                     return await generate_with_fallback(
                         client,
                         contents,
-                        task=TASK_DEEP_REASONING,
+                        task=TASK_MULTIMODAL,
                         priority=True
                     )
                 except (asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):

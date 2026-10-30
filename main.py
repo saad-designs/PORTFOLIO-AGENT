@@ -123,7 +123,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 client = None
 try:
@@ -392,10 +392,27 @@ async def run_startup_orchestration():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup: schema migrations, closed-loop learning tables, and real KTrade custody verification
     try:
-        from portfolio_manager import create_dashboard_and_ledger_tables
+        from portfolio_manager import (
+            create_dashboard_and_ledger_tables,
+            ensure_real_ktrade_portfolio_seeded,
+            refresh_portfolio_live_prices,
+        )
+        from learning_engine import init_learning_tables, seed_initial_predictions_if_empty
         create_dashboard_and_ledger_tables()
+        init_learning_tables()
+        ensure_real_ktrade_portfolio_seeded()
+        seed_initial_predictions_if_empty()
+
+        async def _initial_price_warm():
+            await asyncio.sleep(1.5)
+            try:
+                await asyncio.to_thread(refresh_portfolio_live_prices)
+            except Exception as warm_err:
+                print(f"⚠️ [Startup Price Warmup] {warm_err}", flush=True)
+
+        asyncio.create_task(_initial_price_warm())
     except Exception as db_init_err:
         print(f"⚠️ [Startup] DB Table init error: {db_init_err}", flush=True)
 
@@ -487,6 +504,11 @@ class TradeRecordPayload(BaseModel):
     fees_and_tax: Optional[float] = 0.00
     notes: Optional[str] = None
 
+class PortfolioSyncPayload(BaseModel):
+    cash_balance: Optional[float] = None
+    total_working_capital: Optional[float] = None
+    holdings: Optional[List[Dict[str, Any]]] = None
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
 async def serve_dashboard():
@@ -495,46 +517,76 @@ async def serve_dashboard():
         return FileResponse(dashboard_path, media_type="text/html")
     return HTMLResponse("<h1>PSX Co-Investor Dashboard</h1>", status_code=200)
 
+_OVERVIEW_CKPT_CACHE = {"ts": 0.0, "data": ({}, "Desk Manager synthesis standing by.")}
+_OVERVIEW_BRIDGE_CACHE = {"ts": 0.0, "data": ("OFFLINE", [], None)}
+
 @app.get("/api/dashboard/overview")
-async def get_dashboard_overview(request: Request):
+async def get_dashboard_overview(request: Request, refresh: bool = False):
     verify_dashboard_auth(request)
-    from portfolio_manager import get_complete_financial_summary, get_desk_manager_thought, get_db_connection
+    from portfolio_manager import get_complete_financial_summary, get_db_connection
     from model_router import MODEL_COOLDOWN_UNTIL, is_model_available, is_any_groq_text_model_available, CURRENT_GOOGLE_KEY_INDEX
-    
-    summary = await asyncio.to_thread(get_complete_financial_summary)
-    
-    # WhatsApp bridge status
-    bridge_status = "DISABLED" if not is_whatsapp_bridge_enabled() else "OFFLINE"
-    monitored_chats = []
-    if is_whatsapp_bridge_enabled():
+
+    def _fetch_checkpoints_and_thought():
+        now_ts = time.time()
+        if not refresh and (now_ts - _OVERVIEW_CKPT_CACHE["ts"]) < 20.0:
+            return _OVERVIEW_CKPT_CACHE["data"]
+        checkpoints_out = {}
+        thought_out = "Desk Manager synthesis standing by."
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                    if resp.status == 200:
-                        b_data = await resp.json()
-                        bridge_status = b_data.get("status", "OFFLINE")
-                        monitored_chats = b_data.get("monitored_chats", [])
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT key, value, updated_at FROM agent_checkpoints;")
+            for k, val, u in cur.fetchall():
+                checkpoints_out[k] = u.isoformat() if u else None
+                if k in ("desk_manager_proactive_thought", "proactive_thought") and val:
+                    if isinstance(val, dict):
+                        thought_out = val.get("thought", thought_out)
+                    elif isinstance(val, str):
+                        try:
+                            parsed = json.loads(val)
+                            thought_out = parsed.get("thought", str(parsed)) if isinstance(parsed, dict) else str(parsed)
+                        except Exception:
+                            thought_out = val
+            cur.close()
+            conn.close()
+            _OVERVIEW_CKPT_CACHE["ts"] = now_ts
+            _OVERVIEW_CKPT_CACHE["data"] = (checkpoints_out, thought_out)
         except Exception:
             pass
-        
+        return checkpoints_out, thought_out
+
+    async def _probe_bridge():
+        if not is_whatsapp_bridge_enabled():
+            return "DISABLED", [], None
+        now_ts = time.time()
+        if not refresh and (now_ts - _OVERVIEW_BRIDGE_CACHE["ts"]) < 10.0:
+            return _OVERVIEW_BRIDGE_CACHE["data"]
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=0.25)) as resp:
+                    if resp.status == 200:
+                        b_data = await resp.json()
+                        res_tuple = (b_data.get("status", "OFFLINE"), b_data.get("monitored_chats", []), b_data.get("memory_mb"))
+                        _OVERVIEW_BRIDGE_CACHE["ts"] = now_ts
+                        _OVERVIEW_BRIDGE_CACHE["data"] = res_tuple
+                        return res_tuple
+        except Exception:
+            pass
+        res_offline = ("OFFLINE", [], None)
+        _OVERVIEW_BRIDGE_CACHE["ts"] = now_ts
+        _OVERVIEW_BRIDGE_CACHE["data"] = res_offline
+        return res_offline
+
+    summary, (checkpoints, desk_thought), (bridge_status, monitored_chats, bridge_mem_mb) = await asyncio.gather(
+        asyncio.to_thread(get_complete_financial_summary, not refresh),
+        asyncio.to_thread(_fetch_checkpoints_and_thought),
+        _probe_bridge(),
+    )
+
     now = time.time()
     model_cooldowns = {
         m: round(t - now, 1) for m, t in MODEL_COOLDOWN_UNTIL.items() if t > now
     }
-    
-    checkpoints = {}
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT key, updated_at FROM agent_checkpoints;")
-        for k, u in cur.fetchall():
-            checkpoints[k] = u.isoformat() if u else None
-        cur.close()
-        conn.close()
-    except Exception:
-        pass
-
-    desk_thought = await asyncio.to_thread(get_desk_manager_thought)
 
     return {
         "status": "success",
@@ -542,16 +594,17 @@ async def get_dashboard_overview(request: Request):
         "system_health": {
             "whatsapp_bridge": {
                 "status": bridge_status,
-                "monitored_chats": monitored_chats
+                "monitored_chats": monitored_chats,
+                "memory_mb": bridge_mem_mb
             },
             "model_router": {
                 "active_google_key_index": CURRENT_GOOGLE_KEY_INDEX,
                 "cooldowns": model_cooldowns,
                 "models": {
                     "llama-3.3-70b-versatile": is_any_groq_text_model_available(),
-                    "gemini-3.5-flash-lite": is_model_available("gemini-3.5-flash-lite"),
-                    "gemini-3.5-flash": is_model_available("gemini-3.5-flash"),
-                    "gemini-3.8-flash": is_model_available("gemini-3.8-flash")
+                    "gemini-2.5-flash-lite": is_model_available("gemini-2.5-flash-lite"),
+                    "gemini-2.5-flash": is_model_available("gemini-2.5-flash"),
+                    "gemini-2.5-pro": is_model_available("gemini-2.5-pro")
                 }
             },
             "checkpoints": checkpoints
@@ -559,12 +612,72 @@ async def get_dashboard_overview(request: Request):
         "desk_manager_thought": desk_thought
     }
 
+@app.post("/api/dashboard/sync-portfolio")
+async def sync_dashboard_portfolio(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    payload: Optional[PortfolioSyncPayload] = None
+):
+    verify_dashboard_auth(request)
+    from portfolio_manager import (
+        sync_full_portfolio_state,
+        refresh_portfolio_live_prices,
+        publish_agent_event,
+        REAL_KTRADE_CASH_BALANCE,
+        REAL_KTRADE_WORKING_CAPITAL,
+        REAL_KTRADE_HOLDINGS,
+    )
+    from learning_engine import seed_initial_predictions_if_empty
+
+    use_default = payload is None or not payload.holdings
+    holdings_in = REAL_KTRADE_HOLDINGS if use_default else payload.holdings
+    cash_in = (
+        REAL_KTRADE_CASH_BALANCE
+        if (payload is None or payload.cash_balance is None)
+        else float(payload.cash_balance)
+    )
+    working_cap_in = (
+        REAL_KTRADE_WORKING_CAPITAL
+        if (payload is None or payload.total_working_capital is None) and use_default
+        else (float(payload.total_working_capital) if payload and payload.total_working_capital is not None else None)
+    )
+
+    sync_res = await asyncio.to_thread(
+        sync_full_portfolio_state,
+        cash_in,
+        holdings_in,
+        working_cap_in,
+    )
+    await asyncio.to_thread(seed_initial_predictions_if_empty)
+    background_tasks.add_task(refresh_portfolio_live_prices)
+    await asyncio.to_thread(
+        publish_agent_event,
+        "SYSTEM_ALERT",
+        f"KTrade Custody Synced ({sync_res['holdings_synced']} Holdings)",
+        (
+            f"Atomic portfolio reset completed: {sync_res['holdings_synced']} positions synced, "
+            f"KTrade liquid cash set to Rs. {sync_res['ktrade_available_cash']:,.2f}, "
+            f"working capital Rs. {sync_res['fresh_capital_invested']:,.2f}."
+        ),
+        sync_res,
+    )
+    return sync_res
+
+@app.get("/api/dashboard/algorithm-state")
+async def get_dashboard_algorithm_state(request: Request):
+    verify_dashboard_auth(request)
+    from learning_engine import get_algorithm_state
+    state = await asyncio.to_thread(get_algorithm_state)
+    return state
+
 @app.get("/api/dashboard/dividends")
 async def get_dashboard_dividends(request: Request, limit: int = 100):
     verify_dashboard_auth(request)
     from portfolio_manager import get_all_dividends, get_complete_financial_summary
-    divs = await asyncio.to_thread(get_all_dividends, limit)
-    summary = await asyncio.to_thread(get_complete_financial_summary)
+    divs, summary = await asyncio.gather(
+        asyncio.to_thread(get_all_dividends, limit),
+        asyncio.to_thread(get_complete_financial_summary, True),
+    )
     kpis = summary.get("financial_kpis", {})
     return {
         "dividends": divs,
@@ -696,15 +809,20 @@ async def get_dashboard_intelligence(request: Request):
             ]
 
             cur.execute("""
-                SELECT id, source, rule, created_at
+                SELECT id, source, rule, COALESCE(confidence_weight, 0.70), COALESCE(times_applied, 1),
+                       COALESCE(regime_tag, 'ALL'), teaching_note, created_at
                 FROM active_playbook
-                ORDER BY created_at DESC
+                ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
                 LIMIT 20;
             """)
             active_playbook = [
                 {
                     "id": r[0], "source": r[1], "rule": r[2],
-                    "created_at": r[3].isoformat() if r[3] else None
+                    "confidence_weight": float(r[3] or 0.70),
+                    "times_applied": int(r[4] or 1),
+                    "regime_tag": r[5] or "ALL",
+                    "teaching_note": r[6] or "",
+                    "created_at": r[7].isoformat() if r[7] else None
                 }
                 for r in cur.fetchall()
             ]
@@ -753,9 +871,22 @@ async def get_dashboard_feed(request: Request, limit: int = 50):
                 {"id": r[0], "source": r[1], "payload": r[2], "status": r[3], "created_at": r[4].isoformat() if r[4] else None}
                 for r in cur.fetchall()
             ]
-            cur.execute("SELECT id, source, rule, created_at FROM active_playbook ORDER BY created_at DESC LIMIT 20;")
+            cur.execute("""
+                SELECT id, source, rule, COALESCE(confidence_weight, 0.70), COALESCE(times_applied, 1),
+                       COALESCE(regime_tag, 'ALL'), teaching_note, created_at
+                FROM active_playbook
+                ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
+                LIMIT 20;
+            """)
             playbook = [
-                {"id": r[0], "source": r[1], "rule": r[2], "created_at": r[3].isoformat() if r[3] else None}
+                {
+                    "id": r[0], "source": r[1], "rule": r[2],
+                    "confidence_weight": float(r[3] or 0.70),
+                    "times_applied": int(r[4] or 1),
+                    "regime_tag": r[5] or "ALL",
+                    "teaching_note": r[6] or "",
+                    "created_at": r[7].isoformat() if r[7] else None
+                }
                 for r in cur.fetchall()
             ]
             cur.execute("SELECT id, source_type, source_url, content, created_at FROM agent_knowledge ORDER BY created_at DESC LIMIT 20;")
@@ -868,8 +999,29 @@ async def trigger_dashboard_sweep(sweep_type: str, background_tasks: BackgroundT
     elif st == "news":
         from news_scraper import run_news_sweep
         background_tasks.add_task(run_news_sweep)
+    elif st == "learning":
+        from learning_engine import evaluate_open_predictions
+        grading_summary = await evaluate_open_predictions()
+        return {
+            "status": "completed",
+            "sweep_type": "learning",
+            "grading_summary": grading_summary,
+            "timestamp": time.time()
+        }
+    elif st == "prices":
+        from portfolio_manager import refresh_portfolio_live_prices
+        price_res = await asyncio.to_thread(refresh_portfolio_live_prices)
+        return {
+            "status": "completed",
+            "sweep_type": "prices",
+            "price_summary": price_res,
+            "timestamp": time.time()
+        }
     else:
-        raise HTTPException(status_code=400, detail=f"Unknown sweep type: {sweep_type}. Use 'business', 'youtube', or 'news'.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown sweep type: {sweep_type}. Use 'business', 'youtube', 'news', 'learning', or 'prices'."
+        )
     return {
         "status": "triggered",
         "sweep_type": st,

@@ -97,22 +97,94 @@ async def send_learning_brief(source: str, title: str, summary: str):
         except Exception:
             pass
 
+import threading
+import time as _time
+
+_PG_POOL = None
+_PG_POOL_LOCK = threading.Lock()
+_CACHED_FIN_SUMMARY = None
+_CACHED_FIN_SUMMARY_TS: float = 0.0
+
+
+def invalidate_financial_summary_cache():
+    global _CACHED_FIN_SUMMARY, _CACHED_FIN_SUMMARY_TS
+    _CACHED_FIN_SUMMARY = None
+    _CACHED_FIN_SUMMARY_TS = 0.0
+
+
+class _PooledConnectionProxy:
+    """Thin proxy returning psycopg2 connections to ThreadedConnectionPool on .close()."""
+    __slots__ = ("_conn", "_pool", "_returned")
+
+    def __init__(self, conn, pool):
+        self._conn = conn
+        self._pool = pool
+        self._returned = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self):
+        if self._returned:
+            return
+        self._returned = True
+        try:
+            if self._conn.closed:
+                self._pool.putconn(self._conn, close=True)
+            else:
+                if self._conn.info.transaction_status not in (0,):
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        self._pool.putconn(self._conn, close=True)
+                        return
+                self._pool.putconn(self._conn)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+
+def _get_or_init_pg_pool(conn_str: str):
+    global _PG_POOL
+    if _PG_POOL is not None:
+        return _PG_POOL
+    with _PG_POOL_LOCK:
+        if _PG_POOL is None:
+            from psycopg2 import pool as pg_pool
+            _PG_POOL = pg_pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=conn_str)
+    return _PG_POOL
+
+
 def get_db_connection(db_url=None):
     if not PSYCOPG2_AVAILABLE or psycopg2 is None:
         raise RuntimeError(
             "CRITICAL: 'psycopg2-binary' is missing from Python 3.12. "
             "Run 'py -3.12 -m pip install psycopg2-binary' in your terminal."
         )
-    
+
     conn_str = db_url if db_url else DATABASE_URL
+    if not db_url and conn_str:
+        for _ in range(2):
+            try:
+                pool_inst = _get_or_init_pg_pool(conn_str)
+                raw_conn = pool_inst.getconn()
+                if raw_conn.closed:
+                    pool_inst.putconn(raw_conn, close=True)
+                    raw_conn = pool_inst.getconn()
+                return _PooledConnectionProxy(raw_conn, pool_inst)
+            except Exception:
+                global _PG_POOL
+                _PG_POOL = None
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
             return psycopg2.connect(conn_str)
         except psycopg2.OperationalError as e:
             if attempt < max_retries - 1:
-                import time
-                time.sleep(1)
+                _time.sleep(1)
             else:
                 raise e
 
@@ -220,6 +292,70 @@ def create_dashboard_and_ledger_tables():
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages (created_at ASC);
             ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
+        """)
+
+        # 6. Unified portfolio_holdings, watchlist_targets, agent_checkpoints, institutional_reports
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_holdings (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT UNIQUE NOT NULL,
+                shares NUMERIC(14,4) NOT NULL DEFAULT 0,
+                avg_buy_price NUMERIC(12,4) NOT NULL DEFAULT 0,
+                last_price NUMERIC(12,4),
+                last_change_pct NUMERIC(8,4) DEFAULT 0,
+                price_updated_at TIMESTAMPTZ,
+                dividend_yield NUMERIC(8,4),
+                research_sentiment TEXT DEFAULT 'NEUTRAL',
+                sentiment_updated_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_price NUMERIC(12,4);
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_pct NUMERIC(8,4) DEFAULT 0;
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ;
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS dividend_yield NUMERIC(8,4);
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS research_sentiment TEXT DEFAULT 'NEUTRAL';
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS sentiment_updated_at TIMESTAMPTZ;
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+            CREATE TABLE IF NOT EXISTS watchlist_targets (
+                ticker TEXT PRIMARY KEY,
+                target_price NUMERIC(12,4),
+                stop_loss NUMERIC(12,4),
+                entry_zone NUMERIC(12,4),
+                historical_fair_pe NUMERIC(8,2),
+                current_trailing_pe NUMERIC(8,2),
+                forward_eps NUMERIC(10,4),
+                last_recalculated_date DATE,
+                notes TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS stop_loss NUMERIC(12,4);
+            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS entry_zone NUMERIC(12,4);
+            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS historical_fair_pe NUMERIC(8,2);
+            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS current_trailing_pe NUMERIC(8,2);
+            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS forward_eps NUMERIC(10,4);
+            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS last_recalculated_date DATE;
+
+            CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS institutional_reports (
+                id BIGSERIAL PRIMARY KEY,
+                source TEXT,
+                ticker TEXT,
+                subject TEXT,
+                sentiment TEXT,
+                summary TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
+        # Ensure unique index on portfolio_holdings(ticker)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_holdings_ticker_uniq ON portfolio_holdings (ticker);
         """)
 
         # Permissive Policies for Service Role
@@ -473,50 +609,19 @@ def get_live_price_and_change(ticker: str) -> tuple[float, float]:
         return 0.0, 0.0
 
 def log_trade(ticker: str, action: str, quantity: float, price: float, fees: float = 0.0) -> str:
-    ticker = ticker.upper()
-    action = action.upper()
-    
-    if action not in ['BUY', 'SELL']:
+    action_clean = str(action or "").strip().upper()
+    if action_clean not in ['BUY', 'SELL']:
         return "🚨 Error: Action must be 'BUY' or 'SELL'."
-        
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO transactions (ticker, action, quantity, price, fees)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (ticker, action, quantity, price, fees))
-        
-        if action == 'BUY':
-            # On buy, the cost includes the fees.
-            # average_price = (current_invested + new_invested) / total_quantity
-            # new_invested = (quantity * price) + fees
-            cursor.execute("""
-                INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price)
-                VALUES (%s, %s, (%s * %s + %s) / %s)
-                ON CONFLICT (ticker) DO UPDATE SET
-                avg_buy_price = ((portfolio_holdings.avg_buy_price * portfolio_holdings.shares) + (%s * %s + %s)) / (portfolio_holdings.shares + %s),
-                shares = portfolio_holdings.shares + %s,
-                updated_at = CURRENT_TIMESTAMP;
-            """, (ticker, quantity, quantity, price, fees, quantity, quantity, price, fees, quantity, quantity))
-            
-        elif action == 'SELL':
-            cursor.execute("""
-                UPDATE portfolio_holdings 
-                SET shares = shares - %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE ticker = %s;
-            """, (quantity, ticker))
-            
-            cursor.execute("DELETE FROM portfolio_holdings WHERE shares <= 0 AND ticker = %s", (ticker,))
-            
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        return f"✅ **{action} LOGGED:** {quantity} shares of {ticker} at Rs. {price} (Fees: Rs. {fees})."
-        
+        res = record_trade_execution(
+            ticker=ticker,
+            side=action_clean,
+            quantity=float(quantity),
+            price=float(price),
+            fees=float(fees or 0.0),
+            notes="Logged via Agent Tool"
+        )
+        return f"✅ **{res['side']} LOGGED:** {res['quantity']} shares of {res['ticker']} at Rs. {res['price']} (Fees: Rs. {res['fees']})."
     except Exception as e:
         import traceback
         return f"🚨 Database Error: {e}\n{traceback.format_exc()}"
@@ -736,8 +841,18 @@ def check_profit_and_rebalance_triggers() -> list[dict]:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Get total cash (single-tenant assumption for global cash pool)
-        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        # Get total cash from unified capital_ledger (single source of truth)
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER', 'DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
+                    WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
+                    WHEN tx_type = 'FEE_ADJUSTMENT' THEN amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM capital_ledger
+        """)
         cash_res = cursor.fetchone()
         cash_balance = float(cash_res[0]) if cash_res else 0.0
         
@@ -918,8 +1033,18 @@ def generate_daily_closing_summary() -> dict:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. Fetch Liquid Cash (Assuming withdrawals/buys are logged as negative amounts)
-        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        # 1. Fetch Liquid Cash from unified capital_ledger
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER', 'DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
+                    WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
+                    WHEN tx_type = 'FEE_ADJUSTMENT' THEN amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM capital_ledger
+        """)
         cash_res = cursor.fetchone()
         liquid_cash = float(cash_res[0]) if cash_res else 0.0
         
@@ -999,8 +1124,18 @@ def record_daily_snapshot():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. Fetch current cash
-        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
+        # 1. Fetch current cash from unified capital_ledger
+        cursor.execute("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER', 'DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
+                    WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
+                    WHEN tx_type = 'FEE_ADJUSTMENT' THEN amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM capital_ledger
+        """)
         cash_res = cursor.fetchone()
         cash_balance = float(cash_res[0]) if cash_res else 0.0
         
@@ -1463,68 +1598,42 @@ def fetch_supabase_equity_curve() -> pd.DataFrame:
 # PSX INVESTMENT, CAPITAL & 3-STAGE DIVIDEND ACCOUNTING ENGINE
 # ====================================================================
 
-def save_desk_manager_thought(thought: str):
-    """
-    Persists the Desk Manager's synthesis / macro thought to Supabase (agent_checkpoints)
-    and mirrors to local disk (memory_cache/proactive_thought.txt).
-    Prevents ephemeral cloud disk wipes from losing the latest memorandum.
-    """
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO agent_checkpoints (key, value, updated_at)
-            VALUES ('proactive_thought', %s, NOW())
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
-        """, (thought,))
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("💾 [Desk Manager] Saved memorandum to Supabase agent_checkpoints.")
-    except Exception as e:
-        print(f"⚠️ [Desk Manager] Error saving thought to Supabase: {e}")
+REAL_KTRADE_CASH_BALANCE: float = 4357.38
+REAL_KTRADE_WORKING_CAPITAL: float = 51446.75
+REAL_KTRADE_HOLDINGS: List[Dict[str, float]] = [
+    {"ticker": "EFERT", "shares": 8.0, "avg_buy_price": 194.99},
+    {"ticker": "FABL", "shares": 5.0, "avg_buy_price": 91.40},
+    {"ticker": "FFC", "shares": 15.0, "avg_buy_price": 559.49},
+    {"ticker": "HUBC", "shares": 35.0, "avg_buy_price": 193.18},
+    {"ticker": "LUCK", "shares": 6.0, "avg_buy_price": 391.38},
+    {"ticker": "MARI", "shares": 11.0, "avg_buy_price": 631.53},
+    {"ticker": "MEBL", "shares": 2.0, "avg_buy_price": 528.61},
+    {"ticker": "OGDC", "shares": 25.0, "avg_buy_price": 306.78},
+    {"ticker": "SYS", "shares": 109.0, "avg_buy_price": 109.15},
+]
 
-    try:
-        os.makedirs("memory_cache", exist_ok=True)
-        with open("memory_cache/proactive_thought.txt", "w", encoding="utf-8") as f:
-            f.write(f"Proactive thought generated at {datetime.datetime.now()}:\n{thought}")
-    except Exception as f_err:
-        print(f"⚠️ [Desk Manager] Disk cache mirror write failed: {f_err}")
+DEFAULT_WATCHLIST_DCF_TARGETS: Dict[str, Dict[str, float]] = {
+    "EFERT": {"target_price": 232.00, "stop_loss": 178.00, "fair_pe": 8.5},
+    "FABL": {"target_price": 112.00, "stop_loss": 82.50, "fair_pe": 5.5},
+    "FFC": {"target_price": 645.00, "stop_loss": 510.00, "fair_pe": 9.0},
+    "HUBC": {"target_price": 235.00, "stop_loss": 175.00, "fair_pe": 6.5},
+    "LUCK": {"target_price": 465.00, "stop_loss": 355.00, "fair_pe": 10.5},
+    "MARI": {"target_price": 740.00, "stop_loss": 575.00, "fair_pe": 8.0},
+    "MEBL": {"target_price": 615.00, "stop_loss": 482.00, "fair_pe": 7.5},
+    "OGDC": {"target_price": 368.00, "stop_loss": 278.00, "fair_pe": 6.5},
+    "SYS": {"target_price": 138.00, "stop_loss": 98.50, "fair_pe": 15.0},
+}
 
-def get_desk_manager_thought() -> str:
-    """Retrieves the latest Desk Manager memorandum from Supabase or disk cache."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'proactive_thought'")
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row and row[0]:
-            return str(row[0])
-    except Exception as e:
-        print(f"⚠️ [Desk Manager] Error reading thought from Supabase: {e}")
-
-    cache_path = "memory_cache/proactive_thought.txt"
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception:
-            pass
-    return "Desk Manager synthesis standing by. Run manual sweep to generate initial thesis."
 
 def record_capital_transaction(tx_type: str, amount: float, notes: str = None, reference_note: str = None) -> dict:
     """
-    Records cash moving in/out of KTrade & Bank in capital_ledger:
+    Records cash moving in/out of KTrade & Bank in capital_ledger (single source of truth):
     - DEPOSIT_TO_KTRADE (Fresh capital deposited to KTrade)
     - WITHDRAWAL_FROM_KTRADE (Cash withdrawn from KTrade to personal bank)
     - DIVIDEND_SENT_TO_KTRADE (Reinvested dividend moved from bank account to KTrade)
     - FEE_ADJUSTMENT (Broker fee / withholding / trade cash flow adjustment)
-    Also keeps legacy cash_ledger synchronized for uninterrupted automated execution.
     """
     import uuid
-    # Mapping legacy transaction types to standard types
     type_map = {
         'DEPOSIT_TO_BROKER': 'DEPOSIT_TO_KTRADE',
         'WITHDRAWAL_FROM_BROKER': 'WITHDRAWAL_FROM_KTRADE',
@@ -1550,11 +1659,8 @@ def record_capital_transaction(tx_type: str, amount: float, notes: str = None, r
             RETURNING id, tx_type, amount, notes, created_at;
         """, (clean_type, amt, note_text, note_text))
         row = cur.fetchone()
-        
-        # Mirror to cash_ledger:
-        # DEPOSIT_TO_KTRADE / DIVIDEND_SENT_TO_KTRADE increases KTrade cash (+amt)
-        # WITHDRAWAL_FROM_KTRADE decreases KTrade cash (-amt)
-        # FEE_ADJUSTMENT applies exact signed delta (e.g. -net_total on BUY, +net_total on SELL)
+
+        # Best-effort mirror to legacy cash_ledger inside a savepoint so missing legacy tables never break transactions
         if clean_type in {'DEPOSIT_TO_KTRADE', 'DIVIDEND_SENT_TO_KTRADE'}:
             cash_delta = amt
         elif clean_type == 'WITHDRAWAL_FROM_KTRADE':
@@ -1562,13 +1668,19 @@ def record_capital_transaction(tx_type: str, amount: float, notes: str = None, r
         else:
             cash_delta = amt
 
-        user_id = os.getenv("DISCORD_USER_ID", "1536522727287164979")
-        cur.execute("""
-            INSERT INTO cash_ledger (transaction_id, discord_user_id, transaction_type, amount, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
-        """, (str(uuid.uuid4()), user_id, clean_type, cash_delta))
-        
+        try:
+            cur.execute("SAVEPOINT sp_legacy_cash;")
+            user_id = os.getenv("DISCORD_USER_ID", "1536522727287164979")
+            cur.execute("""
+                INSERT INTO cash_ledger (transaction_id, discord_user_id, transaction_type, amount, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+            """, (str(uuid.uuid4()), user_id, clean_type, cash_delta))
+            cur.execute("RELEASE SAVEPOINT sp_legacy_cash;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_legacy_cash;")
+
         conn.commit()
+        invalidate_financial_summary_cache()
         return {
             "id": row[0],
             "tx_type": row[1],
@@ -1671,6 +1783,7 @@ def record_dividend(
         ))
         row = cur.fetchone()
         conn.commit()
+        invalidate_financial_summary_cache()
         
         # CRITICAL RULE: Only if status is 'SENT_TO_KTRADE', credit capital_ledger immediately!
         if clean_status == 'SENT_TO_KTRADE':
@@ -1826,6 +1939,7 @@ def update_dividend_status(dividend_id: int, new_status: str) -> dict:
         if not row:
             raise ValueError(f"Dividend #{dividend_id} not found.")
         conn.commit()
+        invalidate_financial_summary_cache()
 
         return {
             "id": row[0],
@@ -1855,11 +1969,12 @@ def record_trade_execution(
     quantity: float,
     price: float,
     fees: float = 0.00,
-    notes: str = None
+    notes: str = None,
+    fees_and_tax: float = None
 ) -> dict:
     """
     Logs BUY / SELL trade in trade_history, updates portfolio_holdings weighted average cost,
-    and reflects trade cash flow in capital_ledger and cash_ledger.
+    and reflects trade cash flow in capital_ledger.
     """
     from utils import normalize_ticker
     clean_ticker = normalize_ticker(ticker)
@@ -1869,7 +1984,8 @@ def record_trade_execution(
 
     qty = float(quantity)
     prc = float(price)
-    f_val = float(fees) if fees is not None else 0.00
+    resolved_fees = fees_and_tax if fees_and_tax is not None else fees
+    f_val = float(resolved_fees) if resolved_fees is not None else 0.00
     gross = round(qty * prc, 2)
     net_total = round(gross + f_val if clean_side == 'BUY' else gross - f_val, 2)
 
@@ -1898,17 +2014,24 @@ def record_trade_execution(
                 new_avg = round(((old_shares * old_avg) + (qty * prc)) / new_shares, 4) if new_shares > 0 else prc
                 cur.execute("""
                     UPDATE portfolio_holdings
-                    SET shares = %s, avg_buy_price = %s, updated_at = NOW()
+                    SET shares = %s,
+                        avg_buy_price = %s,
+                        last_price = COALESCE(NULLIF(last_price, 0), %s),
+                        updated_at = NOW()
                     WHERE id = %s
-                """, (new_shares, new_avg, existing_h[0]))
+                """, (new_shares, new_avg, prc, existing_h[0]))
             else:
                 cur.execute("""
-                    INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, updated_at)
-                    VALUES (%s, %s, %s, NOW())
-                """, (clean_ticker, qty, prc))
-            
-            # Cash flow deduction
-            record_capital_transaction('FEE_ADJUSTMENT', -net_total, notes=f"Trade Execution: BUY {qty} {clean_ticker} @ {prc}")
+                    INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, last_price, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                """, (clean_ticker, qty, prc, prc))
+
+            # Cash flow deduction in unified capital_ledger
+            cash_note = f"Trade Execution: BUY {qty:g} {clean_ticker} @ {prc}"
+            cur.execute("""
+                INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+                VALUES ('FEE_ADJUSTMENT', %s, %s, %s, NOW(), NOW());
+            """, (-net_total, cash_note, cash_note))
 
         elif clean_side == 'SELL':
             if existing_h:
@@ -1919,11 +2042,16 @@ def record_trade_execution(
                     SET shares = %s, updated_at = NOW()
                     WHERE id = %s
                 """, (new_shares, existing_h[0]))
-            
-            # Cash flow credit
-            record_capital_transaction('FEE_ADJUSTMENT', net_total, notes=f"Trade Execution: SELL {qty} {clean_ticker} @ {prc}")
+
+            # Cash flow credit in unified capital_ledger
+            cash_note = f"Trade Execution: SELL {qty:g} {clean_ticker} @ {prc}"
+            cur.execute("""
+                INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+                VALUES ('FEE_ADJUSTMENT', %s, %s, %s, NOW(), NOW());
+            """, (net_total, cash_note, cash_note))
 
         conn.commit()
+        invalidate_financial_summary_cache()
         return {
             "id": t_row[0],
             "ticker": t_row[1],
@@ -1945,37 +2073,346 @@ def record_trade_execution(
 # Alias for backward compatibility
 record_trade = record_trade_execution
 
-def get_complete_financial_summary() -> dict:
+
+def sync_full_portfolio_state(
+    cash_balance: float,
+    holdings: list[dict],
+    total_working_capital: float = None
+) -> dict:
     """
-    Computes complete PSX investment summary, capital accounting, and live mark-to-market valuations.
+    Atomically resets mock/stale ledger rows across portfolio_holdings, trade_history,
+    capital_ledger, and dividend_ledger, sets exact KTrade holdings (ticker, shares, avg_buy_price),
+    and records exact cash balance so ktrade_available_cash == cash_balance.
+    """
+    from utils import normalize_ticker
+    import uuid
+
+    clean_cash = round(float(cash_balance or 0.0), 2)
+    sanitized_holdings = []
+    total_cost_basis = 0.0
+
+    for item in (holdings or []):
+        if not isinstance(item, dict):
+            continue
+        raw_sym = item.get("ticker") or item.get("symbol")
+        if not raw_sym:
+            continue
+        sym = normalize_ticker(str(raw_sym))
+        shs = float(item.get("shares") if item.get("shares") is not None else item.get("quantity", 0))
+        avg_p = float(
+            item.get("avg_buy_price")
+            if item.get("avg_buy_price") is not None
+            else item.get("avg_price", item.get("price", 0))
+        )
+        if sym and shs > 0 and avg_p > 0:
+            sanitized_holdings.append({
+                "ticker": sym,
+                "shares": shs,
+                "avg_buy_price": round(avg_p, 4),
+            })
+            total_cost_basis += round(shs * avg_p, 2)
+
+    total_cost_basis = round(total_cost_basis, 2)
+    if total_working_capital is not None and float(total_working_capital) > 0:
+        working_cap = round(float(total_working_capital), 2)
+    else:
+        working_cap = round(total_cost_basis + clean_cash, 2)
+
+    deployed_adjustment = round(clean_cash - working_cap, 2)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Preserve any recently scraped spot prices so cached view stays accurate immediately
+        existing_spot_map = {}
+        try:
+            cur.execute("SAVEPOINT sp_read_spot;")
+            cur.execute("SELECT ticker, last_price, last_change_pct, price_updated_at FROM portfolio_holdings;")
+            for r in cur.fetchall():
+                if r[0] and r[1] and float(r[1]) > 0:
+                    existing_spot_map[str(r[0]).upper()] = (float(r[1]), float(r[2] or 0.0), r[3])
+            cur.execute("RELEASE SAVEPOINT sp_read_spot;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_read_spot;")
+
+        # 1. Atomically wipe stale/mock rows from all 4 core tables (+ legacy cash_ledger if present)
+        cur.execute("DELETE FROM portfolio_holdings;")
+        cur.execute("DELETE FROM trade_history;")
+        cur.execute("DELETE FROM capital_ledger;")
+        cur.execute("DELETE FROM dividend_ledger;")
+
+        try:
+            cur.execute("SAVEPOINT sp_clear_legacy_cash;")
+            cur.execute("DELETE FROM cash_ledger;")
+            cur.execute("RELEASE SAVEPOINT sp_clear_legacy_cash;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_clear_legacy_cash;")
+
+        # 2. Insert exact KTrade holdings + baseline trade_history + watchlist DCF defaults
+        for h in sanitized_holdings:
+            sym = h["ticker"]
+            shs = h["shares"]
+            avg_p = h["avg_buy_price"]
+            prev_spot = existing_spot_map.get(sym)
+            init_spot = prev_spot[0] if prev_spot else avg_p
+            init_chg = prev_spot[1] if prev_spot else 0.0
+            init_ts = prev_spot[2] if prev_spot else None
+            gross_cost = round(shs * avg_p, 2)
+
+            cur.execute("""
+                INSERT INTO portfolio_holdings (
+                    ticker, shares, avg_buy_price, last_price, last_change_pct, price_updated_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, COALESCE(%s, NOW()), NOW())
+                ON CONFLICT (ticker) DO UPDATE
+                SET shares = EXCLUDED.shares,
+                    avg_buy_price = EXCLUDED.avg_buy_price,
+                    last_price = EXCLUDED.last_price,
+                    last_change_pct = EXCLUDED.last_change_pct,
+                    price_updated_at = EXCLUDED.price_updated_at,
+                    updated_at = NOW();
+            """, (sym, shs, avg_p, init_spot, init_chg, init_ts))
+
+            cur.execute("""
+                INSERT INTO trade_history (
+                    ticker, side, quantity, price, fees, fees_and_tax, net_total, executed_at, notes
+                )
+                VALUES (%s, 'BUY', %s, %s, 0.00, 0.00, %s, NOW(), 'KTrade Custody Baseline Sync');
+            """, (sym, shs, avg_p, gross_cost))
+
+            dcf_defaults = DEFAULT_WATCHLIST_DCF_TARGETS.get(sym)
+            default_tp = dcf_defaults["target_price"] if dcf_defaults else round(avg_p * 1.18, 2)
+            default_sl = dcf_defaults["stop_loss"] if dcf_defaults else round(avg_p * 0.91, 2)
+            default_fpe = dcf_defaults["fair_pe"] if dcf_defaults else 8.5
+            try:
+                cur.execute("SAVEPOINT sp_watchlist_seed;")
+                cur.execute("""
+                    INSERT INTO watchlist_targets (ticker, target_price, stop_loss, historical_fair_pe)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (ticker) DO NOTHING;
+                """, (sym, default_tp, default_sl, default_fpe))
+                cur.execute("RELEASE SAVEPOINT sp_watchlist_seed;")
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_watchlist_seed;")
+
+        # 3. Record working capital & deployed adjustment so ktrade_available_cash == clean_cash exactly
+        cur.execute("""
+            INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+            VALUES ('DEPOSIT_TO_KTRADE', %s, %s, %s, NOW(), NOW());
+        """, (
+            working_cap,
+            "KTrade Working Capital Sync",
+            "KTrade Working Capital Sync",
+        ))
+        if abs(deployed_adjustment) > 0.0001:
+            cur.execute("""
+                INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+                VALUES ('FEE_ADJUSTMENT', %s, %s, %s, NOW(), NOW());
+            """, (
+                deployed_adjustment,
+                "Deployed Equity Cost Basis & Settlement Sync",
+                "Deployed Equity Cost Basis & Settlement Sync",
+            ))
+
+        # Mirror exact liquid cash into legacy cash_ledger if table exists
+        try:
+            cur.execute("SAVEPOINT sp_seed_legacy_cash;")
+            user_id = os.getenv("DISCORD_USER_ID", "1536522727287164979")
+            cur.execute("""
+                INSERT INTO cash_ledger (transaction_id, discord_user_id, transaction_type, amount, created_at)
+                VALUES (%s, %s, 'SYNC_PORTFOLIO', %s, NOW());
+            """, (str(uuid.uuid4()), user_id, clean_cash))
+            cur.execute("RELEASE SAVEPOINT sp_seed_legacy_cash;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_seed_legacy_cash;")
+
+        # Mark sync checkpoint so startup knows real KTrade book is active
+        try:
+            cur.execute("SAVEPOINT sp_sync_ckpt;")
+            cur.execute("""
+                INSERT INTO agent_checkpoints (key, value, updated_at)
+                VALUES ('ktrade_real_book_synced_v1', %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+            """, (str(int(datetime.datetime.now().timestamp())),))
+            cur.execute("RELEASE SAVEPOINT sp_sync_ckpt;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_sync_ckpt;")
+
+        conn.commit()
+        invalidate_financial_summary_cache()
+        return {
+            "status": "success",
+            "holdings_synced": len(sanitized_holdings),
+            "ktrade_available_cash": clean_cash,
+            "fresh_capital_invested": working_cap,
+            "portfolio_cost_basis": total_cost_basis,
+            "tickers": [h["ticker"] for h in sanitized_holdings],
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def ensure_real_ktrade_portfolio_seeded() -> bool:
+    """
+    Detects empty or mock portfolio rows on boot and seeds the user's real 9-position KTrade book
+    (Cash: 4,357.38 PKR, Working Capital: 51,446.75 PKR) deterministically.
+    """
+    real_tickers = {h["ticker"] for h in REAL_KTRADE_HOLDINGS}
+    known_mock_tickers = {"AAPL", "TSLA", "MSFT", "TEST", "MOCK", "DEMO", "XYZ"}
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    needs_seed = False
+    try:
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'ktrade_real_book_synced_v1';")
+        already_synced = cur.fetchone() is not None
+
+        cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0;")
+        rows = cur.fetchall()
+        current_tickers = {str(r[0]).upper() for r in rows if r[0]}
+
+        if not current_tickers:
+            needs_seed = True
+        elif current_tickers & known_mock_tickers:
+            needs_seed = True
+        elif not already_synced and current_tickers != real_tickers:
+            needs_seed = True
+    except Exception as e:
+        print(f"⚠️ [Portfolio Seed Check] {e}", flush=True)
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+    if needs_seed:
+        print("🔄 [KTrade Sync] Mock or empty portfolio detected — seeding verified 9-position KTrade book...", flush=True)
+        sync_full_portfolio_state(
+            cash_balance=REAL_KTRADE_CASH_BALANCE,
+            holdings=REAL_KTRADE_HOLDINGS,
+            total_working_capital=REAL_KTRADE_WORKING_CAPITAL,
+        )
+        return True
+    return False
+
+
+def refresh_portfolio_live_prices() -> dict:
+    """
+    Background sweep helper: scrapes live PSX spot prices & daily % changes in parallel
+    for all active holdings and persists last_price, last_change_pct, price_updated_at in portfolio_holdings.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # 1. Capital Ledger Summary
+        cur.execute("SELECT ticker, avg_buy_price FROM portfolio_holdings WHERE shares > 0;")
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    if not rows:
+        return {"updated": 0, "prices": {}}
+
+    def _scrape_one(sym: str, fallback_p: float):
+        try:
+            cp, chg = get_live_price_and_change(sym)
+            if cp and cp > 0:
+                return float(cp), float(chg or 0.0), True
+        except Exception:
+            pass
+        return float(fallback_p), 0.0, False
+
+    scraped: Dict[str, tuple[float, float, bool]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(rows), 10)) as executor:
+        fut_map = {executor.submit(_scrape_one, str(r[0]).upper(), float(r[1])): str(r[0]).upper() for r in rows}
+        for fut in concurrent.futures.as_completed(fut_map):
+            sym = fut_map[fut]
+            try:
+                scraped[sym] = fut.result()
+            except Exception:
+                scraped[sym] = (0.0, 0.0, False)
+
+    w_conn = get_db_connection()
+    w_cur = w_conn.cursor()
+    updated = 0
+    try:
+        for sym, (cp, chg, ok) in scraped.items():
+            if cp > 0:
+                w_cur.execute("""
+                    UPDATE portfolio_holdings
+                    SET last_price = %s,
+                        last_change_pct = %s,
+                        price_updated_at = NOW()
+                    WHERE UPPER(ticker) = %s;
+                """, (cp, chg, sym))
+                if ok:
+                    updated += 1
+        w_conn.commit()
+        invalidate_financial_summary_cache()
+    except Exception:
+        w_conn.rollback()
+    finally:
+        w_cur.close()
+        w_conn.close()
+
+    return {
+        "updated": updated,
+        "prices": {k: {"price": v[0], "change_pct": v[1]} for k, v in scraped.items()},
+    }
+
+
+def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
+    """
+    Computes complete PSX investment summary, capital accounting, and mark-to-market valuations.
+    - Single source of truth: capital_ledger (cash + working capital), portfolio_holdings, dividend_ledger.
+    - When use_cached_prices=True: uses last_price stored in portfolio_holdings (<150ms response, 0 HTTP calls).
+    - When use_cached_prices=False: scrapes live PSX prices in parallel and updates portfolio_holdings.last_price.
+    """
+    global _CACHED_FIN_SUMMARY, _CACHED_FIN_SUMMARY_TS
+    if use_cached_prices and _CACHED_FIN_SUMMARY is not None and (_time.time() - _CACHED_FIN_SUMMARY_TS) < 20.0:
+        return _CACHED_FIN_SUMMARY
+
+    from learning_engine import PSX_SECTOR_MAP
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # 1. Unified Capital & Available Cash Summary from capital_ledger
         cur.execute("""
-            SELECT 
-                COALESCE(SUM(CASE WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER') THEN amount WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount ELSE 0 END), 0) as fresh_capital,
-                COALESCE(SUM(CASE WHEN tx_type IN ('DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount ELSE 0 END), 0) as reinvested_divs
+            SELECT
+                COALESCE(SUM(CASE
+                    WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER') THEN amount
+                    WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
+                    ELSE 0
+                END), 0) AS fresh_capital,
+                COALESCE(SUM(CASE
+                    WHEN tx_type IN ('DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
+                    ELSE 0
+                END), 0) AS reinvested_divs,
+                COALESCE(SUM(CASE
+                    WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER', 'DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
+                    WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
+                    WHEN tx_type = 'FEE_ADJUSTMENT' THEN amount
+                    ELSE 0
+                END), 0) AS available_cash
             FROM capital_ledger;
         """)
         cap_row = cur.fetchone()
         fresh_capital = float(cap_row[0]) if cap_row else 0.0
         reinvested_divs = float(cap_row[1]) if cap_row else 0.0
+        available_cash = float(cap_row[2]) if cap_row else 0.0
 
-        # 2. Available Cash Balance
-        cur.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger;")
-        cash_row = cur.fetchone()
-        available_cash = float(cash_row[0]) if cash_row else 0.0
-
-        # 3. Dividend Ledger Summary
+        # 2. Dividend Ledger Summary
         cur.execute("""
-            SELECT 
-                COALESCE(SUM(gross_amount), 0) as total_gross,
-                COALESCE(SUM(tax_withheld), 0) as total_tax,
-                COALESCE(SUM(CASE WHEN status = 'CREDITED_TO_BANK' THEN net_amount ELSE 0 END), 0) as in_bank,
-                COALESCE(SUM(CASE WHEN status = 'SENT_TO_KTRADE' THEN net_amount ELSE 0 END), 0) as reinvested,
-                COALESCE(SUM(CASE WHEN status IN ('ANNOUNCED', 'ENTITLED') THEN net_amount ELSE 0 END), 0) as pending
+            SELECT
+                COALESCE(SUM(gross_amount), 0) AS total_gross,
+                COALESCE(SUM(tax_withheld), 0) AS total_tax,
+                COALESCE(SUM(CASE WHEN status = 'CREDITED_TO_BANK' THEN net_amount ELSE 0 END), 0) AS in_bank,
+                COALESCE(SUM(CASE WHEN status = 'SENT_TO_KTRADE' THEN net_amount ELSE 0 END), 0) AS reinvested,
+                COALESCE(SUM(CASE WHEN status IN ('ANNOUNCED', 'ENTITLED') THEN net_amount ELSE 0 END), 0) AS pending
             FROM dividend_ledger;
         """)
         div_row = cur.fetchone()
@@ -1985,14 +2422,42 @@ def get_complete_financial_summary() -> dict:
         net_div_reinvested = float(div_row[3]) if div_row else 0.0
         pending_div = float(div_row[4]) if div_row else 0.0
 
-        # 4. Live Portfolio Holdings
+        # 3. Portfolio Holdings + Watchlist Valuation Targets (single query)
         cur.execute("""
-            SELECT ticker, shares, avg_buy_price, dividend_yield, research_sentiment
-            FROM portfolio_holdings
-            WHERE shares > 0
-            ORDER BY (shares * avg_buy_price) DESC;
+            SELECT
+                p.ticker,
+                p.shares,
+                p.avg_buy_price,
+                p.dividend_yield,
+                p.research_sentiment,
+                p.last_price,
+                p.last_change_pct,
+                p.price_updated_at,
+                w.target_price,
+                w.stop_loss,
+                w.historical_fair_pe,
+                w.current_trailing_pe
+            FROM portfolio_holdings p
+            LEFT JOIN watchlist_targets w ON UPPER(p.ticker) = UPPER(w.ticker)
+            WHERE p.shares > 0
+            ORDER BY (p.shares * COALESCE(NULLIF(p.last_price, 0), p.avg_buy_price)) DESC;
         """)
         holdings_rows = cur.fetchall()
+
+        # 4. Fetch top active_playbook rules for per-stock HUD mapping
+        playbook_rules = []
+        try:
+            cur.execute("SAVEPOINT sp_summary_playbook;")
+            cur.execute("""
+                SELECT source, rule, COALESCE(confidence_weight, 0.70)
+                FROM active_playbook
+                ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
+                LIMIT 12;
+            """)
+            playbook_rules = [(str(r[0] or ""), str(r[1] or ""), float(r[2] or 0.70)) for r in cur.fetchall()]
+            cur.execute("RELEASE SAVEPOINT sp_summary_playbook;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_summary_playbook;")
 
         # Load KMI-30 Shariah status
         kmi_set = set()
@@ -2008,43 +2473,89 @@ def get_complete_financial_summary() -> dict:
             except Exception:
                 pass
         if not kmi_set:
-            kmi_set = {"SYS", "HUBC", "LUCK", "FFC", "EFERT", "MEBL", "MARI", "OGDC", "PPL", "POL"}
+            kmi_set = {"SYS", "HUBC", "LUCK", "FFC", "EFERT", "MEBL", "MARI", "OGDC", "PPL", "POL", "FABL"}
+
+        price_map: Dict[str, tuple[float, float]] = {}
+        if use_cached_prices:
+            for row in holdings_rows:
+                sym = str(row[0]).upper()
+                avg_p = float(row[2])
+                cached_p = float(row[5]) if row[5] is not None and float(row[5]) > 0 else avg_p
+                cached_chg = float(row[6]) if row[6] is not None else 0.0
+                price_map[sym] = (cached_p, cached_chg)
+        else:
+            def _fetch_price_item(sym, default_p):
+                try:
+                    cp, chg = get_live_price_and_change(sym)
+                    if cp and cp > 0:
+                        return float(cp), float(chg or 0.0), True
+                except Exception:
+                    pass
+                return float(default_p), 0.0, False
+
+            scraped_updates = []
+            if holdings_rows:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(holdings_rows), 10)) as executor:
+                    future_map = {
+                        executor.submit(
+                            _fetch_price_item,
+                            str(r[0]).upper(),
+                            float(r[5]) if r[5] is not None and float(r[5]) > 0 else float(r[2]),
+                        ): str(r[0]).upper()
+                        for r in holdings_rows
+                    }
+                    for fut in concurrent.futures.as_completed(future_map):
+                        ticker_name = future_map[fut]
+                        try:
+                            cp, chg, was_live = fut.result()
+                            price_map[ticker_name] = (cp, chg)
+                            if was_live and cp > 0:
+                                scraped_updates.append((cp, chg, ticker_name))
+                        except Exception:
+                            price_map[ticker_name] = (0.0, 0.0)
+
+            if scraped_updates:
+                try:
+                    cur.execute("SAVEPOINT sp_persist_spot;")
+                    for cp, chg, sym in scraped_updates:
+                        cur.execute("""
+                            UPDATE portfolio_holdings
+                            SET last_price = %s, last_change_pct = %s, price_updated_at = NOW()
+                            WHERE UPPER(ticker) = %s;
+                        """, (cp, chg, sym))
+                    cur.execute("RELEASE SAVEPOINT sp_persist_spot;")
+                    conn.commit()
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_persist_spot;")
 
         portfolio_market_val = 0.0
         portfolio_cost = 0.0
         holdings_detail = []
+        sector_totals: Dict[str, float] = {}
 
-        # Parallelize live price scraping across all holdings
-        price_map = {}
-        def _fetch_price_item(sym, default_p):
-            try:
-                cp, chg = get_live_price_and_change(sym)
-                if cp <= 0:
-                    cp = default_p
-                return cp, chg
-            except Exception:
-                return default_p, 0.0
-
-        if holdings_rows:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(holdings_rows), 10)) as executor:
-                future_map = {
-                    executor.submit(_fetch_price_item, r[0], float(r[2])): r[0]
-                    for r in holdings_rows
-                }
-                for fut in concurrent.futures.as_completed(future_map):
-                    ticker_name = future_map[fut]
-                    try:
-                        price_map[ticker_name] = fut.result()
-                    except Exception:
-                        price_map[ticker_name] = (0.0, 0.0)
+        def _match_playbook_rule(sym: str, sector_name: str) -> str:
+            sym_u = sym.upper()
+            for _, r_txt, _ in playbook_rules:
+                if sym_u in r_txt.upper() or sector_name.split()[0].upper() in r_txt.upper():
+                    return r_txt
+            if playbook_rules:
+                return playbook_rules[0][1]
+            return "Require >= 20% DCF Margin of Safety before deploying incremental KTrade cash; enforce 30% sector cap."
 
         for row in holdings_rows:
-            tick = row[0]
+            tick = str(row[0]).upper()
             shares = float(row[1])
             avg_price = float(row[2])
-            div_yield = float(row[3]) if row[3] else None
+            div_yield = float(row[3]) if row[3] is not None else None
             sentiment = row[4] or "NEUTRAL"
-            
+            price_updated_at = row[7].isoformat() if row[7] else None
+
+            defaults = DEFAULT_WATCHLIST_DCF_TARGETS.get(tick, {})
+            dcf_fair_val = float(row[8]) if row[8] is not None and float(row[8]) > 0 else float(defaults.get("target_price") or round(avg_price * 1.18, 2))
+            stop_loss_val = float(row[9]) if row[9] is not None and float(row[9]) > 0 else float(defaults.get("stop_loss") or round(avg_price * 0.91, 2))
+            fair_pe = float(row[10]) if row[10] is not None else defaults.get("fair_pe")
+            trailing_pe = float(row[11]) if row[11] is not None else None
+
             curr_price, change_pct = price_map.get(tick, (avg_price, 0.0))
             if curr_price <= 0:
                 curr_price = avg_price
@@ -2054,11 +2565,17 @@ def get_complete_financial_summary() -> dict:
             pnl = round(mv - cb, 2)
             pnl_pct = round((pnl / cb * 100), 2) if cb > 0 else 0.0
 
+            mos_pct = round(((dcf_fair_val - curr_price) / dcf_fair_val) * 100.0, 2) if dcf_fair_val > 0 else 0.0
+            stop_dist_pct = round(((curr_price - stop_loss_val) / curr_price) * 100.0, 2) if curr_price > 0 and stop_loss_val > 0 else 0.0
+            sector = PSX_SECTOR_MAP.get(tick, "PSX Core Equity")
+
             portfolio_market_val += mv
             portfolio_cost += cb
+            sector_totals[sector] = sector_totals.get(sector, 0.0) + mv
 
             holdings_detail.append({
                 "ticker": tick,
+                "sector": sector,
                 "shares": shares,
                 "avg_price": avg_price,
                 "current_price": curr_price,
@@ -2069,11 +2586,42 @@ def get_complete_financial_summary() -> dict:
                 "unrealized_pnl_pct": pnl_pct,
                 "dividend_yield": div_yield,
                 "sentiment": sentiment,
-                "is_kmi30": tick.upper() in kmi_set
+                "is_kmi30": tick in kmi_set,
+                "dcf_fair_value": dcf_fair_val,
+                "margin_of_safety_pct": mos_pct,
+                "stop_loss": stop_loss_val,
+                "stop_distance_pct": stop_dist_pct,
+                "fair_pe": fair_pe,
+                "trailing_pe": trailing_pe,
+                "price_updated_at": price_updated_at,
+                "playbook_rule": _match_playbook_rule(tick, sector),
             })
+
+        total_equity_pool = portfolio_market_val + max(0.0, available_cash)
+        sector_cap_limit = 30.0
 
         for h in holdings_detail:
             h["weight_pct"] = round((h["market_value"] / portfolio_market_val * 100), 2) if portfolio_market_val > 0 else 0.0
+            sec_val = sector_totals.get(h["sector"], h["market_value"])
+            sec_wt = round((sec_val / total_equity_pool * 100.0), 2) if total_equity_pool > 0 else h["weight_pct"]
+            h["sector_weight_pct"] = sec_wt
+            h["sector_cap_pct"] = sector_cap_limit
+            h["sector_cap_utilization_pct"] = round(min(150.0, (sec_wt / sector_cap_limit) * 100.0), 1)
+
+            if h["stop_loss"] > 0 and h["current_price"] <= h["stop_loss"]:
+                verdict = "STOP_RISK"
+            elif h["weight_pct"] > 30.0 and h["margin_of_safety_pct"] < 10.0:
+                verdict = "TRIM"
+            elif h["margin_of_safety_pct"] >= 18.0:
+                verdict = "ACCUMULATE"
+            elif h["margin_of_safety_pct"] <= -8.0 and h["ticker"] not in {"FFC", "EFERT", "MEBL", "HUBC"}:
+                verdict = "TRIM"
+            else:
+                verdict = "HOLD"
+            h["verdict"] = verdict
+
+        # Sort holdings by market_value DESC
+        holdings_detail.sort(key=lambda x: x["market_value"], reverse=True)
 
         unrealized_pnl = round(portfolio_market_val - portfolio_cost, 2)
         unrealized_pnl_pct = round((unrealized_pnl / portfolio_cost * 100), 2) if portfolio_cost > 0 else 0.0
@@ -2081,7 +2629,7 @@ def get_complete_financial_summary() -> dict:
         true_total_return = round((net_worth + net_div_bank) - fresh_capital, 2)
         true_roi_pct = round((true_total_return / fresh_capital * 100), 2) if fresh_capital > 0 else 0.0
 
-        return {
+        result_payload = {
             "financial_kpis": {
                 "total_net_worth": net_worth,
                 "fresh_capital_invested": fresh_capital,
@@ -2102,11 +2650,18 @@ def get_complete_financial_summary() -> dict:
                 "pending_dividends": pending_div,
                 "dividends_pending": pending_div,
                 "true_total_return": true_total_return,
-                "true_roi_pct": true_roi_pct
+                "true_roi_pct": true_roi_pct,
+                "price_mode": "CACHED" if use_cached_prices else "LIVE",
             },
             "holdings": holdings_detail,
-            "holdings_count": len(holdings_detail)
+            "holdings_count": len(holdings_detail),
         }
+        _CACHED_FIN_SUMMARY = {
+            **result_payload,
+            "financial_kpis": {**result_payload["financial_kpis"], "price_mode": "CACHED"},
+        }
+        _CACHED_FIN_SUMMARY_TS = _time.time()
+        return result_payload
     finally:
         cur.close()
         conn.close()
@@ -2242,7 +2797,12 @@ def get_desk_manager_thought() -> str:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'desk_manager_proactive_thought'")
+        cur.execute("""
+            SELECT value FROM agent_checkpoints
+            WHERE key IN ('desk_manager_proactive_thought', 'proactive_thought')
+            ORDER BY updated_at DESC
+            LIMIT 1;
+        """)
         res = cur.fetchone()
         cur.close()
         conn.close()
@@ -2255,7 +2815,7 @@ def get_desk_manager_thought() -> str:
                     parsed = json.loads(val)
                     if isinstance(parsed, dict) and "thought" in parsed:
                         return parsed["thought"]
-                    return parsed
+                    return str(parsed)
                 except Exception:
                     return val
             return str(val)
@@ -2272,21 +2832,28 @@ def get_desk_manager_thought() -> str:
 
     return "No Desk Manager synthesis memorandum generated yet."
 
+
 def publish_agent_event(category: str, title: str, content: str, metadata: dict = None) -> bool:
     """
-    Unified agent feed publisher. Replaces Discord alerts with persistent entries in Supabase agent_feed.
+    Unified agent feed publisher. Automatically enriches every event with Co-Investor
+    teaching metadata (why_it_matters, quant_concept, portfolio_impact, confidence_weight).
     Categories: 'DESK_MANAGER', 'KTRADE_WHATSAPP', 'YOUTUBE_MENTOR', 'MACRO_NEWS', 'SYSTEM_ALERT'
     """
     try:
-        if metadata is None:
-            metadata = {}
+        enriched_meta = dict(metadata) if isinstance(metadata, dict) else {}
+        try:
+            from learning_engine import enrich_event_teaching_metadata
+            enriched_meta = enrich_event_teaching_metadata(category, title, content, enriched_meta)
+        except Exception as enrich_err:
+            print(f"⚠️ [Agent Feed] Teaching metadata enrich fallback: {enrich_err}")
+
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO agent_feed (category, title, content, metadata, created_at)
             VALUES (%s, %s, %s, %s, NOW())
             RETURNING id;
-        """, (category, title, content, json.dumps(metadata)))
+        """, (category, title, content, json.dumps(enriched_meta)))
         row = cur.fetchone()
         conn.commit()
         cur.close()
@@ -2298,8 +2865,11 @@ def publish_agent_event(category: str, title: str, content: str, metadata: dict 
         print(f"❌ [Agent Feed] Failed publishing event [{category}] {title}: {e}")
         return False
 
+
 def get_agent_feed(limit: int = 50, category: str = None) -> list[dict]:
-    """Retrieves recent events from agent_feed table."""
+    """Retrieves recent events from agent_feed table, ensuring Co-Investor teaching metadata is present."""
+    from learning_engine import enrich_event_teaching_metadata
+
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -2319,17 +2889,20 @@ def get_agent_feed(limit: int = 50, category: str = None) -> list[dict]:
                 LIMIT %s;
             """, (limit,))
         rows = cur.fetchall()
-        return [
-            {
+        feed_out = []
+        for r in rows:
+            raw_meta = r[4] if isinstance(r[4], dict) else json.loads(r[4] or "{}")
+            if not raw_meta.get("why_it_matters") or not raw_meta.get("quant_concept"):
+                raw_meta = enrich_event_teaching_metadata(r[1], r[2], r[3], raw_meta)
+            feed_out.append({
                 "id": r[0],
                 "category": r[1],
                 "title": r[2],
                 "content": r[3],
-                "metadata": r[4] if isinstance(r[4], dict) else json.loads(r[4] or "{}"),
+                "metadata": raw_meta,
                 "created_at": r[5].isoformat() if r[5] else None
-            }
-            for r in rows
-        ]
+            })
+        return feed_out
     except Exception as e:
         print(f"❌ [Agent Feed] Error fetching feed: {e}")
         return []

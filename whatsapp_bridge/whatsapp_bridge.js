@@ -345,13 +345,17 @@ app.get('/qr', (req, res) => {
         res.json({
             status: status,
             qr: latestQr,
-            monitored_chats: Array.from(ALLOWED_KTRADE_CHATS)
+            monitored_chats: Array.from(ALLOWED_KTRADE_CHATS),
+            memory_mb: Math.round(process.memoryUsage().rss / 1048576),
+            uptime_s: Math.round(process.uptime())
         });
     } catch (err) {
         res.json({
             status: 'AUTH_TIMEOUT_RETRYING',
             qr: 'AUTH_TIMEOUT_RETRYING',
-            monitored_chats: Array.from(ALLOWED_KTRADE_CHATS)
+            monitored_chats: Array.from(ALLOWED_KTRADE_CHATS),
+            memory_mb: Math.round(process.memoryUsage().rss / 1048576),
+            uptime_s: Math.round(process.uptime())
         });
     }
 });

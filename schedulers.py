@@ -367,9 +367,17 @@ async def run_business_portfolio_sweep():
         await asyncio.to_thread(save_desk_manager_thought, ai_verdict)
             
         # Send alert to pending_signals table
-        from portfolio_manager import add_pending_signal
+        from portfolio_manager import add_pending_signal, refresh_portfolio_live_prices
         await asyncio.to_thread(add_pending_signal, "Business & Portfolio Sweep", {"verdict": ai_verdict})
-            
+        await asyncio.to_thread(refresh_portfolio_live_prices)
+
+        # Closed-loop grading of open predictions against live PSX prices
+        try:
+            from learning_engine import evaluate_open_predictions
+            await evaluate_open_predictions()
+        except Exception as learn_err:
+            logger.warning(f"⚠️ [Learning Engine Sweep] {learn_err}")
+
         logger.info(f"✅ [{datetime.now().strftime('%H:%M')}] Business & Portfolio Sweep calculations and checks complete.")
     except Exception as e:
         error_msg = f"❌ [Business Sweep Error]: {str(e)}"
@@ -574,14 +582,9 @@ async def evaluate_asymmetric_triggers(live_prices: dict, send_long_message_func
         payoff_ratio = round(reward / risk, 2) if risk > 0 else 0.0
 
         # 2. Strict Position Sizing (Capped at Rs. 10,000 accumulation tranche)
-        from portfolio_manager import get_db_connection
-        conn_cash = get_db_connection()
-        cursor_cash = conn_cash.cursor()
-        cursor_cash.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
-        cash_res = cursor_cash.fetchone()
-        actual_cash_balance = float(cash_res[0]) if cash_res else 0.0
-        cursor_cash.close()
-        conn_cash.close()
+        from portfolio_manager import get_complete_financial_summary
+        fin_snap = get_complete_financial_summary(use_cached_prices=True)
+        actual_cash_balance = float(fin_snap.get("financial_kpis", {}).get("ktrade_available_cash", 0.0))
 
         target_allocation_rupees = 10000.00
         max_investment = min(target_allocation_rupees, actual_cash_balance)
@@ -612,12 +615,23 @@ async def evaluate_asymmetric_triggers(live_prices: dict, send_long_message_func
         )
 
         from portfolio_manager import add_pending_signal, publish_agent_event
+        from learning_engine import record_prediction
         await asyncio.to_thread(add_pending_signal, "Asymmetric Trigger", {"ticker": ticker, "message": message, "verdict": "EXECUTE"})
+        await asyncio.to_thread(
+            record_prediction,
+            "Internal_DCF",
+            ticker,
+            float(current_price),
+            float(target) if target else None,
+            float(stop_loss) if stop_loss else None,
+            "BULLISH",
+            15,
+        )
         publish_agent_event(
             category='SYSTEM_ALERT',
-            title=f"🎯 Execution Directive: {ticker}",
+            title=f"Execution Directive: {ticker}",
             content=message,
-            metadata={"ticker": ticker, "action": "BUY"}
+            metadata={"ticker": ticker, "action": "BUY", "source": "Internal_DCF"}
         )
         ASYMMETRIC_ALERT_COOLDOWNS[alert_key] = now
         print(f"✅ High-conviction execution directive dispatched for {ticker}.")
@@ -650,7 +664,31 @@ async def run_intraday_price_loop():
             price = await asyncio.to_thread(fetch_live_price, t)
             if price and price > 0:
                 live_prices[t] = price
-                
+
+        if live_prices:
+            def _persist_intraday_prices(pmap):
+                c = get_db_connection()
+                cur = c.cursor()
+                try:
+                    for sym, pval in pmap.items():
+                        cur.execute("""
+                            UPDATE portfolio_holdings
+                            SET last_price = %s, price_updated_at = NOW()
+                            WHERE UPPER(ticker) = %s;
+                        """, (float(pval), str(sym).upper()))
+                    c.commit()
+                except Exception:
+                    c.rollback()
+                finally:
+                    cur.close()
+                    c.close()
+            await asyncio.to_thread(_persist_intraday_prices, live_prices)
+            try:
+                from learning_engine import evaluate_open_predictions
+                await evaluate_open_predictions(price_overrides=live_prices)
+            except Exception as le_err:
+                logger.warning(f"⚠️ [Intraday Learning Eval] {le_err}")
+
         await evaluate_asymmetric_triggers(live_prices, send_long_message)
 
         # --- 1. EXIT & EXHAUSTION EVALUATOR ---
@@ -887,9 +925,14 @@ async def run_daily_closing_briefing(bot_instance=None):
     logger.info(f"📊 [{datetime.now().strftime('%H:%M')}] Initializing Daily Closing Summary...")
     try:
         from portfolio_manager import generate_daily_closing_summary, record_daily_snapshot
-        
-        # Snapshot the data first
+        from learning_engine import evaluate_open_predictions
+
+        # Snapshot the data and run daily closed-loop prediction grading
         await asyncio.to_thread(record_daily_snapshot)
+        try:
+            await evaluate_open_predictions()
+        except Exception as le_err:
+            logger.warning(f"⚠️ [Daily Closing Learning Eval] {le_err}")
         
         # Fetch the finalized metrics
         summary = await asyncio.to_thread(generate_daily_closing_summary)
@@ -1026,18 +1069,14 @@ async def fetch_kmi30_valuations():
 
 async def run_cash_deployment_sweep():
     logger.info("Executing Intraday Cash Deployment Sweep...")
-    # 1. Check Liquid Cash
-    conn = get_db_connection()
+    # 1. Check Liquid Cash from unified capital_ledger
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM cash_ledger")
-        cash_res = cursor.fetchone()
-        liquid_cash = float(cash_res[0]) if cash_res else 0.0
+        from portfolio_manager import get_complete_financial_summary
+        fin_snap = await asyncio.to_thread(get_complete_financial_summary, True)
+        liquid_cash = float(fin_snap.get("financial_kpis", {}).get("ktrade_available_cash", 0.0))
     except Exception as e:
         logger.error(f"Error fetching liquid cash: {e}")
         liquid_cash = 0.0
-    finally:
-        conn.close()
     
     if liquid_cash < 1000:
         return # Insufficient capital, abort sweep silently

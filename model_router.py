@@ -85,6 +85,7 @@ def rotate_to_next_google_key(reason: str = "Quota Exhausted") -> Optional[str]:
 # --- GROQ CLIENT INITIALIZATION ---
 groq_client = None
 _groq_models_probed = False
+PROTECTED_GROQ_MODELS = {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}
 
 def get_groq_client():
     global groq_client, _groq_models_probed
@@ -103,14 +104,17 @@ def get_groq_client():
                     live_models = {m.id for m in groq_client.models.list().data if getattr(m, "id", None)}
                     if live_models:
                         for candidate in list(GROQ_TEXT_MODELS):
-                            if candidate not in live_models:
+                            if candidate not in live_models and candidate not in PROTECTED_GROQ_MODELS:
                                 BLACKLISTED_MODELS.add(candidate)
                                 print(f"ℹ️ [Groq Init] Model '{candidate}' not in active Groq catalog; pre-blacklisted cleanly.", flush=True)
                 except Exception as probe_err:
-                    record_model_error("groq", probe_err)
-                    if not is_model_available("groq"):
+                    # Do NOT pre-blacklist llama-3.3-70b-versatile or llama-3.1-8b-instant on boot if models.list() fails
+                    status_code = getattr(probe_err, "status_code", None)
+                    if status_code == 401 or "invalid_api_key" in str(probe_err).lower():
+                        record_model_error("groq", probe_err)
                         groq_client = None
                         return None
+                    print(f"ℹ️ [Groq Init] Skipping boot catalog probe ({probe_err}); keeping Groq models active.", flush=True)
             return groq_client
         except Exception:
             return None
@@ -136,7 +140,7 @@ def load_psx_tickers():
         ACTIVE_PSX_TICKERS = {
             "SYS", "LUCK", "HBL", "MCB", "UBL", "MEBL", "ENGRO", "EFERT", "FFC",
             "OGDC", "PPL", "POL", "HUBC", "PSO", "PRL", "ATRL", "DGKC", "MLCF",
-            "CHCC", "ILP", "TRG", "AVN", "SAZEW", "MARI", "BAFL", "BAHL", "KAPCO"
+            "CHCC", "ILP", "TRG", "AVN", "SAZEW", "MARI", "BAFL", "BAHL", "KAPCO", "FABL"
         }
 
 load_psx_tickers()
@@ -181,29 +185,28 @@ TASK_MULTIMODAL = "TASK_MULTIMODAL"
 
 # Groq text models: Current supported Groq production models with resilient fallback cascade.
 GROQ_TEXT_MODELS: List[str] = [
-    "llama-3.3-70b-versatile",                     # Llama 3.3 70B versatile (primary if active on tier)
+    "llama-3.3-70b-versatile",                     # Llama 3.3 70B versatile (primary)
     "meta-llama/llama-4-scout-17b-16e-instruct",   # Active Meta Llama 4 Scout on Groq
-    "openai/gpt-oss-120b",                         # Active Groq 120B MoE replacement for Llama 3.3 70B
+    "openai/gpt-oss-120b",                         # Active Groq 120B MoE
     "qwen/qwen3-32b",                              # Active Qwen 3 32B production model on Groq
-    "openai/gpt-oss-20b",                          # Active Groq ultra-fast 20B replacement for Llama 3.1 8B
+    "openai/gpt-oss-20b",                          # Active Groq ultra-fast 20B
     "llama-3.1-8b-instant"                         # Llama 3.1 8B instant fallback
 ]
 
-# Gemini fallback cascade:
+# Gemini fallback cascade (active Google GenAI 2.5 models):
 GEMINI_TASK_ROUTING: Dict[str, List[str]] = {
     TASK_FAST_INGESTION: [
-        "gemini-3.5-flash-lite",
-        "gemini-3.5-flash"
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash"
     ],
     TASK_DEEP_REASONING: [
-        "gemini-3.8-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite"
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash-lite"
     ],
     TASK_MULTIMODAL: [
-        "gemini-3.5-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-3.8-flash"
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite"
     ]
 }
 
@@ -289,7 +292,7 @@ def record_model_error(model: str, error: Any):
             print(f"🚫 [Circuit Breaker] Model '{model}' authorization failed (401). Cooldown set for 24 hours.")
         return
 
-    # 429 RESOURCE_EXHAUSTED / Quota limits / Rate limits
+    # 429 RESOURCE_EXHAUSTUSTED / Quota limits / Rate limits
     if any(k in err_lower for k in ["429", "resource_exhausted", "quota", "quota exceeded", "rate_limit_exceeded"]):
         delay_match = re.search(r'retrydelay[^\d]*(\d+)', err_lower)
         retry_delay = int(delay_match.group(1)) if delay_match else 0
@@ -424,9 +427,9 @@ async def generate_with_fallback(
     Multi-provider generation with circuit breaker, priority queueing, and quota preservation:
     1. If GROQ_API_KEY is configured: For text-only TASK_FAST_INGESTION, routes first to Groq
        (llama-3.3-70b-versatile -> llama-3.1-8b-instant -> open-weights).
-    2. Falls back to Gemini cascade (gemini-3.5-flash-lite -> gemini-3.5-flash).
+    2. Falls back to Gemini cascade (gemini-2.5-flash-lite -> gemini-2.5-flash).
     3. Multimodal contents (images, PDFs, video URLs) and TASK_DEEP_REASONING route strictly
-       to Gemini (gemini-3.8-flash -> gemini-3.5-flash -> gemini-3.5-flash-lite).
+       to Gemini (gemini-2.5-flash -> gemini-2.5-pro -> gemini-2.5-flash-lite).
     4. When `priority=True` (interactive user chat), enters `user_priority_context()` and uses
        native async `client.aio.models.generate_content` so `asyncio.wait_for` cancels cleanly
        and releases concurrency locks immediately without waiting behind background sweeps.
@@ -517,8 +520,8 @@ async def generate_with_fallback(
 def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
     """
     Builds a LangChain chat model with multi-provider fallbacks:
-    - TASK_FAST_INGESTION: ChatGroq (llama-3.3 / gpt-oss) -> ChatGoogleGenerativeAI (gemini-3.5-flash-lite).
-    - TASK_DEEP_REASONING: ChatGoogleGenerativeAI (gemini-3.8-flash -> gemini-3.5-flash -> gemini-3.5-flash-lite).
+    - TASK_FAST_INGESTION: ChatGroq (llama-3.3 / gpt-oss) -> ChatGoogleGenerativeAI (gemini-2.5-flash-lite).
+    - TASK_DEEP_REASONING: ChatGoogleGenerativeAI (gemini-2.5-flash -> gemini-2.5-pro -> gemini-2.5-flash-lite).
     Supports multi-key Gemini rotation across GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3.
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
