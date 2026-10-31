@@ -123,7 +123,7 @@ rate_limiter.apply_global_rate_limits()
 import urllib.parse
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form, Body
 from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -829,6 +829,30 @@ async def update_dashboard_position(ticker: str, payload: PositionUpdatePayload,
     updated = await asyncio.to_thread(update_portfolio_position, ticker, payload.shares, payload.avg_price)
     return {"status": "success", "position": updated}
 
+@app.post("/api/dashboard/positions/bulk-cost")
+async def bulk_update_positions_cost(request: Request, payload: dict = Body(...)):
+    """
+    Bulk updates average buy cost basis across multiple holdings at once.
+    Expects {"SYS": 105.00, "FFC": 280.50, ...} or {"costs": {"SYS": 105.00, ...}}.
+    """
+    verify_dashboard_auth(request)
+    from portfolio_manager import bulk_update_cost_bases, get_complete_financial_summary
+    costs = payload.get("costs") if isinstance(payload.get("costs"), dict) else payload
+    if not costs or not isinstance(costs, dict):
+        raise HTTPException(status_code=400, detail="A valid dictionary of ticker -> cost is required.")
+    try:
+        res = await asyncio.to_thread(bulk_update_cost_bases, costs)
+        refreshed = await asyncio.to_thread(get_complete_financial_summary, True)
+        return {
+            "status": "success",
+            "updated_count": res.get("updated_count", 0),
+            "updated": res.get("updated", {}),
+            "financial_kpis": refreshed.get("financial_kpis", {}),
+            "holdings": refreshed.get("holdings", []),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/dashboard/positions/{ticker}")
 async def delete_dashboard_position(ticker: str, request: Request):
     verify_dashboard_auth(request)
@@ -1020,13 +1044,13 @@ async def execute_allocation_central_brain(request: Request, payload: CentralBra
 @app.get("/api/test/all-features")
 async def test_all_system_features(request: Request):
     """
-    Runs diagnostic validation across all 6 core sub-systems:
+    Runs diagnostic validation across all 6 core sub-systems with genuine live execution:
     1. Live PSX Spot Price Engine (TradingView Pakistan + DPS)
-    2. Central Brain Buy-Only Allocator
-    3. Macro & World News Feeder (RSS)
-    4. YouTube Mentor Intelligence Feeder
-    5. KTrade Email IMAP Feeder / Broker Reports
-    6. Database & Ledger Integrity
+    2. Central Director Brain Buy-Only Allocator
+    3. Dual-Stream Macro News Feeder (brain_macro_signals)
+    4. Master Business Books & Pakistan Corporate/Tax Law
+    5. PSX Corporate Announcements Watchdog
+    6. Database & Ledger Financial Integrity
     """
     t0 = time.perf_counter()
     results = {}
@@ -1054,74 +1078,79 @@ async def test_all_system_features(request: Request):
     results["central_brain"] = {
         "status": "PASS" if brain_res.get("status") == "success" else "FAIL",
         "latency_ms": lat_brain,
+        "decision_type": brain_res.get("decision_type", "SINGLE_ALLOCATION"),
         "winner": brain_res.get("selected_ticker"),
         "action": brain_res.get("action"),
         "shares": brain_res.get("recommended_shares"),
         "limit_price": brain_res.get("limit_price"),
+        "allocations_count": len(brain_res.get("allocations", [])),
     }
 
-    # 3. Macro News
+    # 3. Macro News & Signals (brain_macro_signals)
     t_start = time.perf_counter()
-    news_items = []
+    macro_signals = []
     conn_news = get_db_connection()
     cur_news = conn_news.cursor()
     try:
-        cur_news.execute("SELECT title, content FROM agent_feed WHERE category = 'MACRO_NEWS' ORDER BY created_at DESC LIMIT 3;")
-        news_items = [{"title": r[0], "summary": r[1]} for r in cur_news.fetchall()]
+        cur_news.execute("""
+            SELECT headline, sentiment_score, central_brain_takeaway 
+            FROM brain_macro_signals 
+            ORDER BY created_at DESC 
+            LIMIT 3;
+        """)
+        macro_signals = [{"headline": r[0], "sentiment": float(r[1]), "takeaway": r[2]} for r in cur_news.fetchall()]
     finally:
         cur_news.close()
         conn_news.close()
-    if not news_items:
+
+    if not macro_signals:
         try:
-            from news_scraper import fetch_psx_news
-            news_items = await asyncio.to_thread(fetch_psx_news, 2)
+            from news_scraper import run_dual_stream_news_sweep
+            news_run = await asyncio.to_thread(run_dual_stream_news_sweep, 2)
+            macro_signals = [
+                {"headline": s["headline"], "sentiment": s["sentiment_score"], "takeaway": s["central_brain_takeaway"]}
+                for s in news_run.get("signals", [])[:3]
+            ]
         except Exception:
             pass
+
     lat_news = round((time.perf_counter() - t_start) * 1000.0, 2)
     results["macro_news"] = {
-        "status": "PASS" if news_items else "WARN",
+        "status": "PASS" if macro_signals else "WARN",
         "latency_ms": lat_news,
-        "count": len(news_items),
-        "headline": news_items[0].get("title") if news_items else "Feed standing by",
+        "count": len(macro_signals),
+        "headline": macro_signals[0].get("headline") if macro_signals else "Macro signal stream ready",
+        "sentiment": macro_signals[0].get("sentiment") if macro_signals else 0.0,
     }
 
-    # 4. YouTube Mentor & Playbook
+    # 4. Master Business Books & Pakistan Law
     t_start = time.perf_counter()
-    playbook_cnt = 0
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT COUNT(*) FROM active_playbook;")
-        playbook_cnt = cur.fetchone()[0]
-    finally:
-        cur.close()
-        conn.close()
-    lat_yt = round((time.perf_counter() - t_start) * 1000.0, 2)
-    results["youtube_mentor"] = {
-        "status": "PASS" if playbook_cnt > 0 else "FAIL",
-        "latency_ms": lat_yt,
-        "rules_count": playbook_cnt,
+    from business_books_engine import run_business_books_and_law_sweep
+    law_res = await asyncio.to_thread(run_business_books_and_law_sweep)
+    lat_law = round((time.perf_counter() - t_start) * 1000.0, 2)
+    sample_ev = law_res.get("evaluations", [])
+    top_stock = sample_ev[0] if sample_ev else {}
+    results["business_books_and_law"] = {
+        "status": "PASS" if law_res.get("status") == "PASS" else "FAIL",
+        "latency_ms": lat_law,
+        "holdings_evaluated": law_res.get("holdings_evaluated", 0),
+        "total_codified_rules": law_res.get("total_codified_rules", 0),
+        "sample_compliance": f"{top_stock.get('ticker')}: {top_stock.get('master_compliance_score')}% ({top_stock.get('status')})" if top_stock else "N/A",
     }
 
-    # 5. Email IMAP / Broker Reports
+    # 5. PSX Corporate Announcements Watchdog
     t_start = time.perf_counter()
-    reports_cnt = 0
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT COUNT(*) FROM institutional_reports;")
-        reports_cnt = cur.fetchone()[0]
-    finally:
-        cur.close()
-        conn.close()
-    lat_email = round((time.perf_counter() - t_start) * 1000.0, 2)
-    results["institutional_broker_reports"] = {
-        "status": "PASS",
-        "latency_ms": lat_email,
-        "reports_count": reports_cnt,
+    from psx_watchdog import run_psx_announcements_sweep
+    ann_res = await asyncio.to_thread(run_psx_announcements_sweep, True)
+    lat_ann = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["psx_corporate_announcements"] = {
+        "status": ann_res.get("status", "PASS"),
+        "latency_ms": lat_ann,
+        "announcements_count": ann_res.get("count", 0),
+        "latest": ann_res.get("announcements", [{}])[0].get("title", "No recent disclosures") if ann_res.get("announcements") else "Standing by",
     }
 
-    # 6. Database & Ledgers
+    # 6. Database & Ledgers Integrity
     t_start = time.perf_counter()
     fin_sum = await asyncio.to_thread(get_complete_financial_summary, True)
     kpis = fin_sum.get("financial_kpis", {})
@@ -1132,6 +1161,8 @@ async def test_all_system_features(request: Request):
         "net_worth": kpis.get("total_net_worth", 0),
         "available_cash": kpis.get("ktrade_available_cash", 0),
         "custody_value": kpis.get("portfolio_market_value", 0),
+        "day_pnl": kpis.get("day_change_pkr", 0),
+        "unrealized_pnl": kpis.get("unrealized_pnl", 0),
     }
 
     total_lat = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -1143,6 +1174,130 @@ async def test_all_system_features(request: Request):
         "features": results,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+
+@app.post("/api/automations/run/{automation_name}")
+async def run_automation_endpoint(automation_name: str, request: Request):
+    """
+    Direct live execution endpoint for system automation feeders:
+    Supported names:
+    - 'prices': Fetches live TradingView/DPS quotes and refreshes portfolio_holdings.
+    - 'local_global_news': Runs dual-stream news engine (Stream A local PSX + Stream B global macro), writing to brain_macro_signals.
+    - 'youtube_mentors': Runs YouTube Mentor sweep across active mentor channels.
+    - 'business_books_law': Runs Master Principles & Pakistan Tax Law evaluation sweep across portfolio.
+    - 'psx_announcements': Scrapes official PSX Data Portal corporate announcements.
+    - 'central_brain': Runs full multi-factor capital allocation decision.
+    - 'run_all': Executes all 6 sub-systems sequentially and returns aggregated telemetry.
+    """
+    verify_dashboard_auth(request)
+    t0 = time.perf_counter()
+    name = automation_name.lower().strip()
+
+    try:
+        if name in ("prices", "live_prices"):
+            from market_data_scraper import fetch_all_psx_prices_bulk
+            from portfolio_manager import refresh_portfolio_live_prices
+            t_s = time.perf_counter()
+            bulk = await asyncio.to_thread(fetch_all_psx_prices_bulk, True)
+            ref = await asyncio.to_thread(refresh_portfolio_live_prices, True)
+            lat = round((time.perf_counter() - t_s) * 1000.0, 2)
+            return {
+                "automation": "prices",
+                "status": "SUCCESS",
+                "latency_ms": lat,
+                "tickers_updated": ref.get("updated", 0),
+                "sample": {k: bulk.get(k, {}).get("price") for k in list(bulk.keys())[:6]}
+            }
+
+        elif name in ("local_global_news", "news"):
+            from news_scraper import run_dual_stream_news_sweep
+            res = await asyncio.to_thread(run_dual_stream_news_sweep, 3)
+            return {
+                "automation": "local_global_news",
+                "status": "SUCCESS",
+                "latency_ms": res.get("latency_ms", 0),
+                "signals_persisted": res.get("total_signals_persisted", 0),
+                "stream_a_count": res.get("stream_a_count", 0),
+                "stream_b_count": res.get("stream_b_count", 0),
+                "sample": res.get("signals", [])[:3]
+            }
+
+        elif name in ("youtube_mentors", "youtube"):
+            from youtube_scraper import run_youtube_sweep
+            res = await run_youtube_sweep(max_videos=2)
+            return {
+                "automation": "youtube_mentors",
+                "status": "SUCCESS",
+                "latency_ms": res.get("latency_ms", 0),
+                "mentors_scanned": res.get("mentors_scanned", 0),
+                "transcripts_found": res.get("transcripts_found", 0),
+                "sample": res.get("sample", [])
+            }
+
+        elif name in ("business_books_law", "books_law"):
+            from business_books_engine import run_business_books_and_law_sweep
+            res = await asyncio.to_thread(run_business_books_and_law_sweep)
+            return {
+                "automation": "business_books_law",
+                "status": "SUCCESS",
+                "latency_ms": res.get("latency_ms", 0),
+                "holdings_evaluated": res.get("holdings_evaluated", 0),
+                "total_codified_rules": res.get("total_codified_rules", 0),
+                "sample": res.get("evaluations", [])[:3]
+            }
+
+        elif name in ("psx_announcements", "watchdog"):
+            from psx_watchdog import run_psx_announcements_sweep
+            res = await asyncio.to_thread(run_psx_announcements_sweep, True)
+            return {
+                "automation": "psx_announcements",
+                "status": "SUCCESS",
+                "latency_ms": res.get("latency_ms", 0),
+                "announcements_count": res.get("count", 0),
+                "sample": res.get("announcements", [])[:3]
+            }
+
+        elif name in ("central_brain", "brain"):
+            from central_brain import make_capital_deployment_decision
+            t_s = time.perf_counter()
+            decision = await asyncio.to_thread(make_capital_deployment_decision, 0.0, False)
+            lat = round((time.perf_counter() - t_s) * 1000.0, 2)
+            return {
+                "automation": "central_brain",
+                "status": "SUCCESS",
+                "latency_ms": lat,
+                "decision_type": decision.get("decision_type"),
+                "selected_ticker": decision.get("selected_ticker"),
+                "recommended_shares": decision.get("recommended_shares"),
+                "limit_price": decision.get("limit_price"),
+                "directive": decision.get("executive_verdict"),
+                "allocations": decision.get("allocations", [])
+            }
+
+        elif name == "run_all":
+            results = {}
+            for sub_name in ["prices", "local_global_news", "business_books_law", "psx_announcements", "youtube_mentors", "central_brain"]:
+                try:
+                    sub_res = await run_automation_endpoint(sub_name, request)
+                    results[sub_name] = sub_res
+                except Exception as sub_err:
+                    results[sub_name] = {"automation": sub_name, "status": "FAIL", "error": str(sub_err)}
+            total_lat = round((time.perf_counter() - t0) * 1000.0, 2)
+            return {
+                "automation": "run_all",
+                "status": "SUCCESS",
+                "total_latency_ms": total_lat,
+                "engines": results
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown automation: {automation_name}")
+    except Exception as e:
+        lat = round((time.perf_counter() - t0) * 1000.0, 2)
+        return {
+            "automation": automation_name,
+            "status": "FAIL",
+            "latency_ms": lat,
+            "error": str(e)
+        }
 
 @app.post("/api/dashboard/feeders/run-news")
 async def trigger_news_feeder(request: Request, background_tasks: BackgroundTasks):

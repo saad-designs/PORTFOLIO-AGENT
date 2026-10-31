@@ -2295,34 +2295,38 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
         return {"updated": 0, "prices": {}}
 
     bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=force_refresh)
-    scraped: Dict[str, tuple[float, float, bool]] = {}
+    scraped: Dict[str, tuple[float, float, float, bool]] = {}
 
     for r in rows:
         sym = str(r[0]).upper()
         fallback_p = float(r[2]) if r[2] is not None and float(r[2]) > 0 else float(r[1])
         q = bulk_quotes.get(sym)
         if q and q.get("price", 0.0) > 0:
-            scraped[sym] = (float(q["price"]), float(q.get("change_pct", 0.0)), True)
+            cp = float(q["price"])
+            chg_pct = float(q.get("change_pct", 0.0))
+            chg_abs = float(q.get("change", 0.0))
+            scraped[sym] = (cp, chg_pct, chg_abs, True)
         else:
             cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
             if cp > 0:
-                scraped[sym] = (float(cp), float(chg or 0.0), True)
+                scraped[sym] = (float(cp), float(chg or 0.0), 0.0, True)
             else:
-                scraped[sym] = (fallback_p, 0.0, False)
+                scraped[sym] = (fallback_p, 0.0, 0.0, False)
 
     w_conn = get_db_connection()
     w_cur = w_conn.cursor()
     updated = 0
     try:
-        for sym, (cp, chg, ok) in scraped.items():
+        for sym, (cp, chg, chg_abs, ok) in scraped.items():
             if cp > 0:
                 w_cur.execute("""
                     UPDATE portfolio_holdings
                     SET last_price = %s,
                         last_change_pct = %s,
+                        last_change_abs = %s,
                         price_updated_at = NOW()
                     WHERE UPPER(ticker) = %s;
-                """, (cp, chg, sym))
+                """, (cp, chg, chg_abs, sym))
                 if ok:
                     updated += 1
         w_conn.commit()
@@ -2335,7 +2339,7 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
 
     return {
         "updated": updated,
-        "prices": {k: {"price": v[0], "change_pct": v[1]} for k, v in scraped.items()},
+        "prices": {k: {"price": v[0], "change_pct": v[1], "change_abs": v[2]} for k, v in scraped.items()},
     }
 
 
@@ -2413,7 +2417,8 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 w.target_price,
                 w.stop_loss,
                 w.historical_fair_pe,
-                w.current_trailing_pe
+                w.current_trailing_pe,
+                COALESCE(p.last_change_abs, 0.0) AS last_change_abs
             FROM portfolio_holdings p
             LEFT JOIN watchlist_targets w ON UPPER(p.ticker) = UPPER(w.ticker)
             WHERE p.shares > 0
@@ -2452,14 +2457,19 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
         if not kmi_set:
             kmi_set = {"SYS", "HUBC", "LUCK", "FFC", "EFERT", "MEBL", "MARI", "OGDC", "PPL", "POL", "FABL"}
 
-        price_map: Dict[str, tuple[float, float]] = {}
+        price_map: Dict[str, tuple[float, float, float]] = {}
         if use_cached_prices:
             for row in holdings_rows:
                 sym = str(row[0]).upper()
                 avg_p = float(row[2])
                 cached_p = float(row[5]) if row[5] is not None and float(row[5]) > 0 else avg_p
                 cached_chg = float(row[6]) if row[6] is not None else 0.0
-                price_map[sym] = (cached_p, cached_chg)
+                cached_abs = float(row[12]) if len(row) > 12 and row[12] is not None else 0.0
+                if cached_abs == 0.0 and cached_chg != 0.0:
+                    denom = 1.0 + (cached_chg / 100.0)
+                    prev_p = (cached_p / denom) if abs(denom) > 1e-6 else cached_p
+                    cached_abs = round(cached_p - prev_p, 2)
+                price_map[sym] = (cached_p, cached_chg, cached_abs)
         else:
             from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker
             bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=True)
@@ -2470,34 +2480,39 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 q = bulk_quotes.get(sym)
                 if q and q.get("price", 0.0) > 0:
                     cp = float(q["price"])
-                    chg = float(q.get("change_pct", 0.0))
+                    chg_pct = float(q.get("change_pct", 0.0))
+                    chg_abs = float(q.get("change", 0.0))
                     dy = q.get("dividend_yield")
-                    price_map[sym] = (cp, chg)
-                    scraped_updates.append((cp, chg, dy, sym))
+                    price_map[sym] = (cp, chg_pct, chg_abs)
+                    scraped_updates.append((cp, chg_pct, chg_abs, dy, sym))
                 else:
                     cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
                     if cp > 0:
-                        price_map[sym] = (float(cp), float(chg or 0.0))
-                        scraped_updates.append((float(cp), float(chg or 0.0), None, sym))
+                        chg_p = float(chg or 0.0)
+                        denom = 1.0 + (chg_p / 100.0)
+                        prev_p = (cp / denom) if abs(denom) > 1e-6 else cp
+                        c_abs = round(cp - prev_p, 2)
+                        price_map[sym] = (float(cp), chg_p, c_abs)
+                        scraped_updates.append((float(cp), chg_p, c_abs, None, sym))
                     else:
-                        price_map[sym] = (default_p, float(r[6] or 0.0))
+                        price_map[sym] = (default_p, float(r[6] or 0.0), float(r[12] if len(r) > 12 and r[12] is not None else 0.0))
 
             if scraped_updates:
                 try:
                     cur.execute("SAVEPOINT sp_persist_spot;")
-                    for cp, chg, dy, sym in scraped_updates:
+                    for cp, chg, chg_abs, dy, sym in scraped_updates:
                         if dy is not None and dy > 0:
                             cur.execute("""
                                 UPDATE portfolio_holdings
-                                SET last_price = %s, last_change_pct = %s, dividend_yield = %s, price_updated_at = NOW()
+                                SET last_price = %s, last_change_pct = %s, last_change_abs = %s, dividend_yield = %s, price_updated_at = NOW()
                                 WHERE UPPER(ticker) = %s;
-                            """, (cp, chg, dy, sym))
+                            """, (cp, chg, chg_abs, dy, sym))
                         else:
                             cur.execute("""
                                 UPDATE portfolio_holdings
-                                SET last_price = %s, last_change_pct = %s, price_updated_at = NOW()
+                                SET last_price = %s, last_change_pct = %s, last_change_abs = %s, price_updated_at = NOW()
                                 WHERE UPPER(ticker) = %s;
-                            """, (cp, chg, sym))
+                            """, (cp, chg, chg_abs, sym))
                     cur.execute("RELEASE SAVEPOINT sp_persist_spot;")
                     conn.commit()
                 except Exception:
@@ -2531,7 +2546,7 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
             fair_pe = float(row[10]) if row[10] is not None else defaults.get("fair_pe")
             trailing_pe = float(row[11]) if row[11] is not None else None
 
-            curr_price, change_pct = price_map.get(tick, (avg_price, 0.0))
+            curr_price, change_pct, change_abs = price_map.get(tick, (avg_price, 0.0, 0.0))
             if curr_price <= 0:
                 curr_price = avg_price
 
@@ -2548,9 +2563,12 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
             portfolio_cost += cb
             sector_totals[sector] = sector_totals.get(sector, 0.0) + mv
 
-            denom_day = 1.0 + (change_pct / 100.0)
-            prev_mv = (mv / denom_day) if abs(denom_day) > 1e-6 else mv
-            day_chg_pkr = round(mv - prev_mv, 2)
+            if change_abs != 0.0:
+                day_chg_pkr = round(shares * change_abs, 2)
+            else:
+                denom_day = 1.0 + (change_pct / 100.0)
+                prev_mv = (mv / denom_day) if abs(denom_day) > 1e-6 else mv
+                day_chg_pkr = round(mv - prev_mv, 2)
 
             holdings_detail.append({
                 "ticker": tick,
@@ -2559,6 +2577,13 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "avg_price": avg_price,
                 "current_price": curr_price,
                 "change_pct": change_pct,
+                "change_abs": change_abs,
+                "day_change_pkr": day_chg_pkr,
+                "day_pnl": day_chg_pkr,
+                "market_value": mv,
+                "cost_basis": cb,
+                "unrealized_pnl": pnl,
+                "unrealized_pnl_pct": pnl_pct,
                 "day_change_pkr": day_chg_pkr,
                 "market_value": mv,
                 "cost_basis": cb,
@@ -2616,6 +2641,7 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
         result_payload = {
             "financial_kpis": {
                 "total_net_worth": net_worth,
+                "net_portfolio_value": net_worth,
                 "fresh_capital_invested": fresh_capital,
                 "fresh_capital_deposited": fresh_capital,
                 "ktrade_available_cash": round(available_cash, 2),
@@ -2624,6 +2650,7 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "portfolio_cost_basis": round(portfolio_cost, 2),
                 "total_cost_basis": round(portfolio_cost, 2),
                 "day_change_pkr": total_day_change_pkr,
+                "day_pnl": total_day_change_pkr,
                 "day_change_pct": total_day_change_pct,
                 "unrealized_pnl": unrealized_pnl,
                 "unrealized_pnl_pct": unrealized_pnl_pct,
@@ -3023,6 +3050,67 @@ def update_portfolio_position(ticker: str, shares: float, avg_price: float) -> d
             "unrealized_pnl": round(mv - cb, 2),
         }
     except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def bulk_update_cost_bases(cost_map: Dict[str, float]) -> dict:
+    """
+    Updates avg_buy_price in bulk for multiple holdings in portfolio_holdings.
+    Input: {"SYS": 105.0, "FFC": 280.0, ...}
+    Validates, updates, invalidates caches, and returns updated holdings.
+    """
+    from utils import normalize_ticker
+    if not cost_map or not isinstance(cost_map, dict):
+        raise ValueError("cost_map must be a non-empty dictionary mapping tickers to cost prices.")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    updated = {}
+    try:
+        cur.execute("SAVEPOINT sp_bulk_cost;")
+        for raw_sym, cost in cost_map.items():
+            sym = normalize_ticker(raw_sym)
+            if not sym:
+                continue
+            try:
+                new_cost = round(float(cost), 4)
+            except (ValueError, TypeError):
+                continue
+            if new_cost < 0:
+                continue
+
+            cur.execute("""
+                UPDATE portfolio_holdings
+                SET avg_buy_price = %s, updated_at = NOW()
+                WHERE UPPER(ticker) = %s
+                RETURNING ticker, shares, avg_buy_price;
+            """, (new_cost, sym))
+            row = cur.fetchone()
+            if row:
+                updated[row[0]] = {"shares": float(row[1]), "avg_buy_price": float(row[2])}
+
+        cur.execute("RELEASE SAVEPOINT sp_bulk_cost;")
+        conn.commit()
+        invalidate_financial_summary_cache()
+
+        summary_items = [f"{k} (Rs. {v['avg_buy_price']})" for k, v in updated.items()]
+        publish_agent_event(
+            category="DESK_MANAGER",
+            title=f"Bulk Cost Basis Update: {len(updated)} Holdings Adjusted",
+            content=f"Historical cost bases adjusted for: {', '.join(summary_items)}.",
+            metadata={"updated": updated}
+        )
+        return {
+            "status": "success",
+            "updated_count": len(updated),
+            "updated": updated
+        }
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT sp_bulk_cost;")
         conn.rollback()
         raise e
     finally:

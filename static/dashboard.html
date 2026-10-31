@@ -957,6 +957,34 @@
       border-bottom-left-radius: 4px;
     }
 
+    .msg-bubble.assistant h1,
+    .msg-bubble.assistant h2,
+    .msg-bubble.assistant h3,
+    .msg-bubble.assistant h4 {
+      margin: 10px 0 6px 0;
+      color: var(--text);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .msg-bubble.assistant p {
+      margin: 0 0 8px 0;
+    }
+    .msg-bubble.assistant p:last-child {
+      margin-bottom: 0;
+    }
+    .msg-bubble.assistant code {
+      background: #1C2421;
+      color: #7CE751;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+    }
+    .msg-bubble.assistant strong {
+      color: #F0F4F2;
+      font-weight: 600;
+    }
+
     .coach-footer {
       padding: 14px 20px 18px;
       border-top: 1px solid var(--border);
@@ -1318,6 +1346,14 @@
 
               <!-- Live Decision Output Stage -->
               <div id="brain-decision-output" style="display: none;">
+                <!-- Split Allocation 2-Leg Container (Active when 25% cap reached) -->
+                <div id="brain-split-legs-container" style="display: none; margin-bottom: 14px;">
+                  <div style="font-size: 11.5px; font-weight: 700; color: #7CE751; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.05em;">
+                    Deterministic 2-Leg Split Allocation (25% Single-Stock Cap Enforced)
+                  </div>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px;" id="brain-split-legs-grid"></div>
+                </div>
+
                 <!-- Top Pick Hero Grid -->
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; padding: 14px 16px; border-radius: 12px; background: #0E1211; border: 1px solid #24302B; margin-bottom: 14px;">
                   <div>
@@ -1489,12 +1525,25 @@
               <p class="page-subtitle">Edit Shares or Avg Cost on any holding to see exact real-time Unrealized P&amp;L</p>
             </div>
             <div class="quick-actions">
-              <button class="arch-btn" onclick="openEditPositionModal('', 0, 0)">+ Add / Set Position</button>
+              <button class="arch-btn" onclick="openBulkCostModal()">Set Historical Buy Prices</button>
+              <button class="arch-btn" onclick="openEditPositionModal('', 0, 0)">+ Add Position</button>
               <button class="arch-btn-accent" onclick="openTxModal('trade')">+ Log Trade Execution</button>
             </div>
           </div>
 
           <div class="bento-card">
+            <!-- Positions Summary Bar -->
+            <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;border-bottom:1px solid #1E2623;background:#0C100E;border-radius:12px 12px 0 0;font-size:12px;">
+              <div style="display:flex;flex-wrap:wrap;gap:16px;">
+                <div><span style="color:var(--muted);">Custody Market Value:</span> <strong style="color:var(--text);font-family:monospace;" id="pos-sum-mv">Rs. 0.00</strong></div>
+                <div><span style="color:var(--muted);">Total Cost Basis:</span> <strong style="color:var(--text);font-family:monospace;" id="pos-sum-cb">Rs. 0.00</strong></div>
+                <div><span style="color:var(--muted);">Total Unrealized P&amp;L:</span> <strong style="color:var(--lime);font-family:monospace;" id="pos-sum-pnl">+Rs. 0.00 (0.00%)</strong></div>
+                <div><span style="color:var(--muted);">Day P&amp;L:</span> <strong style="font-family:monospace;" id="pos-sum-day">+Rs. 0.00 (0.00%)</strong></div>
+              </div>
+              <div>
+                <button class="row-btn" onclick="openBulkCostModal()" style="font-size:11.5px;padding:5px 12px;background:#151B18;color:#7CE751;border:1px solid #24302B;">Edit All 9 Cost Bases</button>
+              </div>
+            </div>
             <div class="table-wrap">
               <table class="alpha-table">
                 <thead>
@@ -1649,6 +1698,104 @@
               <button class="arch-btn" onclick="triggerSweep('news')">Sweep PSX News</button>
               <button class="arch-btn" onclick="triggerSweep('learning')">Grade Predictions</button>
               <button class="arch-btn-accent" onclick="triggerSweep('business')">Run Desk Synthesis</button>
+            </div>
+          </div>
+
+          <!-- Live Backend Automations & Feeder Inspector Panel -->
+          <div class="bento-card" style="margin-bottom:18px;border-color:#1E2623;background:#111514;">
+            <div class="card-header" style="border-bottom:1px solid #1E2623;padding-bottom:12px;">
+              <div>
+                <div class="card-title">Backend Automations &amp; Central Brain Feeders</div>
+                <div class="card-subtitle">Run genuine sub-system scrapers on demand and inspect real-time execution outputs &amp; latencies</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <button class="arch-btn-accent" onclick="runAutomation('run_all')" id="btn-run-all-auto">Run All Automations</button>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:12px;margin-top:14px;">
+              <!-- 1. Live Prices -->
+              <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-weight:700;color:#F0F4F2;font-size:12.5px;">PSX Spot Price Engine</span>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:11px;font-family:monospace;color:var(--muted);" id="lat-prices">-- ms</span>
+                    <span class="badge badge-emerald" id="status-prices">STANDBY</span>
+                  </div>
+                </div>
+                <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">TradingView Pakistan Scanner (0% blocks)</div>
+                <button class="row-btn" onclick="runAutomation('prices')" style="width:100%;justify-content:center;padding:5px;">Run Live Now</button>
+                <div class="auto-log-box" id="log-prices" style="background:#080B0A;border:1px solid #1A221F;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;color:#8A9992;max-height:85px;overflow-y:auto;white-space:pre-line;margin-top:8px;">Scrapes spot close, % change, and abs PKR change.</div>
+              </div>
+
+              <!-- 2. Dual-Stream News -->
+              <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-weight:700;color:#F0F4F2;font-size:12.5px;">Dual-Stream Macro News</span>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:11px;font-family:monospace;color:var(--muted);" id="lat-local_global_news">-- ms</span>
+                    <span class="badge badge-emerald" id="status-local_global_news">STANDBY</span>
+                  </div>
+                </div>
+                <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">Local PSX + Global Commodities (brain_macro_signals)</div>
+                <button class="row-btn" onclick="runAutomation('local_global_news')" style="width:100%;justify-content:center;padding:5px;">Run Live Now</button>
+                <div class="auto-log-box" id="log-local_global_news" style="background:#080B0A;border:1px solid #1A221F;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;color:#8A9992;max-height:85px;overflow-y:auto;white-space:pre-line;margin-top:8px;">Extracts structured macro signals into database.</div>
+              </div>
+
+              <!-- 3. Master Business Books & Law -->
+              <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-weight:700;color:#F0F4F2;font-size:12.5px;">Master Books &amp; Tax Law</span>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:11px;font-family:monospace;color:var(--muted);" id="lat-business_books_law">-- ms</span>
+                    <span class="badge badge-emerald" id="status-business_books_law">STANDBY</span>
+                  </div>
+                </div>
+                <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">Graham, Buffett, Lynch, ITO 2001 Sec 150/37A</div>
+                <button class="row-btn" onclick="runAutomation('business_books_law')" style="width:100%;justify-content:center;padding:5px;">Run Live Now</button>
+                <div class="auto-log-box" id="log-business_books_law" style="background:#080B0A;border:1px solid #1A221F;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;color:#8A9992;max-height:85px;overflow-y:auto;white-space:pre-line;margin-top:8px;">Evaluates portfolio holdings against master investor principles.</div>
+              </div>
+
+              <!-- 4. PSX Announcements Watchdog -->
+              <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-weight:700;color:#F0F4F2;font-size:12.5px;">PSX Disclosures Watchdog</span>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:11px;font-family:monospace;color:var(--muted);" id="lat-psx_announcements">-- ms</span>
+                    <span class="badge badge-emerald" id="status-psx_announcements">STANDBY</span>
+                  </div>
+                </div>
+                <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">Official DPS material corporate disclosures</div>
+                <button class="row-btn" onclick="runAutomation('psx_announcements')" style="width:100%;justify-content:center;padding:5px;">Run Live Now</button>
+                <div class="auto-log-box" id="log-psx_announcements" style="background:#080B0A;border:1px solid #1A221F;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;color:#8A9992;max-height:85px;overflow-y:auto;white-space:pre-line;margin-top:8px;">Pulls board meetings, dividends, and earnings announcements.</div>
+              </div>
+
+              <!-- 5. YouTube Mentors -->
+              <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-weight:700;color:#F0F4F2;font-size:12.5px;">YouTube Mentors</span>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:11px;font-family:monospace;color:var(--muted);" id="lat-youtube_mentors">-- ms</span>
+                    <span class="badge badge-emerald" id="status-youtube_mentors">STANDBY</span>
+                  </div>
+                </div>
+                <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">Tier 3 XML + Gemini channel intelligence</div>
+                <button class="row-btn" onclick="runAutomation('youtube_mentors')" style="width:100%;justify-content:center;padding:5px;">Run Live Now</button>
+                <div class="auto-log-box" id="log-youtube_mentors" style="background:#080B0A;border:1px solid #1A221F;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;color:#8A9992;max-height:85px;overflow-y:auto;white-space:pre-line;margin-top:8px;">Scans Pakistani equity mentors and syncs active playbook heuristics.</div>
+              </div>
+
+              <!-- 6. Central Director Brain -->
+              <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-weight:700;color:#F0F4F2;font-size:12.5px;">Central Director Brain</span>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:11px;font-family:monospace;color:var(--muted);" id="lat-central_brain">-- ms</span>
+                    <span class="badge badge-lime" id="status-central_brain">STANDBY</span>
+                  </div>
+                </div>
+                <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">Buy-Only Accumulation Director &amp; 25% Cap</div>
+                <button class="row-btn" onclick="runAutomation('central_brain')" style="width:100%;justify-content:center;padding:5px;">Run Live Now</button>
+                <div class="auto-log-box" id="log-central_brain" style="background:#080B0A;border:1px solid #1A221F;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;color:#8A9992;max-height:85px;overflow-y:auto;white-space:pre-line;margin-top:8px;">Computes deterministic capital deployment decision.</div>
+              </div>
             </div>
           </div>
 
@@ -1808,6 +1955,26 @@
           <div class="form-field full" style="margin-top:4px;">
             <button type="submit" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Save Position</button>
           </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Bulk Set Historical Buy Prices Modal -->
+  <div id="bulk-cost-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('bulk-cost-modal')">
+    <div class="modal-card" style="max-width: 680px;">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Set Historical Buy Prices (All Holdings)</div>
+          <div class="card-subtitle">Calibrate your actual purchase prices for all 9 stocks to compute true Unrealized P&amp;L</div>
+        </div>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('bulk-cost-modal')">×</button>
+      </div>
+      <form onsubmit="submitBulkCostForm(event)">
+        <div id="bulk-cost-inputs-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-height: 420px; overflow-y: auto; padding: 4px; margin-bottom: 16px;"></div>
+        <div style="display: flex; align-items: center; justify-content: flex-end; gap: 10px; border-top: 1px solid #1E2623; padding-top: 14px;">
+          <button type="button" class="arch-btn" onclick="closeModal('bulk-cost-modal')">Cancel</button>
+          <button type="submit" class="arch-btn-accent" id="btn-save-bulk-cost">Save All Cost Bases</button>
         </div>
       </form>
     </div>
@@ -2103,6 +2270,38 @@
         .replace(/"/g, '&quot;');
     }
 
+    function renderMarkdown(text) {
+      if (!text) return '';
+      let html = String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+      // Headings
+      html = html.replace(/^###\s+(.*$)/gim, '<div style="font-weight:700;color:#7CE751;font-size:13.5px;margin:10px 0 4px 0;">$1</div>');
+      html = html.replace(/^##\s+(.*$)/gim, '<div style="font-weight:700;color:#A3E635;font-size:14.5px;margin:12px 0 5px 0;">$1</div>');
+      html = html.replace(/^#\s+(.*$)/gim, '<div style="font-weight:800;color:#F0F4F2;font-size:15.5px;margin:14px 0 6px 0;">$1</div>');
+
+      // Bold & Italic
+      html = html.replace(/\*\*(.*?)\*\*/g, '<strong style="color:#F0F4F2;font-weight:600;">$1</strong>');
+      html = html.replace(/__(.*?)__/g, '<strong style="color:#F0F4F2;font-weight:600;">$1</strong>');
+      html = html.replace(/\*([^\*]+)\*/g, '<em style="color:#CBD5E1;">$1</em>');
+
+      // Inline code
+      html = html.replace(/`([^`]+)`/g, '<code style="background:#1C2421;color:#7CE751;padding:2px 5px;border-radius:4px;font-family:monospace;font-size:11.5px;">$1</code>');
+
+      // Bullet items
+      html = html.replace(/(?:^|\n)[-*]\s+(.*)/g, '<div style="display:flex;gap:6px;align-items:flex-start;margin:3px 0 3px 6px;"><span style="color:#7CE751;font-size:10px;margin-top:4px;">&#9679;</span><div>$1</div></div>');
+
+      // Numbered items
+      html = html.replace(/(?:^|\n)(\d+)\.\s+(.*)/g, '<div style="display:flex;gap:6px;align-items:flex-start;margin:3px 0 3px 6px;"><span style="color:#8A9992;font-family:monospace;font-size:11px;min-width:16px;">$1.</span><div>$2</div></div>');
+
+      // Paragraph spacing & linebreaks
+      html = html.replace(/\n\n+/g, '<div style="height:8px;"></div>');
+      html = html.replace(/\n/g, '<br/>');
+      return html;
+    }
+
     function showToast(msg) {
       const t = document.getElementById('toast');
       t.textContent = msg;
@@ -2298,11 +2497,10 @@
       const pill = document.getElementById('brain-deployable-cash-pill');
       if (pill) pill.textContent = fmtPKR(cashVal);
 
-      const combinedPnlAndDiv = uPnl + divBank;
-      document.getElementById('kpi-pnl-val').textContent = fmtPKR(combinedPnlAndDiv, true);
+      document.getElementById('kpi-pnl-val').textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPnlPct)})`;
       const pnlSub = document.getElementById('kpi-pnl-sub');
-      pnlSub.textContent = `${fmtPct(uPnlPct)} P&L & ${fmtPKR(divBank)} divs`;
-      pnlSub.className = 'kpi-trend tabular ' + (combinedPnlAndDiv >= 0 ? '' : 'negative');
+      pnlSub.textContent = `Day: ${fmtPKR(dayChg, true)} (${fmtPct(dayChgPct)}) · Divs: ${fmtPKR(divBank)}`;
+      pnlSub.className = 'kpi-trend tabular ' + (dayChg >= 0 ? '' : 'negative');
 
       // Row 2 Charts
       renderPortfolioBarChart(holdings);
@@ -2649,6 +2847,26 @@
       const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
       if (!tbody) return;
 
+      const kpis = APP_STATE.overview?.financial_summary?.financial_kpis || {};
+      const mvEl = document.getElementById('pos-sum-mv');
+      const cbEl = document.getElementById('pos-sum-cb');
+      const pnlEl = document.getElementById('pos-sum-pnl');
+      const dayEl = document.getElementById('pos-sum-day');
+      if (mvEl) mvEl.textContent = fmtPKR(kpis.portfolio_market_value || 0);
+      if (cbEl) cbEl.textContent = fmtPKR(kpis.portfolio_cost_basis || 0);
+      if (pnlEl) {
+        const uPnl = Number(kpis.unrealized_pnl || 0);
+        const uPct = Number(kpis.unrealized_pnl_pct || 0);
+        pnlEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPct)})`;
+        pnlEl.style.color = uPnl >= 0 ? 'var(--lime)' : 'var(--danger)';
+      }
+      if (dayEl) {
+        const dPnl = Number(kpis.day_change_pkr || 0);
+        const dPct = Number(kpis.day_change_pct || 0);
+        dayEl.textContent = `${fmtPKR(dPnl, true)} (${fmtPct(dPct)})`;
+        dayEl.style.color = dPnl >= 0 ? 'var(--emerald)' : 'var(--danger)';
+      }
+
       tbody.innerHTML = holdings.map((h, idx) => {
         const pnlPos = Number(h.unrealized_pnl) >= 0;
         const vBadge = h.verdict === 'ACCUMULATE' ? 'badge-lime' : (h.verdict === 'HOLD' ? 'badge-emerald' : 'badge-warn');
@@ -2664,7 +2882,7 @@
               </div>
             </td>
             <td class="tabular" style="font-weight:600;">${h.shares}</td>
-            <td class="tabular">Rs. ${Number(h.avg_price).toFixed(2)}</td>
+            <td class="tabular" title="Click to edit average buy cost" onclick="event.stopPropagation(); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});" style="cursor:pointer;text-decoration:underline;text-decoration-color:#2A3631;color:#7CE751;">Rs. ${Number(h.avg_price).toFixed(2)}</td>
             <td class="tabular">
               <div style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
               <div style="font-size:11px;color:${Number(h.change_pct) >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(h.change_pct)} (${fmtPKR(h.day_change_pkr, true)})</div>
@@ -2688,6 +2906,69 @@
           </tr>
         `;
       }).join('');
+    }
+
+    function openBulkCostModal() {
+      const container = document.getElementById('bulk-cost-inputs-grid');
+      const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
+      if (!container) return;
+      if (!holdings.length) {
+        showToast('No active holdings to configure.');
+        return;
+      }
+      container.innerHTML = holdings.map(h => {
+        const spot = Number(h.current_price || h.avg_price || 0);
+        const avg = Number(h.avg_price || spot);
+        return `
+          <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:8px;padding:10px 12px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <strong style="color:#F0F4F2;font-size:13px;">${escapeHtml(h.ticker)}</strong>
+                <span style="font-size:11px;color:var(--muted);">${escapeHtml(h.sector)}</span>
+              </div>
+              <span style="font-size:11px;font-family:monospace;color:var(--muted);">${h.shares} shs · Spot: Rs. ${spot.toFixed(2)}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <label style="font-size:11.5px;color:var(--muted);white-space:nowrap;">Avg Buy Cost (PKR):</label>
+              <input type="number" step="0.01" min="0" class="arch-input bulk-cost-input" data-ticker="${escapeHtml(h.ticker)}" value="${avg.toFixed(2)}" style="font-family:monospace;padding:5px 8px;font-size:13px;width:100%;" required />
+            </div>
+          </div>
+        `;
+      }).join('');
+      document.getElementById('bulk-cost-modal').classList.add('open');
+    }
+
+    async function submitBulkCostForm(e) {
+      e.preventDefault();
+      const inputs = document.querySelectorAll('.bulk-cost-input');
+      const costMap = {};
+      inputs.forEach(inp => {
+        const ticker = inp.dataset.ticker;
+        const val = parseFloat(inp.value);
+        if (ticker && !isNaN(val) && val >= 0) {
+          costMap[ticker] = val;
+        }
+      });
+
+      const btn = document.getElementById('btn-save-bulk-cost');
+      if (btn) btn.disabled = true;
+      showToast('Saving historical cost bases...');
+
+      try {
+        const res = await apiFetch('/api/dashboard/positions/bulk-cost', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ costs: costMap })
+        });
+        const data = await res.json();
+        closeModal('bulk-cost-modal');
+        showToast(`Updated cost bases for ${data.updated_count || Object.keys(costMap).length} holdings!`);
+        await loadOverviewData(false);
+      } catch (err) {
+        showToast('Failed updating cost bases: ' + err.message);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     }
 
     function openEditPositionModal(ticker, shares, avgPrice) {
@@ -2809,11 +3090,34 @@
       box.style.display = 'block';
 
       document.getElementById('brain-res-target').textContent = d.selected_ticker || '--';
-      document.getElementById('brain-res-sector').textContent = (d.action || 'BUY') + ' Directive';
+      document.getElementById('brain-res-sector').textContent = (d.decision_type === 'SPLIT_ALLOCATION_2_LEG' ? '2-Leg Split Directive' : (d.action || 'BUY') + ' Directive');
       document.getElementById('brain-res-action').textContent = `${d.action || 'BUY'} ${(d.recommended_shares || 0).toLocaleString()} shs`;
       document.getElementById('brain-res-price').textContent = `@ Rs. ${(d.limit_price || 0).toFixed(2)}`;
       document.getElementById('brain-res-total').textContent = fmtPKR(d.total_allocation_pkr || 0);
       document.getElementById('brain-res-remaining').textContent = `Remaining: ${fmtPKR(d.remaining_cash_pkr || 0)}`;
+
+      // Split allocation 2-leg cards
+      const splitBox = document.getElementById('brain-split-legs-container');
+      const splitGrid = document.getElementById('brain-split-legs-grid');
+      if (splitBox && splitGrid) {
+        if (d.decision_type === 'SPLIT_ALLOCATION_2_LEG' && (d.allocations || []).length > 1) {
+          splitBox.style.display = 'block';
+          splitGrid.innerHTML = d.allocations.map((a, i) => `
+            <div style="background:#0B0E0D;border:1px solid #24302B;border-radius:8px;padding:12px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                <span class="badge ${i === 0 ? 'badge-lime' : 'badge-emerald'}">LEG ${a.leg}: ${i === 0 ? '25% CAP WINNER' : 'SURPLUS CAPITAL'}</span>
+                <span style="font-size:11px;font-family:monospace;color:var(--muted);">${fmtPKR(a.total_allocation_pkr)}</span>
+              </div>
+              <div style="font-size:16px;font-weight:700;color:#F0F4F2;font-family:monospace;">
+                BUY ${a.shares} ${a.ticker} @ Rs. ${Number(a.limit_price).toFixed(2)}
+              </div>
+              <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">${escapeHtml(a.reason)}</div>
+            </div>
+          `).join('');
+        } else {
+          splitBox.style.display = 'none';
+        }
+      }
 
       document.getElementById('brain-res-verdict').textContent = d.executive_verdict || '';
       document.getElementById('brain-pillar-1').textContent = d.why_this_stock?.pillar_1_valuation || '';
@@ -2829,29 +3133,112 @@
     async function executeBrainTrade() {
       if (!CURRENT_BRAIN_DECISION) return;
       const d = CURRENT_BRAIN_DECISION;
-      if (d.recommended_shares <= 0) {
-        alert(`Cannot execute: deployable cash is insufficient for 1 full share of ${d.selected_ticker}. Shortfall: ${fmtPKR(d.cash_shortfall_pkr)}.`);
+      if (!d.allocations || !d.allocations.length) {
+        alert(`Cannot execute: deployable cash is insufficient for 1 full share of ${d.selected_ticker}.`);
         return;
       }
-      if (!confirm(`Execute BUY order for ${d.recommended_shares} ${d.selected_ticker} @ Rs. ${d.limit_price.toFixed(2)} (Total: ${fmtPKR(d.total_allocation_pkr)})?`)) {
-        return;
-      }
+      const isSplit = d.decision_type === 'SPLIT_ALLOCATION_2_LEG' && d.allocations.length > 1;
+      const confirmMsg = isSplit
+        ? `Execute 2-Leg BUY allocation?\nLeg 1: ${d.allocations[0].shares} ${d.allocations[0].ticker} @ Rs. ${d.allocations[0].limit_price}\nLeg 2: ${d.allocations[1].shares} ${d.allocations[1].ticker} @ Rs. ${d.allocations[1].limit_price}\nTotal Capital: ${fmtPKR(d.total_allocation_pkr)}`
+        : `Execute BUY order for ${d.recommended_shares} ${d.selected_ticker} @ Rs. ${d.limit_price.toFixed(2)} (Total: ${fmtPKR(d.total_allocation_pkr)})?`;
+
+      if (!confirm(confirmMsg)) return;
+
       try {
+        const payload = isSplit
+          ? { allocations: d.allocations }
+          : { ticker: d.selected_ticker, shares: d.recommended_shares, price: d.limit_price };
+
         const res = await apiFetch('/api/dashboard/central-brain/execute-allocation', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ticker: d.selected_ticker,
-            shares: d.recommended_shares,
-            price: d.limit_price,
-            notes: `Executed via Central Brain Allocation: ${d.selected_ticker}`
-          })
+          body: JSON.stringify(payload)
         });
-        showToast(`Order executed! Logged trade for ${d.recommended_shares} ${d.selected_ticker}.`);
+        const data = await res.json();
+        showToast(data.message || 'Central Brain allocation executed successfully!');
         await Promise.all([loadOverviewData(false), loadTransactionsData()]);
       } catch (err) {
         showToast('Failed executing allocation: ' + err.message);
       }
+    }
+
+    /* Live Automation Feeder Runner */
+    async function runAutomation(name) {
+      const statusEl = document.getElementById(`status-${name}`);
+      const latEl = document.getElementById(`lat-${name}`);
+      const logEl = document.getElementById(`log-${name}`);
+      if (statusEl) {
+        statusEl.textContent = 'RUNNING...';
+        statusEl.className = 'badge badge-warn';
+      }
+      showToast(`Running ${name.replace(/_/g, ' ')}...`);
+      try {
+        const res = await apiFetch(`/api/automations/run/${encodeURIComponent(name)}`, { method: 'POST' });
+        const data = await res.json();
+        if (statusEl) {
+          statusEl.textContent = data.status === 'SUCCESS' ? 'PASS' : 'WARN';
+          statusEl.className = data.status === 'SUCCESS' ? 'badge-lime' : 'badge-warn';
+        }
+        if (latEl && data.latency_ms != null) {
+          latEl.textContent = `${data.latency_ms} ms`;
+        }
+        if (logEl) {
+          if (name === 'prices') {
+            logEl.textContent = `Updated ${data.tickers_updated} tickers. Spot sample: ` + JSON.stringify(data.sample);
+          } else if (name === 'local_global_news') {
+            logEl.textContent = `Persisted ${data.signals_persisted} signals across Stream A (${data.stream_a_count}) & Stream B (${data.stream_b_count}).\nLatest: ${data.sample?.[0]?.headline || 'OK'}`;
+          } else if (name === 'business_books_law') {
+            logEl.textContent = `Evaluated ${data.holdings_evaluated} holdings against ${data.total_codified_rules} codified master rules.\nSample: ${data.sample?.[0]?.ticker}: Score ${data.sample?.[0]?.master_compliance_score}% (${data.sample?.[0]?.dividend_tax_audit?.law_reference})`;
+          } else if (name === 'psx_announcements') {
+            logEl.textContent = `Pushed ${data.announcements_count} disclosures.\nLatest: ${data.sample?.[0]?.symbol}: ${data.sample?.[0]?.title || 'OK'}`;
+          } else if (name === 'youtube_mentors') {
+            logEl.textContent = `Scanned ${data.mentors_scanned} channels. Transcripts found: ${data.transcripts_found}.`;
+          } else if (name === 'central_brain') {
+            logEl.textContent = `Directive (${data.decision_type}): ${data.directive}`;
+          } else if (name === 'run_all') {
+            logEl.textContent = `All engines finished in ${data.total_latency_ms} ms!`;
+            if (data.engines) {
+              Object.entries(data.engines).forEach(([k, v]) => {
+                const sEl = document.getElementById(`status-${k}`);
+                const lEl = document.getElementById(`lat-${k}`);
+                const lgEl = document.getElementById(`log-${k}`);
+                if (sEl) { sEl.textContent = v.status === 'SUCCESS' ? 'PASS' : 'WARN'; sEl.className = v.status === 'SUCCESS' ? 'badge-lime' : 'badge-warn'; }
+                if (lEl && v.latency_ms) lEl.textContent = `${v.latency_ms} ms`;
+                if (lgEl) {
+                  if (k === 'prices') lgEl.textContent = `Updated ${v.tickers_updated} tickers.`;
+                  else if (k === 'local_global_news') lgEl.textContent = `Persisted ${v.signals_persisted} signals.`;
+                  else if (k === 'business_books_law') lgEl.textContent = `Evaluated ${v.holdings_evaluated} holdings.`;
+                  else if (k === 'psx_announcements') lgEl.textContent = `Pushed ${v.announcements_count} disclosures.`;
+                  else if (k === 'youtube_mentors') lgEl.textContent = `Scanned ${v.mentors_scanned} channels.`;
+                  else if (k === 'central_brain') lgEl.textContent = `Directive (${v.decision_type}): ${v.directive}`;
+                }
+              });
+            }
+          }
+        }
+        showToast(`${name.replace(/_/g, ' ')} finished in ${data.latency_ms || data.total_latency_ms} ms.`);
+        if (name === 'prices' || name === 'central_brain' || name === 'run_all') {
+          await loadOverviewData(false);
+        }
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent = 'FAIL';
+          statusEl.className = 'badge-danger';
+        }
+        if (logEl) logEl.textContent = `Execution error: ${err.message}`;
+        showToast(`Automation error: ${err.message}`);
+      }
+    }
+
+    async function triggerFeeder(type) {
+      const map = {
+        'news': 'local_global_news',
+        'youtube': 'youtube_mentors',
+        'email': 'psx_announcements',
+        'brain': 'central_brain'
+      };
+      const autoName = map[type] || type;
+      await runAutomation(autoName);
     }
 
     /* System & Feeder Verification Suite */
@@ -3417,8 +3804,13 @@
       if (!box) return null;
       const div = document.createElement('div');
       div.className = 'msg-bubble ' + (role === 'user' ? 'user' : 'assistant');
-      div.style.whiteSpace = 'pre-line';
-      div.textContent = text;
+      if (role === 'assistant') {
+        div.style.whiteSpace = 'normal';
+        div.innerHTML = renderMarkdown(text);
+      } else {
+        div.style.whiteSpace = 'pre-line';
+        div.textContent = text;
+      }
       box.appendChild(div);
       box.scrollTop = box.scrollHeight;
       return div;
@@ -3477,7 +3869,8 @@
           body: formData
         });
         const data = await res.json();
-        pendingBubble.textContent = data.reply || data.response || 'Completed.';
+        pendingBubble.style.whiteSpace = 'normal';
+        pendingBubble.innerHTML = renderMarkdown(data.reply || data.response || 'Completed.');
         if (data.portfolio_updated) {
           await loadOverviewData(true);
         }
