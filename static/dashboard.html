@@ -2731,17 +2731,23 @@
     async function triggerGitPullUpdate() {
       const btn = document.getElementById('btn-git-pull');
       if (btn) btn.style.opacity = '0.65';
-      showToast('Checking origin/main for updates...');
+      showToast('Syncing with origin/main in background...');
       try {
         const res = await apiFetch('/api/dashboard/git-pull', { method: 'POST' });
         const data = await res.json();
-        if (data.updated) {
-          showToast(`Updated to ${data.commit || 'latest'} (${(data.changed_files || []).length} files). Reloading UI...`);
-          setTimeout(() => window.location.reload(), 1500);
+        const commitStr = data.commit || 'latest';
+        if (data.status === 'success' || data.updated) {
+          showToast(`Synced to commit: ${commitStr}`);
+          setTimeout(() => {
+            window.location.reload();
+          }, 1200);
         } else if (data.status === 'up_to_date') {
-          showToast(`Already on latest commit (${data.commit || 'HEAD'}).`);
+          showToast(`Synced to commit: ${commitStr}`);
+          setTimeout(() => {
+            window.location.reload();
+          }, 1200);
         } else {
-          showToast('Sync status: ' + (data.detail || data.status));
+          showToast('Sync status: ' + (data.detail || data.status || JSON.stringify(data)));
         }
       } catch (err) {
         showToast('Git sync error: ' + err.message);

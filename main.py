@@ -662,9 +662,11 @@ _LAST_TARBALL_SHA: Optional[str] = None
 async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[str, Any]:
     """
     Zero-SSH Auto-Deployment Engine:
-    1) Uses git fetch origin main + git reset --hard origin/main (bootstrapping .git if needed).
-    2) Falls back to GitHub main tarball sync if git binary is absent inside an older container.
-    3) Hot-reloads updated Python modules; if main.py changed in CLOUD_ENV, schedules clean execv restart.
+    1) Configures safe.directory to permit git commands inside Docker mounts.
+    2) Bootstraps .git and remote origin if missing.
+    3) Runs git fetch origin main and git reset --hard origin/main.
+    4) Captures exact commit via git log -1 --oneline.
+    5) Hot-reloads Python modules and clears in-memory caches.
     """
     global _LAST_TARBALL_SHA
     repo_dir = os.path.dirname(os.path.abspath(__file__))
@@ -684,55 +686,65 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
 
             git_bin = shutil.which("git")
             changed_files: List[str] = []
-            old_sha = ""
-            new_sha = ""
+            commit_oneline = ""
             updated = False
 
             try:
                 if git_bin:
+                    # a) Configure safe.directory to bypass dubious ownership errors in Docker mounts
+                    subprocess.run([git_bin, "config", "--global", "--add", "safe.directory", "/app"], check=False, capture_output=True, text=True, timeout=5)
+                    subprocess.run([git_bin, "config", "--global", "--add", "safe.directory", repo_dir], check=False, capture_output=True, text=True, timeout=5)
+                    subprocess.run([git_bin, "config", "--global", "--add", "safe.directory", "*"], check=False, capture_output=True, text=True, timeout=5)
+
+                    # b) If .git is missing for any reason, initialize it automatically
                     git_dir = os.path.join(repo_dir, ".git")
                     if not os.path.isdir(git_dir):
                         subprocess.run([git_bin, "init"], cwd=repo_dir, check=True, capture_output=True, text=True, timeout=15)
                         subprocess.run([git_bin, "remote", "add", "origin", repo_url], cwd=repo_dir, check=False, capture_output=True, text=True, timeout=10)
+                    else:
+                        remotes_proc = subprocess.run([git_bin, "remote"], cwd=repo_dir, capture_output=True, text=True, timeout=5)
+                        remotes = (remotes_proc.stdout or "").split()
+                        if "origin" not in remotes:
+                            subprocess.run([git_bin, "remote", "add", "origin", repo_url], cwd=repo_dir, check=False, capture_output=True, text=True, timeout=5)
+                        else:
+                            subprocess.run([git_bin, "remote", "set-url", "origin", repo_url], cwd=repo_dir, check=False, capture_output=True, text=True, timeout=5)
 
-                    head_proc = subprocess.run([git_bin, "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, timeout=10)
-                    old_sha = (head_proc.stdout or "").strip() if head_proc.returncode == 0 else ""
-
-                    fetch_proc = subprocess.run([git_bin, "fetch", "origin", "main"], cwd=repo_dir, capture_output=True, text=True, timeout=25)
+                    # c) Run git fetch origin main && git reset --hard origin/main
+                    fetch_proc = subprocess.run([git_bin, "fetch", "origin", "main"], cwd=repo_dir, capture_output=True, text=True, timeout=30)
                     if fetch_proc.returncode != 0:
+                        detail = (fetch_proc.stderr or fetch_proc.stdout or "git fetch origin main failed").strip()
                         return {
                             "status": "error",
                             "updated": False,
                             "trigger": trigger_source,
-                            "detail": (fetch_proc.stderr or fetch_proc.stdout or "git fetch failed").strip(),
+                            "detail": detail,
                         }
 
-                    rem_proc = subprocess.run([git_bin, "rev-parse", "origin/main"], cwd=repo_dir, capture_output=True, text=True, timeout=10)
-                    new_sha = (rem_proc.stdout or "").strip()
+                    # Diff to detect changed files
+                    diff_proc = subprocess.run(
+                        [git_bin, "diff", "--name-only", "HEAD", "origin/main"],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if diff_proc.returncode == 0:
+                        changed_files = [ln.strip() for ln in (diff_proc.stdout or "").splitlines() if ln.strip()]
 
-                    if old_sha and new_sha and old_sha == new_sha:
-                        return {
-                            "status": "up_to_date",
-                            "updated": False,
-                            "commit": new_sha[:7],
-                            "trigger": trigger_source,
-                        }
-
-                    if old_sha and new_sha:
-                        diff_proc = subprocess.run(
-                            [git_bin, "diff", "--name-only", old_sha, new_sha],
-                            cwd=repo_dir,
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                        )
-                        if diff_proc.returncode == 0:
-                            changed_files = [ln.strip() for ln in (diff_proc.stdout or "").splitlines() if ln.strip()]
-
+                    # Hard reset to origin/main
                     subprocess.run([git_bin, "reset", "--hard", "origin/main"], cwd=repo_dir, check=True, capture_output=True, text=True, timeout=20)
+
+                    # d) Capture exact current commit hash and message (git log -1 --oneline)
+                    log_proc = subprocess.run([git_bin, "log", "-1", "--oneline"], cwd=repo_dir, capture_output=True, text=True, timeout=5)
+                    if log_proc.returncode == 0 and (log_proc.stdout or "").strip():
+                        commit_oneline = (log_proc.stdout or "").strip()
+                    else:
+                        rev_proc = subprocess.run([git_bin, "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, timeout=5)
+                        commit_oneline = (rev_proc.stdout or "").strip()[:7]
+
                     updated = True
                 else:
-                    # Fallback for un-rebuilt slim containers without /usr/bin/git
+                    # Secondary fallback for environments lacking git binary
                     import io
                     import tarfile
                     import requests as _req
@@ -740,8 +752,9 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                     if meta_r.status_code != 200:
                         return {"status": "error", "updated": False, "detail": f"GitHub API HTTP {meta_r.status_code}"}
                     new_sha = str(meta_r.json().get("sha") or "")
-                    if _LAST_TARBALL_SHA and new_sha == _LAST_TARBALL_SHA:
-                        return {"status": "up_to_date", "updated": False, "commit": new_sha[:7], "trigger": trigger_source}
+                    commit_msg = (meta_r.json().get("commit") or {}).get("message", "").splitlines()[0]
+                    commit_oneline = f"{new_sha[:7]} {commit_msg}".strip()
+
                     tar_r = _req.get("https://codeload.github.com/saad-designs/PORTFOLIO-AGENT/tar.gz/refs/heads/main", timeout=25)
                     tar_r.raise_for_status()
                     with tarfile.open(fileobj=io.BytesIO(tar_r.content), mode="r:gz") as tf:
@@ -761,9 +774,15 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                                 with open(dest_path, "wb") as out_f:
                                     out_f.write(src_f.read())
                             changed_files.append(rel_path.replace("\\", "/"))
-                    old_sha = _LAST_TARBALL_SHA or ""
                     _LAST_TARBALL_SHA = new_sha
                     updated = True
+            except Exception as sync_exc:
+                return {
+                    "status": "error",
+                    "updated": False,
+                    "trigger": trigger_source,
+                    "detail": str(sync_exc),
+                }
             finally:
                 if env_backup is not None and not os.path.exists(env_path):
                     try:
@@ -772,30 +791,45 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                     except Exception:
                         pass
 
+            # e) Reload updated Python modules & invalidate in-memory caches
             reloaded_modules: List[str] = []
-            if updated:
-                reload_order = [
-                    "utils",
-                    "market_data_scraper",
-                    "portfolio_manager",
-                    "valuation_engine",
-                    "learning_engine",
-                    "chat_copilot",
-                    "news_scraper",
-                ]
-                for mod_name in reload_order:
-                    if mod_name in sys.modules:
-                        try:
-                            importlib.reload(sys.modules[mod_name])
-                            reloaded_modules.append(mod_name)
-                        except Exception as rel_err:
-                            print(f"⚠️ [Hot Reload] Could not reload {mod_name}: {rel_err}", flush=True)
+            reload_order = [
+                "utils",
+                "market_data_scraper",
+                "portfolio_manager",
+                "valuation_engine",
+                "learning_engine",
+                "central_brain",
+                "chat_copilot",
+                "news_scraper",
+                "schedulers",
+                "agent",
+            ]
+            for mod_name in reload_order:
+                if mod_name in sys.modules:
+                    try:
+                        importlib.reload(sys.modules[mod_name])
+                        reloaded_modules.append(mod_name)
+                    except Exception as rel_err:
+                        print(f"⚠️ [Hot Reload] Could not reload {mod_name}: {rel_err}", flush=True)
+
+            # Invalidate in-memory caches
+            global _OVERVIEW_CKPT_CACHE, _OVERVIEW_BRIDGE_CACHE
+            _OVERVIEW_CKPT_CACHE = {"ts": 0.0, "data": ({}, "Desk Manager synthesis standing by.")}
+            _OVERVIEW_BRIDGE_CACHE = {"ts": 0.0, "data": ("OFFLINE", [], None)}
+
+            try:
+                if "portfolio_manager" in sys.modules:
+                    pm = sys.modules["portfolio_manager"]
+                    if hasattr(pm, "invalidate_financial_summary_cache"):
+                        pm.invalidate_financial_summary_cache()
+            except Exception as cache_err:
+                print(f"⚠️ [Cache Invalidation] Error: {cache_err}", flush=True)
 
             return {
-                "status": "updated" if updated else "up_to_date",
-                "updated": updated,
-                "previous_commit": old_sha[:7] if old_sha else None,
-                "commit": new_sha[:7] if new_sha else None,
+                "status": "success",
+                "commit": commit_oneline,
+                "updated": True,
                 "changed_files": changed_files,
                 "reloaded_modules": reloaded_modules,
                 "trigger": trigger_source,
@@ -864,7 +898,15 @@ async def delete_dashboard_position(ticker: str, request: Request):
 async def serve_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "static", "dashboard.html")
     if os.path.exists(dashboard_path):
-        return FileResponse(dashboard_path, media_type="text/html")
+        return FileResponse(
+            dashboard_path,
+            media_type="text/html",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     return HTMLResponse("<h1>PSX Co-Investor Dashboard</h1>", status_code=200)
 
 _OVERVIEW_CKPT_CACHE = {"ts": 0.0, "data": ({}, "Desk Manager synthesis standing by.")}

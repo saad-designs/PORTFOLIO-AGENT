@@ -9,4 +9,7 @@ services:
       - .env
     environment:
       - PORT=${PORT:-8000}
+    volumes:
+      - .:/app
+      - /app/whatsapp_bridge/node_modules
     restart: unless-stopped

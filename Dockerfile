@@ -22,7 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --global --add safe.directory /app \
+    && git config --global --add safe.directory '*'
 
 # 2. Install Node.js (v20 LTS)
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
