@@ -305,10 +305,23 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
         forward_eps = db_target.get("forward_eps") or (dcf_fair_val / fair_pe if fair_pe > 0 else 10.0)
         graham_val = calculate_graham_intrinsic_val(float(forward_eps), growth_pct=7.0)
 
-        # 1. Margin of Safety Score (40%)
+        # 1. Margin of Safety Score (40%) + Averaging Down Bonus on Real Cost-Basis Drawdowns
         mos_pct = ((dcf_fair_val - spot_price) / dcf_fair_val) * 100.0 if dcf_fair_val > 0 else 0.0
         graham_upside_pct = ((graham_val - spot_price) / graham_val) * 100.0 if graham_val > 0 else 0.0
         blended_upside = max(0.0, (mos_pct * 0.7) + (graham_upside_pct * 0.3))
+
+        h_info = holding_map.get(sym)
+        avg_cost_val = float(h_info.get("avg_price") or h_info.get("avg_buy_price") or 0.0) if h_info else 0.0
+        drawdown_from_cost_pct = 0.0
+        averaging_down_bonus = 0.0
+
+        if avg_cost_val > 0:
+            drawdown_from_cost_pct = round(((spot_price - avg_cost_val) / avg_cost_val) * 100.0, 2)
+            # If in drawdown and positive DCF margin of safety, award averaging-down bonus (e.g. SYS down -18.18%, LUCK down -17.49%)
+            if drawdown_from_cost_pct < 0 and mos_pct > 0:
+                averaging_down_bonus = round(min(20.0, abs(drawdown_from_cost_pct) * 0.5), 2)
+                blended_upside += averaging_down_bonus
+
         score_valuation = min(100.0, blended_upside * 3.0)
 
         # 2. Earnings & Net Dividend Yield Score (25%)
@@ -366,6 +379,9 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
             "ticker": sym,
             "sector": sec,
             "spot_price": spot_price,
+            "avg_buy_price": avg_cost_val,
+            "drawdown_from_cost_pct": drawdown_from_cost_pct,
+            "averaging_down_bonus": averaging_down_bonus,
             "dcf_fair_value": dcf_fair_val,
             "margin_of_safety_pct": round(mos_pct, 2),
             "graham_intrinsic_val": graham_val,
@@ -479,12 +495,22 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
     )
 
     # Formulation of Dynamic 3-Pillar Proofs (Zero Canned Text)
-    # Pillar 1: Valuation Proof
+    # Pillar 1: Valuation Proof & Cost-Basis Averaging Down Impact
+    drawdown_narrative = ""
+    if winner.get("drawdown_from_cost_pct", 0) < 0 and winner.get("avg_buy_price", 0) > 0:
+        drawdown_narrative = (
+            f" Position currently sits at a {winner['drawdown_from_cost_pct']}% cost-basis drawdown "
+            f"(Avg Cost: Rs. {winner['avg_buy_price']:,.2f} vs Spot: Rs. {winner['spot_price']:,.2f}). "
+            f"Accumulating here captures an active Averaging Down Bonus of +{winner['averaging_down_bonus']} pts, "
+            f"aggressively lowering the blended cost basis while strictly complying with the 25% single-stock ceiling."
+        )
+
     pillar_1 = (
         f"{winner['ticker']} trades at Rs. {winner['spot_price']:,.2f} against internal DCF Fair Value of Rs. {winner['dcf_fair_value']:,.2f}, "
         f"delivering an exact Margin of Safety of +{winner['margin_of_safety_pct']}%. "
         f"Benjamin Graham Intrinsic Value calculates to Rs. {winner['graham_intrinsic_val']:,.2f} based on normalized forward earnings. "
         f"At a TTM P/E of {winner['ttm_pe']}x vs historical benchmark multiple of {winner['fair_pe']}x, the asset offers deep valuation cushion."
+        f"{drawdown_narrative}"
     )
 
     # Pillar 2: Weight & Net Yield Proof
@@ -579,6 +605,9 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
         "remaining_cash_pkr": remaining_cash,
         "allocations": allocations,
         "executive_verdict": executive_verdict,
+        "pillar_1": pillar_1,
+        "pillar_2": pillar_2,
+        "pillar_3": pillar_3,
         "why_this_stock": {
             "pillar_1_valuation": pillar_1,
             "pillar_2_weight_yield": pillar_2,
@@ -590,12 +619,15 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
                 "ticker": c["ticker"],
                 "score": c["composite_score"],
                 "spot": c["spot_price"],
+                "avg_buy_price": c.get("avg_buy_price", 0.0),
+                "drawdown_from_cost_pct": c.get("drawdown_from_cost_pct", 0.0),
+                "averaging_down_bonus": c.get("averaging_down_bonus", 0.0),
                 "mos_pct": c["margin_of_safety_pct"],
                 "net_yield": c["dividend_yield"],
                 "gross_yield": c["gross_dividend_yield"],
                 "weight_pct": c["current_weight_pct"],
             }
-            for c in candidates[:6]
+            for c in candidates[:8]
         ],
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -1798,7 +1798,7 @@
                 <div class="kpi-action-btn" title="Inspect Total Net Worth">↗</div>
               </div>
               <div class="kpi-value tabular" id="kpi-net-worth">Rs. 51,447.13</div>
-              <div class="kpi-trend tabular" id="kpi-net-worth-sub">Custody + KTrade Cash</div>
+              <div class="kpi-trend tabular" id="kpi-net-worth-sub">Custody Rs. 47,089.75 + Cash Rs. 4,357.38</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('custody')">
@@ -1807,25 +1807,25 @@
                 <div class="kpi-action-btn" title="Inspect Custody Market Value">↗</div>
               </div>
               <div class="kpi-value tabular" id="kpi-custody-val">Rs. 47,089.75</div>
-              <div class="kpi-trend tabular" id="kpi-custody-sub">Day: +Rs. 0.00 (0.00%)</div>
+              <div class="kpi-trend tabular" id="kpi-custody-sub">Invested Cost (Inv): Rs. 50,919.36</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('cash')">
               <div class="kpi-head">
-                <div class="kpi-label">Cash Available</div>
+                <div class="kpi-label">KTrade Cash Available</div>
                 <div class="kpi-action-btn" title="Inspect Cash Available">↗</div>
               </div>
               <div class="kpi-value tabular" id="kpi-cash-val">Rs. 4,357.38</div>
-              <div class="kpi-trend tabular" id="kpi-cash-sub">Safe to deploy in KTrade</div>
+              <div class="kpi-trend tabular" id="kpi-cash-sub">Working Capital: Rs. 51,446.75</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('pnl')">
               <div class="kpi-head">
-                <div class="kpi-label" id="kpi-pnl-label">Unrealized P&amp;L &amp; Divs</div>
-                <div class="kpi-action-btn" title="Inspect Unrealized P&L & Dividends">↗</div>
+                <div class="kpi-label" id="kpi-pnl-label">Total Unrealized P&amp;L</div>
+                <div class="kpi-action-btn" title="Inspect Total Unrealized P&L">↗</div>
               </div>
-              <div class="kpi-value tabular" id="kpi-pnl-val">Rs. 0.00</div>
-              <div class="kpi-trend tabular" id="kpi-pnl-sub">0.00% return &amp; Rs. 0.00 divs</div>
+              <div class="kpi-value tabular" id="kpi-pnl-val" style="color: var(--danger);">-Rs. 3,829.61 (-7.52%)</div>
+              <div class="kpi-trend tabular negative" id="kpi-pnl-sub">Last Session P&amp;L: -Rs. 107.46 (-0.23%)</div>
             </div>
           </div>
 
@@ -2211,6 +2211,7 @@
                     <th>Ticker &amp; Sector</th>
                     <th class="num-col">Shares</th>
                     <th class="num-col">Avg Buy Cost</th>
+                    <th class="num-col">Invested (Inv)</th>
                     <th class="num-col">Live Spot &amp; Day</th>
                     <th class="num-col">Market Value</th>
                     <th class="num-col">Weight</th>
@@ -3457,40 +3458,33 @@
       // Row 1 KPIs
       document.getElementById('kpi-net-worth').textContent = fmtPKR(netWorth);
       const nwSub = document.getElementById('kpi-net-worth-sub');
-      nwSub.textContent = (trueRoi >= 0 ? '↗ ' : '↘ ') + fmtPct(trueRoi) + ' vs Rs. ' + freshCap.toLocaleString('en-PK') + ' capital';
-      nwSub.className = 'kpi-trend tabular ' + (trueRoi >= 0 ? '' : 'negative');
+      nwSub.textContent = `Custody ${fmtPKR(custodyVal)} + Cash ${fmtPKR(cashVal)}`;
+      nwSub.className = 'kpi-trend tabular';
 
+      const costBasisVal = Number(kpis.portfolio_cost_basis || kpis.total_cost_basis || 50919.36);
       document.getElementById('kpi-custody-val').textContent = fmtPKR(custodyVal);
       const custSub = document.getElementById('kpi-custody-sub');
-      custSub.textContent = `Day: ${fmtPKR(dayChg, true)} (${fmtPct(dayChgPct)}) · ${holdings.length} Stocks`;
-      custSub.className = 'kpi-trend tabular ' + (dayChg >= 0 ? '' : 'negative');
+      custSub.textContent = `Invested Cost (Inv): ${fmtPKR(costBasisVal)}`;
+      custSub.className = 'kpi-trend tabular';
 
       document.getElementById('kpi-cash-val').textContent = fmtPKR(cashVal);
-      const cashRatio = netWorth > 0 ? ((cashVal / netWorth) * 100).toFixed(1) : '0.0';
-      document.getElementById('kpi-cash-sub').textContent = `Safe to deploy in KTrade (${cashRatio}%)`;
+      const workingCapVal = Number(kpis.fresh_capital_invested || kpis.working_capital || 51446.75);
+      document.getElementById('kpi-cash-sub').textContent = `Working Capital: ${fmtPKR(workingCapVal)}`;
       const pill = document.getElementById('brain-deployable-cash-pill');
       if (pill) pill.textContent = fmtPKR(cashVal);
 
-      // 4th KPI Card: Show Session P&L as primary if unrealized_pnl == 0
+      // 4th KPI Card: Total Unrealized P&L
       const pnlValEl = document.getElementById('kpi-pnl-val');
       const pnlSub = document.getElementById('kpi-pnl-sub');
       const pnlLabel = document.getElementById('kpi-pnl-label');
       const lastSessionPnl = Number(kpis.last_session_pnl_pkr ?? dayChg);
       const lastSessionPct = Number(kpis.last_session_pnl_pct ?? dayChgPct);
 
-      if (Math.abs(uPnl) < 0.01) {
-        if (pnlLabel) pnlLabel.textContent = 'Session Movement (P&L)';
-        pnlValEl.textContent = `${fmtPKR(lastSessionPnl, true)} (${fmtPct(lastSessionPct)})`;
-        pnlValEl.style.color = lastSessionPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
-        pnlSub.textContent = 'Cost-Basis P&L: Rs. 0.00 (0.00%) · Baseline Locked';
-        pnlSub.className = 'kpi-trend tabular';
-      } else {
-        if (pnlLabel) pnlLabel.textContent = 'Unrealized P&L & Divs';
-        pnlValEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPnlPct)})`;
-        pnlValEl.style.color = uPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
-        pnlSub.textContent = `Session: ${fmtPKR(lastSessionPnl, true)} (${fmtPct(lastSessionPct)}) · Divs: ${fmtPKR(divBank)}`;
-        pnlSub.className = 'kpi-trend tabular ' + (lastSessionPnl >= 0 ? '' : 'negative');
-      }
+      if (pnlLabel) pnlLabel.textContent = 'Total Unrealized P&L';
+      pnlValEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPnlPct)})`;
+      pnlValEl.style.color = uPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
+      pnlSub.textContent = `Last Session P&L: ${fmtPKR(lastSessionPnl, true)} (${fmtPct(lastSessionPct)})`;
+      pnlSub.className = 'kpi-trend tabular ' + (lastSessionPnl >= 0 ? '' : 'negative');
 
       // Render Scraped Intelligence Cards
       renderScrapedIntelligenceCards(ov.live_engines_data, holdings);
@@ -3868,28 +3862,16 @@
         const uPct = Number(h.unrealized_pnl_pct || 0);
         const vBadge = h.verdict === 'ACCUMULATE' ? 'badge-lime' : (h.verdict === 'HOLD' ? 'badge-emerald' : 'badge-warn');
 
-        let pnlDisplayHtml = '';
-        if (!hasCostDelta) {
-          const isPos = dayPnl >= 0;
-          pnlDisplayHtml = `
-            <div style="font-weight:700;color:${isPos ? 'var(--accent-lime)' : 'var(--danger)'};">
-              ${fmtPKR(dayPnl, true)}
-            </div>
-            <div style="font-size:11px;color:${isPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
-              ${fmtPct(dayPct)} <span style="font-size:9.5px;color:var(--text-muted);text-transform:uppercase;">session</span>
-            </div>
-          `;
-        } else {
-          const isPos = uPnl >= 0;
-          pnlDisplayHtml = `
-            <div style="font-weight:700;color:${isPos ? 'var(--accent-lime)' : 'var(--danger)'};">
-              ${fmtPKR(uPnl, true)}
-            </div>
-            <div style="font-size:11px;color:${isPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
-              ${fmtPct(uPct)} · <span style="color:var(--text-muted);">${fmtPKR(dayPnl, true)}</span>
-            </div>
-          `;
-        }
+        const invCost = Number(h.invested_cost ?? (h.shares * h.avg_price));
+        const isUpnlPos = uPnl >= 0;
+        const pnlDisplayHtml = `
+          <div style="font-weight:700;color:${isUpnlPos ? 'var(--accent-lime)' : 'var(--danger)'};">
+            ${fmtPKR(uPnl, true)}
+          </div>
+          <div style="font-size:11px;color:${isUpnlPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
+            ${fmtPct(uPct)}
+          </div>
+        `;
 
         return `
           <tr style="cursor:pointer;" onclick="openHoldingDetail(${idx})">
@@ -3904,13 +3886,14 @@
             </td>
             <td data-label="Shares" class="tabular" style="font-weight:600;">${h.shares}</td>
             <td data-label="Avg Buy Cost" class="tabular" title="Click to edit average buy cost" onclick="event.stopPropagation(); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});" style="cursor:pointer;text-decoration:underline;text-decoration-color:#2A3631;color:#7CE751;">Rs. ${Number(h.avg_price).toFixed(2)}</td>
+            <td data-label="Invested (Inv)" class="tabular" style="font-weight:600;">${fmtPKR(invCost)}</td>
             <td data-label="Live Spot & Day" class="tabular">
               <div style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
               <div style="font-size:11px;color:${dayPct >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(dayPct)} (${fmtPKR(dayPnl, true)})</div>
             </td>
             <td data-label="Market Value" class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
             <td data-label="Weight" class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
-            <td data-label="Unrealized / Session P&L" class="tabular">
+            <td data-label="Unrealized P&L" class="tabular">
               ${pnlDisplayHtml}
             </td>
             <td data-label="DCF Fair Value" class="tabular">

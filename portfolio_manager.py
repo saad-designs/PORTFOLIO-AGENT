@@ -311,6 +311,9 @@ def create_dashboard_and_ledger_tables():
             );
             ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_price NUMERIC(12,4);
             ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_pct NUMERIC(8,4) DEFAULT 0;
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_abs NUMERIC(12,4) DEFAULT 0;
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS invested_cost NUMERIC(14,4);
+            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS avg_display NUMERIC(12,4);
             ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ;
             ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS dividend_yield NUMERIC(8,4);
             ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS research_sentiment TEXT DEFAULT 'NEUTRAL';
@@ -1569,16 +1572,131 @@ def fetch_supabase_equity_curve() -> pd.DataFrame:
 
 REAL_KTRADE_CASH_BALANCE: float = 4357.38
 REAL_KTRADE_WORKING_CAPITAL: float = 51446.75
-REAL_KTRADE_HOLDINGS: List[Dict[str, float]] = [
-    {"ticker": "EFERT", "shares": 8.0, "avg_buy_price": 194.99},
-    {"ticker": "FABL", "shares": 5.0, "avg_buy_price": 91.40},
-    {"ticker": "FFC", "shares": 15.0, "avg_buy_price": 559.49},
-    {"ticker": "HUBC", "shares": 35.0, "avg_buy_price": 193.18},
-    {"ticker": "LUCK", "shares": 6.0, "avg_buy_price": 391.38},
-    {"ticker": "MARI", "shares": 11.0, "avg_buy_price": 631.53},
-    {"ticker": "MEBL", "shares": 2.0, "avg_buy_price": 528.61},
-    {"ticker": "OGDC", "shares": 25.0, "avg_buy_price": 306.78},
-    {"ticker": "SYS", "shares": 109.0, "avg_buy_price": 109.15},
+REAL_KTRADE_INVESTED_COST: float = 50919.36
+REAL_KTRADE_CUSTODY_VALUE: float = 47089.75
+REAL_KTRADE_UNREALIZED_PNL: float = -3829.61
+REAL_KTRADE_UNREALIZED_PNL_PCT: float = -7.52
+REAL_KTRADE_DAY_PNL: float = -107.46
+REAL_KTRADE_DAY_PNL_PCT: float = -0.23
+
+REAL_KTRADE_HOLDINGS: List[Dict[str, any]] = [
+    {
+        "ticker": "EFERT",
+        "shares": 8.0,
+        "invested_cost": 1601.65,
+        "avg_buy_price": 1601.65 / 8.0,
+        "avg_display": 200.21,
+        "current_price": 194.99,
+        "market_value": 1559.92,
+        "unrealized_pnl": -41.73,
+        "unrealized_pnl_pct": -2.61,
+        "last_change_pct": -1.56,
+        "last_change_abs": -3.08,
+    },
+    {
+        "ticker": "FABL",
+        "shares": 5.0,
+        "invested_cost": 472.27,
+        "avg_buy_price": 472.27 / 5.0,
+        "avg_display": 94.45,
+        "current_price": 91.40,
+        "market_value": 457.00,
+        "unrealized_pnl": -15.27,
+        "unrealized_pnl_pct": -3.23,
+        "last_change_pct": -0.54,
+        "last_change_abs": -0.50,
+    },
+    {
+        "ticker": "FFC",
+        "shares": 15.0,
+        "invested_cost": 8110.98,
+        "avg_buy_price": 8110.98 / 15.0,
+        "avg_display": 540.73,
+        "current_price": 559.49,
+        "market_value": 8392.35,
+        "unrealized_pnl": 281.37,
+        "unrealized_pnl_pct": 3.47,
+        "last_change_pct": -0.28,
+        "last_change_abs": -1.56,
+    },
+    {
+        "ticker": "HUBC",
+        "shares": 35.0,
+        "invested_cost": 7238.22,
+        "avg_buy_price": 7238.22 / 35.0,
+        "avg_display": 206.81,
+        "current_price": 193.18,
+        "market_value": 6761.30,
+        "unrealized_pnl": -476.92,
+        "unrealized_pnl_pct": -6.59,
+        "last_change_pct": -0.44,
+        "last_change_abs": -0.86,
+    },
+    {
+        "ticker": "LUCK",
+        "shares": 6.0,
+        "invested_cost": 2846.20,
+        "avg_buy_price": 2846.20 / 6.0,
+        "avg_display": 474.37,
+        "current_price": 391.38,
+        "market_value": 2348.28,
+        "unrealized_pnl": -497.92,
+        "unrealized_pnl_pct": -17.49,
+        "last_change_pct": -1.42,
+        "last_change_abs": -5.63,
+    },
+    {
+        "ticker": "MARI",
+        "shares": 11.0,
+        "invested_cost": 7156.12,
+        "avg_buy_price": 7156.12 / 11.0,
+        "avg_display": 650.56,
+        "current_price": 631.53,
+        "market_value": 6946.83,
+        "unrealized_pnl": -209.29,
+        "unrealized_pnl_pct": -2.92,
+        "last_change_pct": -0.74,
+        "last_change_abs": -4.69,
+    },
+    {
+        "ticker": "MEBL",
+        "shares": 2.0,
+        "invested_cost": 983.69,
+        "avg_buy_price": 983.69 / 2.0,
+        "avg_display": 491.85,
+        "current_price": 528.61,
+        "market_value": 1057.22,
+        "unrealized_pnl": 73.53,
+        "unrealized_pnl_pct": 7.47,
+        "last_change_pct": 0.48,
+        "last_change_abs": 2.53,
+    },
+    {
+        "ticker": "OGDC",
+        "shares": 25.0,
+        "invested_cost": 7968.72,
+        "avg_buy_price": 7968.72 / 25.0,
+        "avg_display": 318.75,
+        "current_price": 306.78,
+        "market_value": 7669.50,
+        "unrealized_pnl": -299.22,
+        "unrealized_pnl_pct": -3.75,
+        "last_change_pct": 0.19,
+        "last_change_abs": 0.57,
+    },
+    {
+        "ticker": "SYS",
+        "shares": 109.0,
+        "invested_cost": 14541.51,
+        "avg_buy_price": 14541.51 / 109.0,
+        "avg_display": 133.41,
+        "current_price": 109.15,
+        "market_value": 11897.35,
+        "unrealized_pnl": -2644.16,
+        "unrealized_pnl_pct": -18.18,
+        "last_change_pct": 0.33,
+        "last_change_abs": 0.36,
+    },
 ]
 
 DEFAULT_WATCHLIST_DCF_TARGETS: Dict[str, Dict[str, float]] = {
@@ -2238,12 +2356,18 @@ def reset_ktrade_baseline_data() -> dict:
     - Custody Market Value: Rs. 47,089.75
     - Working Capital: Rs. 51,446.75
     - Total Net Worth: Rs. 51,447.13
+    - Total Cost Basis (Inv): Rs. 50,919.36
+    - Total Unrealized P&L: -Rs. 3,829.61 (-7.52%)
+    - Last Session Day P&L: -Rs. 107.46 (-0.23%)
     - 9 verified holdings (EFERT, FABL, FFC, HUBC, LUCK, MARI, MEBL, OGDC, SYS)
     - Wipes test dividend ledger rows and syncs trade_history.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS invested_cost NUMERIC(14,4);")
+        cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS avg_display NUMERIC(12,4);")
+        cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_abs NUMERIC(12,4) DEFAULT 0;")
         cur.execute("DELETE FROM portfolio_holdings;")
         cur.execute("DELETE FROM trade_history;")
         cur.execute("DELETE FROM capital_ledger;")
@@ -2259,40 +2383,49 @@ def reset_ktrade_baseline_data() -> dict:
             sym = h["ticker"]
             shs = h["shares"]
             avg_p = h["avg_buy_price"]
-            gross_cost = round(shs * avg_p, 2)
+            inv_c = h["invested_cost"]
+            avg_d = h.get("avg_display") or round(inv_c / shs, 2)
+            cur_p = h.get("current_price", avg_p)
+            chg_pct = h.get("last_change_pct", 0.0)
+            chg_abs = h.get("last_change_abs", 0.0)
 
             cur.execute("""
                 INSERT INTO portfolio_holdings (
-                    ticker, shares, avg_buy_price, last_price, last_change_pct, last_change_abs, price_updated_at, updated_at
+                    ticker, shares, avg_buy_price, invested_cost, avg_display, last_price, last_change_pct, last_change_abs, price_updated_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, 0.0, 0.0, NOW(), NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (ticker) DO UPDATE
                 SET shares = EXCLUDED.shares,
                     avg_buy_price = EXCLUDED.avg_buy_price,
+                    invested_cost = EXCLUDED.invested_cost,
+                    avg_display = EXCLUDED.avg_display,
                     last_price = EXCLUDED.last_price,
-                    last_change_pct = 0.0,
-                    last_change_abs = 0.0,
+                    last_change_pct = EXCLUDED.last_change_pct,
+                    last_change_abs = EXCLUDED.last_change_abs,
                     price_updated_at = NOW(),
                     updated_at = NOW();
-            """, (sym, shs, avg_p, avg_p))
+            """, (sym, shs, avg_p, inv_c, avg_d, cur_p, chg_pct, chg_abs))
 
             cur.execute("""
                 INSERT INTO trade_history (
                     ticker, side, quantity, price, fees, fees_and_tax, net_total, executed_at, notes
                 )
                 VALUES (%s, 'BUY', %s, %s, 0.00, 0.00, %s, NOW(), 'KTrade Custody Baseline Sync');
-            """, (sym, shs, avg_p, gross_cost))
+            """, (sym, shs, avg_d, inv_c))
 
             dcf_defaults = DEFAULT_WATCHLIST_DCF_TARGETS.get(sym)
-            default_tp = dcf_defaults["target_price"] if dcf_defaults else round(avg_p * 1.18, 2)
-            default_sl = dcf_defaults["stop_loss"] if dcf_defaults else round(avg_p * 0.91, 2)
+            default_tp = dcf_defaults["target_price"] if dcf_defaults else round(cur_p * 1.18, 2)
+            default_sl = dcf_defaults["stop_loss"] if dcf_defaults else round(cur_p * 0.91, 2)
             default_fpe = dcf_defaults["fair_pe"] if dcf_defaults else 8.5
             try:
                 cur.execute("SAVEPOINT sp_watchlist_seed;")
                 cur.execute("""
                     INSERT INTO watchlist_targets (ticker, target_price, stop_loss, historical_fair_pe)
                     VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (ticker) DO NOTHING;
+                    ON CONFLICT (ticker) DO UPDATE
+                    SET target_price = EXCLUDED.target_price,
+                        stop_loss = EXCLUDED.stop_loss,
+                        historical_fair_pe = EXCLUDED.historical_fair_pe;
                 """, (sym, default_tp, default_sl, default_fpe))
                 cur.execute("RELEASE SAVEPOINT sp_watchlist_seed;")
             except Exception:
@@ -2314,7 +2447,7 @@ def reset_ktrade_baseline_data() -> dict:
             cur.execute("SAVEPOINT sp_ckpt_baseline;")
             cur.execute("""
                 INSERT INTO agent_checkpoints (key, value, updated_at)
-                VALUES ('ktrade_real_baseline_locked_v2', %s, NOW())
+                VALUES ('ktrade_real_baseline_locked_v3', %s, NOW())
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
             """, (str(int(datetime.datetime.now().timestamp())),))
             cur.execute("RELEASE SAVEPOINT sp_ckpt_baseline;")
@@ -2330,15 +2463,9 @@ def reset_ktrade_baseline_data() -> dict:
         conn.close()
 
     invalidate_financial_summary_cache()
+    return get_complete_financial_summary(use_cached_prices=True)
 
-    try:
-        from market_data_scraper import fetch_all_psx_prices_bulk
-        fetch_all_psx_prices_bulk(force_refresh=True)
-        refresh_portfolio_live_prices(force_refresh=True)
-    except Exception as e:
-        print(f"⚠️ [Reset Baseline] Price refresh warning: {e}", flush=True)
-
-    return get_complete_financial_summary(use_cached_prices=False, force_live=True)
+reset_ktrade_baseline = reset_ktrade_baseline_data
 
 
 def ensure_real_ktrade_portfolio_seeded() -> bool:
@@ -2353,8 +2480,8 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
     cur = conn.cursor()
     needs_seed = False
     try:
-        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'ktrade_real_baseline_locked_v2';")
-        locked_v2 = cur.fetchone() is not None
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'ktrade_real_baseline_locked_v3';")
+        locked_v3 = cur.fetchone() is not None
 
         cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0;")
         rows = cur.fetchall()
@@ -2368,7 +2495,7 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
             needs_seed = True
         elif current_tickers & known_mock_tickers:
             needs_seed = True
-        elif not locked_v2 or current_tickers != real_tickers or fresh_cap <= 0:
+        elif not locked_v3 or current_tickers != real_tickers or fresh_cap <= 0:
             needs_seed = True
     except Exception as e:
         print(f"⚠️ [Portfolio Seed Check] {e}", flush=True)
@@ -2528,7 +2655,9 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 w.stop_loss,
                 w.historical_fair_pe,
                 w.current_trailing_pe,
-                COALESCE(p.last_change_abs, 0.0) AS last_change_abs
+                COALESCE(p.last_change_abs, 0.0) AS last_change_abs,
+                p.invested_cost,
+                p.avg_display
             FROM portfolio_holdings p
             LEFT JOIN watchlist_targets w ON UPPER(p.ticker) = UPPER(w.ticker)
             WHERE p.shares > 0
@@ -2660,8 +2789,11 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
             if curr_price <= 0:
                 curr_price = avg_price
 
+            invested_c = float(row[13]) if len(row) > 13 and row[13] is not None else round(shares * avg_price, 2)
+            avg_disp = float(row[14]) if len(row) > 14 and row[14] is not None else round(invested_c / shares, 2)
+
             mv = round(shares * curr_price, 2)
-            cb = round(shares * avg_price, 2)
+            cb = round(invested_c, 2)
             pnl = round(mv - cb, 2)
             pnl_pct = round((pnl / cb * 100), 2) if cb > 0 else 0.0
 
@@ -2684,7 +2816,11 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "ticker": tick,
                 "sector": sector,
                 "shares": shares,
-                "avg_price": avg_price,
+                "avg_price": avg_disp,
+                "avg_buy_price": avg_price,
+                "avg_display": avg_disp,
+                "invested_cost": cb,
+                "cost_basis": cb,
                 "current_price": curr_price,
                 "change_pct": change_pct,
                 "change_abs": change_abs,
@@ -2695,7 +2831,6 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "session_pnl_pkr": day_chg_pkr,
                 "session_pnl_pct": change_pct,
                 "market_value": mv,
-                "cost_basis": cb,
                 "unrealized_pnl": pnl,
                 "unrealized_pnl_pct": pnl_pct,
                 "dividend_yield": div_yield,
