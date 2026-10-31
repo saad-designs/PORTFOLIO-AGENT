@@ -193,18 +193,24 @@ GROQ_TEXT_MODELS: List[str] = [
     "llama-3.1-8b-instant"                         # Llama 3.1 8B instant fallback
 ]
 
-# Gemini fallback cascade (active Google GenAI 2.5 models):
+# Gemini fallback cascade (active Google GenAI models):
 GEMINI_TASK_ROUTING: Dict[str, List[str]] = {
     TASK_FAST_INGESTION: [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
         "gemini-2.5-flash-lite",
         "gemini-2.5-flash"
     ],
     TASK_DEEP_REASONING: [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
         "gemini-2.5-flash-lite"
     ],
     TASK_MULTIMODAL: [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite"
     ]
@@ -250,29 +256,36 @@ def get_candidate_models(task: str = TASK_FAST_INGESTION) -> List[str]:
 def record_model_error(model: str, error: Any):
     """
     Inspects an error thrown by Groq or Gemini and sets circuit breaker cooldowns:
-    - 404 NOT_FOUND / decommissioned: Blacklists ONLY the dead model string (never locks out other models)
+    - 404 NOT_FOUND / GoogleModelNotFoundError / decommissioned: Immediately blacklists dead model strings
     - 401 Invalid API Key: 24-hour disable for that provider's invalid key
     - 429 Daily Limit (GenerateRequestsPerDay or retryDelay > 120s): 1-hour (3600s) cooldown
     - 429 RPM/TPM Limit: 45s cooldown
     """
     err_str = str(error)
     err_lower = err_str.lower()
+    err_type = type(error).__name__.lower()
     now = time.time()
     status_code = getattr(error, "status_code", None) or getattr(error, "code", None)
 
-    # 1. Check 404 NOT_FOUND / decommissioned FIRST so request IDs/timestamps containing "401" never trigger global lockout!
+    # 1. Check 404 NOT_FOUND / GoogleModelNotFoundError / decommissioned FIRST so request IDs containing "401" never trigger global lockout!
     is_not_found = (
         status_code == 404
+        or "googlemodelnotfounderror" in err_type
+        or "notfound" in err_type
         or bool(re.search(r"\b(?:error[_\s]*code|status[_\s]*code|http)\s*[:=]?\s*404\b", err_lower))
         or any(k in err_lower for k in [
             "not_found", "model_not_found", "does not exist",
-            "decommissioned", "model_decommissioned", "no longer supported"
+            "decommissioned", "model_decommissioned", "no longer supported",
+            "googlemodelnotfounderror", "modelnotfounderror", "is not found for api version"
         ])
     )
     if is_not_found:
         if model != "groq":
             BLACKLISTED_MODELS.add(model)
-            print(f"🚫 [Circuit Breaker] Model '{model}' returned 404 / decommissioned. Blacklisted '{model}' ONLY (other models unaffected).", flush=True)
+            found_models = re.findall(r"models/([a-zA-Z0-9_\-\.]+)", err_str)
+            for fm in found_models:
+                BLACKLISTED_MODELS.add(fm)
+            print(f"🚫 [Circuit Breaker] Model '{model}' returned 404 / NotFound. Blacklisted '{model}' permanently (other models unaffected).", flush=True)
         return
 
     # 2. Check strict 401 Unauthorized / Invalid API Key (no loose substring match on "401" inside IDs/numbers)
@@ -443,9 +456,9 @@ async def generate_with_fallback(
     with ctx_mgr:
         is_text = is_pure_text_contents(contents)
 
-        # 1. Text-only FAST_INGESTION offloaded to Groq if configured
+        # 1. Text-only generation offloaded to Groq if configured (for BOTH TASK_FAST_INGESTION and TASK_DEEP_REASONING)
         groq_key = os.getenv("GROQ_API_KEY")
-        if task == TASK_FAST_INGESTION and is_text and groq_key and groq_key.strip():
+        if is_text and groq_key and groq_key.strip() and is_any_groq_text_model_available():
             prompt_str = extract_prompt_string(contents)
             groq_result = await asyncio.to_thread(generate_text_groq, prompt_str)
             if groq_result:
@@ -514,39 +527,61 @@ async def generate_with_fallback(
                     client = None
                     continue
 
+        # Emergency text fallback to Groq if all Gemini attempts failed
+        if is_text and is_model_available("groq"):
+            try:
+                emergency_groq = await asyncio.to_thread(generate_text_groq, extract_prompt_string(contents))
+                if emergency_groq and emergency_groq.strip():
+                    return emergency_groq.strip()
+            except Exception:
+                pass
+
         raise RuntimeError(f"❌ All models (Groq & Gemini across {len(google_keys)} keys) failed in generate_with_fallback for {task}. Last error: {repr(last_error)}")
 
 # --- LANGCHAIN LLM ROUTER ---
 def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
     """
     Builds a LangChain chat model with multi-provider fallbacks:
-    - TASK_FAST_INGESTION: ChatGroq (llama-3.3 / gpt-oss) -> ChatGoogleGenerativeAI (gemini-2.5-flash-lite).
-    - TASK_DEEP_REASONING: ChatGoogleGenerativeAI (gemini-2.5-flash -> gemini-2.5-pro -> gemini-2.5-flash-lite).
-    Supports multi-key Gemini rotation across GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3.
+    - Chains both Groq and Gemini models for ALL tasks (TASK_FAST_INGESTION and TASK_DEEP_REASONING).
+    - If Google throws GoogleModelNotFoundError, quota 429, or auth 401, seamlessly cascades
+      to Groq (llama-3.3-70b-versatile, qwen/qwen3-32b, llama-3.1-8b-instant).
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
     groq_key = os.getenv("GROQ_API_KEY")
 
     groq_llms = []
-    if task == TASK_FAST_INGESTION and groq_key and groq_key.strip():
+    if groq_key and groq_key.strip():
         try:
             from langchain_groq import ChatGroq
-            for g_model in GROQ_TEXT_MODELS:
+            candidate_groq = ["llama-3.3-70b-versatile", "qwen/qwen3-32b", "llama-3.1-8b-instant"]
+            for g_model in candidate_groq:
                 if is_model_available(g_model):
                     groq_llms.append(ChatGroq(model=g_model, groq_api_key=groq_key.strip(), **kwargs))
-        except Exception as e:
+        except Exception:
             pass
 
     # Build Gemini LLMs with multi-key fallbacks
+    gem_kwargs = dict(kwargs)
+    gem_kwargs.setdefault("max_retries", 1)
+    gem_kwargs.setdefault("timeout", 25)
+
     google_keys = get_google_api_keys()
     gemini_llms = []
     candidates = get_candidate_models(task)
 
     for g_key in google_keys:
         for m in candidates:
-            gemini_llms.append(ChatGoogleGenerativeAI(model=m, google_api_key=g_key, **kwargs))
+            try:
+                gemini_llms.append(ChatGoogleGenerativeAI(model=m, google_api_key=g_key, **gem_kwargs))
+            except Exception:
+                pass
 
-    all_llms = groq_llms + gemini_llms
+    if task == TASK_FAST_INGESTION:
+        all_llms = groq_llms + gemini_llms
+    else:
+        # TASK_DEEP_REASONING: Gemini primary + Groq reasoning (llama-3.3-70b, qwen3-32b) + light fallbacks
+        all_llms = gemini_llms + groq_llms if gemini_llms else groq_llms
+
     if not all_llms:
         fallback_model = GEMINI_TASK_ROUTING[task][0]
         fallback_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")

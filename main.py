@@ -1273,6 +1273,16 @@ async def run_automation_endpoint(automation_name: str, request: Request):
                 "allocations": decision.get("allocations", [])
             }
 
+        elif name in ("business", "business_sweep", "desk_manager"):
+            from schedulers import run_business_portfolio_sweep
+            res = await run_business_portfolio_sweep()
+            return {
+                "automation": "business_sweep",
+                "status": res.get("status", "SUCCESS"),
+                "latency_ms": res.get("latency_ms", round((time.perf_counter() - t0) * 1000.0, 2)),
+                "telemetry": res.get("telemetry", {})
+            }
+
         elif name == "run_all":
             results = {}
             for sub_name in ["prices", "local_global_news", "business_books_law", "psx_announcements", "youtube_mentors", "central_brain"]:
@@ -1741,9 +1751,15 @@ async def get_dashboard_whatsapp_qr():
 async def trigger_dashboard_sweep(sweep_type: str, background_tasks: BackgroundTasks, request: Request):
     verify_dashboard_auth(request)
     st = sweep_type.strip().lower()
-    if st in {"business", "desk_manager"}:
+    if st in {"business", "business_sweep", "desk_manager"}:
         from schedulers import run_business_portfolio_sweep
-        background_tasks.add_task(run_business_portfolio_sweep)
+        res = await run_business_portfolio_sweep()
+        return {
+            "status": "completed",
+            "sweep_type": "business",
+            "result": res,
+            "timestamp": time.time()
+        }
     elif st == "youtube":
         from ingestion import sweep_youtube_transcripts
         background_tasks.add_task(sweep_youtube_transcripts)

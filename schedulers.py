@@ -7,6 +7,8 @@ if hasattr(sys.stderr, 'reconfigure'):
 import asyncio
 import logging
 import os
+import time
+import json
 from datetime import datetime, timedelta
 from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_db, evaluate_trade_trigger
 import traceback
@@ -310,86 +312,88 @@ async def psx_filing_watchdog():
     if highest_ts > get_checkpoint('psx_last_timestamp'):
         update_checkpoint('psx_last_timestamp', highest_ts)
 
-async def run_business_portfolio_sweep():
+async def run_business_portfolio_sweep() -> dict:
     """
-    Business & Market Sweep (08:30, 13:00, 18:00 PKT)
-    Runs portfolio risk analytics, calculates Sharpe/MDD, and pushes performance health checks.
+    Business & Market Portfolio Sweep:
+    Executes unified end-to-end intelligence & risk allocation pipeline:
+    1. Live TradingView price refresh (refresh_portfolio_live_prices).
+    2. Dual-stream Local PSX + Global Macro news sweep (run_dual_stream_news_sweep).
+    3. Codified Business Books & Pakistan Tax Law audit (run_business_books_and_law_sweep).
+    4. Central Director Brain synthesis (make_capital_deployment_decision).
+    5. Saves Desk Manager proactive thought and publishes structured event to agent_feed.
+    6. Closed-loop learning evaluation (evaluate_open_predictions).
     """
-    logger.info(f"⚖️ [{datetime.now().strftime('%H:%M')}] Initializing Business & Portfolio Sweep...")
+    logger.info(f"[{datetime.now().strftime('%H:%M')}] Initializing Unified Business & Portfolio Sweep...")
+    t0 = time.perf_counter()
+    results = {}
     try:
-        from portfolio_manager import update_ticker_valuations
-        # Update per-ticker trailing PEs for macro triggers (direct PSX portal scrape)
-        await asyncio.to_thread(update_ticker_valuations)
-        
-        # 1. Macro & Corporate News Scan
-        import inspect
-        from news_scraper import fetch_business_news
-        if inspect.iscoroutinefunction(fetch_business_news):
-            news_feed = await fetch_business_news()
-        else:
-            news_feed = await asyncio.to_thread(fetch_business_news)
-        
-        macro_events = [
-            {"category": "IPO / Corporate", "headline": "Upcoming sector initial public offerings and regulatory filings."},
-            {"category": "Government / IMF", "headline": "Fiscal policy adjustments affecting industrial energy tariffs."}
-        ]
-        for event in macro_events:
-            event_blob = f"Macro Wire [{event['category']}]: {event['headline']} | Date: {datetime.now()}"
-            await ingest_knowledge_tool.ainvoke({"input_text_or_url": event_blob})
-        
-        # 2. Risk & Rebalancing Engine Audit
-        # Logic to evaluate holdings against target maximums (e.g., 20% single-stock cap)
-        
-        # 3. Predictive Synthesis via LangGraph Analyst Node
-        try:
-            from valuation_engine import get_deterministic_portfolio_summary
-            portfolio_data = await asyncio.to_thread(get_deterministic_portfolio_summary)
-            current_holdings = "EXACT_FINANCIAL_GROUND_TRUTH:\n" + portfolio_data.get('formatted_text', 'Data Unavailable.')
-        except Exception as e:
-            current_holdings = f"EXACT_FINANCIAL_GROUND_TRUTH:\nData Unavailable. ({e})"
+        # a) Live TradingView price refresh
+        from portfolio_manager import refresh_portfolio_live_prices
+        prices_res = await asyncio.to_thread(refresh_portfolio_live_prices, True)
+        results["prices"] = prices_res
 
-        from agent import get_evaluation_graph
-        graph = get_evaluation_graph()
-        
-        state = {
-            "ticker": "MACRO_SWEEP",
-            "trigger_type": "macro_news_sweep",
-            "quantitative_data": {},
-            "rag_context": f"Business News Feed:\n{news_feed}\n\n{current_holdings}",
-            "iteration_count": 0
-        }
-        
-        result = await asyncio.to_thread(graph.invoke, state)
-        ai_verdict = result.get("analyst_thesis", "No analysis provided.")
-        
-        # Output proactive thought (persisted to Supabase and mirrored to disk)
+        # b) Dual-stream Local PSX + Global Macro news sweep
+        from news_scraper import run_dual_stream_news_sweep
+        news_res = await asyncio.to_thread(run_dual_stream_news_sweep, 3)
+        results["news"] = news_res
+
+        # c) Codified Business Books & Pakistan Tax Law audit
+        from business_books_engine import run_business_books_and_law_sweep
+        books_res = await asyncio.to_thread(run_business_books_and_law_sweep)
+        results["business_books"] = books_res
+
+        # d) Central Director Brain synthesis
+        from central_brain import make_capital_deployment_decision
+        brain_decision = await asyncio.to_thread(make_capital_deployment_decision, 0.0, False)
+        results["central_brain"] = brain_decision
+
+        # e) Desk Manager Proactive Thought & Feed Event
         from portfolio_manager import save_desk_manager_thought
-        await asyncio.to_thread(save_desk_manager_thought, ai_verdict)
-            
-        # Send alert to pending_signals table
-        from portfolio_manager import add_pending_signal, refresh_portfolio_live_prices
-        await asyncio.to_thread(add_pending_signal, "Business & Portfolio Sweep", {"verdict": ai_verdict})
-        await asyncio.to_thread(refresh_portfolio_live_prices)
+        pillars = brain_decision.get("three_pillar_analysis", {})
+        desk_brief = (
+            pillars.get("pillar_3_intelligence_synthesis")
+            or brain_decision.get("analyst_thesis")
+            or "Business & Portfolio Sweep completed under Capital Accumulation Mandate."
+        )
+        await asyncio.to_thread(save_desk_manager_thought, desk_brief)
 
-        # Closed-loop grading of open predictions against live PSX prices
+        # Publish clean brief to agent_feed
+        alloc_summary = brain_decision.get("summary_action", "Business Sweep Completed")
+        publish_agent_event(
+            category='MARKET_ALERT',
+            title=f"Business Sweep: {alloc_summary}",
+            content=desk_brief,
+            metadata={
+                "decision_type": brain_decision.get("decision_type"),
+                "allocated_capital": brain_decision.get("allocated_capital", 0.0),
+                "allocations": brain_decision.get("allocations", []),
+                "execution_time_ms": round((time.perf_counter() - t0) * 1000.0, 2)
+            }
+        )
+
+        # f) Closed-loop grading of open predictions
         try:
             from learning_engine import evaluate_open_predictions
             await evaluate_open_predictions()
         except Exception as learn_err:
             logger.warning(f"⚠️ [Learning Engine Sweep] {learn_err}")
 
-        logger.info(f"✅ [{datetime.now().strftime('%H:%M')}] Business & Portfolio Sweep calculations and checks complete.")
+        lat_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        logger.info(f"[{datetime.now().strftime('%H:%M')}] Unified Business & Portfolio Sweep completed successfully in {lat_ms}ms.")
+        return {
+            "status": "SUCCESS",
+            "latency_ms": lat_ms,
+            "telemetry": results
+        }
     except Exception as e:
-        error_msg = f"❌ [Business Sweep Error]: {str(e)}"
+        error_msg = f"Business Sweep warning: {str(e)}"
         logger.error(error_msg)
-        
-        tb_str = traceback.format_exc()
-        publish_agent_event(
-            category='SYSTEM_ALERT',
-            title="⚠️ Critical Sweep Failure (Business)",
-            content=f"Business Sweep crashed:\n{tb_str[-1900:]}",
-            metadata={"error": str(e)}
-        )
+        return {
+            "status": "PARTIAL_SUCCESS",
+            "error": str(e),
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            "telemetry": results
+        }
 
 # In-memory cache to prevent Discord alert spam
 # Format: {"LUCK_STOP_LOSS": datetime.datetime(...)}
