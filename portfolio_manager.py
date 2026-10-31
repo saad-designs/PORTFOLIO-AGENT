@@ -556,56 +556,25 @@ def sanitize_price(raw_price) -> float:
         print(f"[ERROR] Could not parse price: {raw_price}")
         return 0.0
 
-@cached(cache=TTLCache(maxsize=100, ttl=900))
 def get_live_price(ticker: str) -> float:
-    """Scrapes the live current price from the PSX Data Portal."""
+    """Returns live PSX price via the 120s cached bulk market table (single HTTP request)."""
     try:
-        url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
-        from market_data_scraper import fetch_psx_data_robust_sync
-        html_data = fetch_psx_data_robust_sync(url, is_json=False)
-        if not html_data:
-            return 0.0
-            
-        soup = BeautifulSoup(html_data, 'html.parser')
-        
-        # The PSX Data Portal stores the live price inside the 'quote__close' class
-        price_div = soup.find('div', class_='quote__close')
-        if price_div:
-            return sanitize_price(price_div.text)
-        return 0.0
+        from market_data_scraper import get_bulk_quote_for_ticker
+        price, _ = get_bulk_quote_for_ticker(str(ticker or "").upper(), allow_single_fallback=True)
+        return float(price or 0.0)
     except Exception as e:
-        print(f"Error fetching live price for {ticker}: {e}")
+        print(f"Error fetching live price for {ticker}: {e}", flush=True)
         return 0.0
 
-@cached(cache=TTLCache(maxsize=100, ttl=900))
+
 def get_live_price_and_change(ticker: str) -> tuple[float, float]:
-    """Scrapes the live current price and daily percentage change from the PSX Data Portal."""
+    """Returns (price, change_pct) via the 120s cached bulk PSX market table (single HTTP request)."""
     try:
-        url = f"https://dps.psx.com.pk/company/{ticker.upper()}"
-        from market_data_scraper import fetch_psx_data_robust_sync
-        html_data = fetch_psx_data_robust_sync(url, is_json=False)
-        if not html_data:
-            return 0.0, 0.0
-            
-        soup = BeautifulSoup(html_data, 'html.parser')
-        
-        price = 0.0
-        change_pct = 0.0
-        
-        price_div = soup.find('div', class_='quote__close')
-        if price_div:
-            price = sanitize_price(price_div.text)
-            
-        change_div = soup.find('div', class_='quote__change')
-        if change_div:
-            import re
-            match = re.search(r'\(([-+]?[0-9]*\.?[0-9]+)%\)', change_div.text)
-            if match:
-                change_pct = float(match.group(1))
-                
-        return price, change_pct
+        from market_data_scraper import get_bulk_quote_for_ticker
+        price, change_pct = get_bulk_quote_for_ticker(str(ticker or "").upper(), allow_single_fallback=True)
+        return float(price or 0.0), float(change_pct or 0.0)
     except Exception as e:
-        print(f"Error fetching live price and change for {ticker}: {e}")
+        print(f"Error fetching live price and change for {ticker}: {e}", flush=True)
         return 0.0, 0.0
 
 def log_trade(ticker: str, action: str, quantity: float, price: float, fees: float = 0.0) -> str:
@@ -2299,15 +2268,18 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
     return False
 
 
-def refresh_portfolio_live_prices() -> dict:
+def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     """
-    Background sweep helper: scrapes live PSX spot prices & daily % changes in parallel
-    for all active holdings and persists last_price, last_change_pct, price_updated_at in portfolio_holdings.
+    Bulk PSX quote sweep: fetches all PSX ticker prices in a SINGLE HTTP request
+    (cached in memory for 120s via fetch_bulk_psx_quotes) and updates last_price,
+    last_change_pct, and price_updated_at in portfolio_holdings for all active holdings.
     """
+    from market_data_scraper import fetch_bulk_psx_quotes, get_bulk_quote_for_ticker
+
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT ticker, avg_buy_price FROM portfolio_holdings WHERE shares > 0;")
+        cur.execute("SELECT ticker, avg_buy_price, last_price FROM portfolio_holdings WHERE shares > 0;")
         rows = cur.fetchall()
     finally:
         cur.close()
@@ -2316,24 +2288,21 @@ def refresh_portfolio_live_prices() -> dict:
     if not rows:
         return {"updated": 0, "prices": {}}
 
-    def _scrape_one(sym: str, fallback_p: float):
-        try:
-            cp, chg = get_live_price_and_change(sym)
-            if cp and cp > 0:
-                return float(cp), float(chg or 0.0), True
-        except Exception:
-            pass
-        return float(fallback_p), 0.0, False
-
+    bulk_quotes = fetch_bulk_psx_quotes(force_refresh=force_refresh)
     scraped: Dict[str, tuple[float, float, bool]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(rows), 10)) as executor:
-        fut_map = {executor.submit(_scrape_one, str(r[0]).upper(), float(r[1])): str(r[0]).upper() for r in rows}
-        for fut in concurrent.futures.as_completed(fut_map):
-            sym = fut_map[fut]
-            try:
-                scraped[sym] = fut.result()
-            except Exception:
-                scraped[sym] = (0.0, 0.0, False)
+
+    for r in rows:
+        sym = str(r[0]).upper()
+        fallback_p = float(r[2]) if r[2] is not None and float(r[2]) > 0 else float(r[1])
+        q = bulk_quotes.get(sym)
+        if q and q.get("price", 0.0) > 0:
+            scraped[sym] = (float(q["price"]), float(q.get("change_pct", 0.0)), True)
+        else:
+            cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
+            if cp > 0:
+                scraped[sym] = (float(cp), float(chg or 0.0), True)
+            else:
+                scraped[sym] = (fallback_p, 0.0, False)
 
     w_conn = get_db_connection()
     w_cur = w_conn.cursor()
@@ -2484,35 +2453,25 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
                 cached_chg = float(row[6]) if row[6] is not None else 0.0
                 price_map[sym] = (cached_p, cached_chg)
         else:
-            def _fetch_price_item(sym, default_p):
-                try:
-                    cp, chg = get_live_price_and_change(sym)
-                    if cp and cp > 0:
-                        return float(cp), float(chg or 0.0), True
-                except Exception:
-                    pass
-                return float(default_p), 0.0, False
-
+            from market_data_scraper import fetch_bulk_psx_quotes, get_bulk_quote_for_ticker
+            bulk_quotes = fetch_bulk_psx_quotes(force_refresh=False)
             scraped_updates = []
-            if holdings_rows:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(holdings_rows), 10)) as executor:
-                    future_map = {
-                        executor.submit(
-                            _fetch_price_item,
-                            str(r[0]).upper(),
-                            float(r[5]) if r[5] is not None and float(r[5]) > 0 else float(r[2]),
-                        ): str(r[0]).upper()
-                        for r in holdings_rows
-                    }
-                    for fut in concurrent.futures.as_completed(future_map):
-                        ticker_name = future_map[fut]
-                        try:
-                            cp, chg, was_live = fut.result()
-                            price_map[ticker_name] = (cp, chg)
-                            if was_live and cp > 0:
-                                scraped_updates.append((cp, chg, ticker_name))
-                        except Exception:
-                            price_map[ticker_name] = (0.0, 0.0)
+            for r in holdings_rows:
+                sym = str(r[0]).upper()
+                default_p = float(r[5]) if r[5] is not None and float(r[5]) > 0 else float(r[2])
+                q = bulk_quotes.get(sym)
+                if q and q.get("price", 0.0) > 0:
+                    cp = float(q["price"])
+                    chg = float(q.get("change_pct", 0.0))
+                    price_map[sym] = (cp, chg)
+                    scraped_updates.append((cp, chg, sym))
+                else:
+                    cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
+                    if cp > 0:
+                        price_map[sym] = (float(cp), float(chg or 0.0))
+                        scraped_updates.append((float(cp), float(chg or 0.0), sym))
+                    else:
+                        price_map[sym] = (default_p, float(r[6] or 0.0))
 
             if scraped_updates:
                 try:
@@ -2777,11 +2736,13 @@ def save_desk_manager_thought(thought_text: str):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO agent_checkpoints (key, value, updated_at)
-            VALUES ('desk_manager_proactive_thought', %s, NOW())
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
-        """, (json.dumps({"thought": thought_text, "saved_at": datetime.datetime.now().isoformat()}),))
+        payload_json = json.dumps({"thought": thought_text, "saved_at": datetime.datetime.now().isoformat()})
+        for ckpt_key in ("desk_manager_proactive_thought", "proactive_thought"):
+            cur.execute("""
+                INSERT INTO agent_checkpoints (key, value, updated_at)
+                VALUES (%s, %s::jsonb, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+            """, (ckpt_key, payload_json))
         conn.commit()
         cur.close()
         conn.close()
