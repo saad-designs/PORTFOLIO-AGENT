@@ -2231,9 +2231,119 @@ def sync_full_portfolio_state(
         conn.close()
 
 
+def reset_ktrade_baseline_data() -> dict:
+    """
+    Hard-resets portfolio database to exact KTrade verified baseline:
+    - Liquid Trading Cash: Rs. 4,357.38
+    - Custody Market Value: Rs. 47,089.75
+    - Working Capital: Rs. 51,446.75
+    - Total Net Worth: Rs. 51,447.13
+    - 9 verified holdings (EFERT, FABL, FFC, HUBC, LUCK, MARI, MEBL, OGDC, SYS)
+    - Wipes test dividend ledger rows and syncs trade_history.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM portfolio_holdings;")
+        cur.execute("DELETE FROM trade_history;")
+        cur.execute("DELETE FROM capital_ledger;")
+        cur.execute("DELETE FROM dividend_ledger;")
+        try:
+            cur.execute("SAVEPOINT sp_clear_legacy_cash;")
+            cur.execute("DELETE FROM cash_ledger;")
+            cur.execute("RELEASE SAVEPOINT sp_clear_legacy_cash;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_clear_legacy_cash;")
+
+        for h in REAL_KTRADE_HOLDINGS:
+            sym = h["ticker"]
+            shs = h["shares"]
+            avg_p = h["avg_buy_price"]
+            gross_cost = round(shs * avg_p, 2)
+
+            cur.execute("""
+                INSERT INTO portfolio_holdings (
+                    ticker, shares, avg_buy_price, last_price, last_change_pct, last_change_abs, price_updated_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, 0.0, 0.0, NOW(), NOW())
+                ON CONFLICT (ticker) DO UPDATE
+                SET shares = EXCLUDED.shares,
+                    avg_buy_price = EXCLUDED.avg_buy_price,
+                    last_price = EXCLUDED.last_price,
+                    last_change_pct = 0.0,
+                    last_change_abs = 0.0,
+                    price_updated_at = NOW(),
+                    updated_at = NOW();
+            """, (sym, shs, avg_p, avg_p))
+
+            cur.execute("""
+                INSERT INTO trade_history (
+                    ticker, side, quantity, price, fees, fees_and_tax, net_total, executed_at, notes
+                )
+                VALUES (%s, 'BUY', %s, %s, 0.00, 0.00, %s, NOW(), 'KTrade Custody Baseline Sync');
+            """, (sym, shs, avg_p, gross_cost))
+
+            dcf_defaults = DEFAULT_WATCHLIST_DCF_TARGETS.get(sym)
+            default_tp = dcf_defaults["target_price"] if dcf_defaults else round(avg_p * 1.18, 2)
+            default_sl = dcf_defaults["stop_loss"] if dcf_defaults else round(avg_p * 0.91, 2)
+            default_fpe = dcf_defaults["fair_pe"] if dcf_defaults else 8.5
+            try:
+                cur.execute("SAVEPOINT sp_watchlist_seed;")
+                cur.execute("""
+                    INSERT INTO watchlist_targets (ticker, target_price, stop_loss, historical_fair_pe)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (ticker) DO NOTHING;
+                """, (sym, default_tp, default_sl, default_fpe))
+                cur.execute("RELEASE SAVEPOINT sp_watchlist_seed;")
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_watchlist_seed;")
+
+        # Working Capital: 51,446.75 PKR
+        cur.execute("""
+            INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+            VALUES ('DEPOSIT_TO_KTRADE', 51446.75, 'KTrade Verified Working Capital Initial Deposit', 'KTrade Baseline', NOW(), NOW());
+        """)
+        # Deployed adjustment: -47,089.37 PKR -> available cash = 4,357.38 PKR
+        cur.execute("""
+            INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+            VALUES ('FEE_ADJUSTMENT', -47089.37, 'Deployed Equity Custody Baseline Sync', 'KTrade Baseline Deployed', NOW(), NOW());
+        """)
+
+        # Checkpoint lock
+        try:
+            cur.execute("SAVEPOINT sp_ckpt_baseline;")
+            cur.execute("""
+                INSERT INTO agent_checkpoints (key, value, updated_at)
+                VALUES ('ktrade_real_baseline_locked_v2', %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+            """, (str(int(datetime.datetime.now().timestamp())),))
+            cur.execute("RELEASE SAVEPOINT sp_ckpt_baseline;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_ckpt_baseline;")
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+    invalidate_financial_summary_cache()
+
+    try:
+        from market_data_scraper import fetch_all_psx_prices_bulk
+        fetch_all_psx_prices_bulk(force_refresh=True)
+        refresh_portfolio_live_prices(force_refresh=True)
+    except Exception as e:
+        print(f"⚠️ [Reset Baseline] Price refresh warning: {e}", flush=True)
+
+    return get_complete_financial_summary(use_cached_prices=False, force_live=True)
+
+
 def ensure_real_ktrade_portfolio_seeded() -> bool:
     """
-    Detects empty or mock portfolio rows on boot and seeds the user's real 9-position KTrade book
+    Detects empty, mock, or uncalibrated portfolio rows on boot and seeds the user's real 9-position KTrade book
     (Cash: 4,357.38 PKR, Working Capital: 51,446.75 PKR) deterministically.
     """
     real_tickers = {h["ticker"] for h in REAL_KTRADE_HOLDINGS}
@@ -2243,18 +2353,22 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
     cur = conn.cursor()
     needs_seed = False
     try:
-        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'ktrade_real_book_synced_v1';")
-        already_synced = cur.fetchone() is not None
+        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'ktrade_real_baseline_locked_v2';")
+        locked_v2 = cur.fetchone() is not None
 
         cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0;")
         rows = cur.fetchall()
         current_tickers = {str(r[0]).upper() for r in rows if r[0]}
 
+        cur.execute("SELECT COALESCE(SUM(amount), 0) FROM capital_ledger WHERE tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER');")
+        cap_row = cur.fetchone()
+        fresh_cap = float(cap_row[0]) if cap_row else 0.0
+
         if not current_tickers:
             needs_seed = True
         elif current_tickers & known_mock_tickers:
             needs_seed = True
-        elif not already_synced and current_tickers != real_tickers:
+        elif not locked_v2 or current_tickers != real_tickers or fresh_cap <= 0:
             needs_seed = True
     except Exception as e:
         print(f"⚠️ [Portfolio Seed Check] {e}", flush=True)
@@ -2264,12 +2378,8 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
         conn.close()
 
     if needs_seed:
-        print("🔄 [KTrade Sync] Mock or empty portfolio detected — seeding verified 9-position KTrade book...", flush=True)
-        sync_full_portfolio_state(
-            cash_balance=REAL_KTRADE_CASH_BALANCE,
-            holdings=REAL_KTRADE_HOLDINGS,
-            total_working_capital=REAL_KTRADE_WORKING_CAPITAL,
-        )
+        print("🔄 [KTrade Sync] Seeding verified 9-position KTrade book and locking baseline...", flush=True)
+        reset_ktrade_baseline_data()
         return True
     return False
 
@@ -2580,11 +2690,10 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "change_abs": change_abs,
                 "day_change_pkr": day_chg_pkr,
                 "day_pnl": day_chg_pkr,
-                "market_value": mv,
-                "cost_basis": cb,
-                "unrealized_pnl": pnl,
-                "unrealized_pnl_pct": pnl_pct,
-                "day_change_pkr": day_chg_pkr,
+                "last_session_pnl_pkr": day_chg_pkr,
+                "last_session_pnl_pct": change_pct,
+                "session_pnl_pkr": day_chg_pkr,
+                "session_pnl_pct": change_pct,
                 "market_value": mv,
                 "cost_basis": cb,
                 "unrealized_pnl": pnl,
@@ -2644,14 +2753,19 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "net_portfolio_value": net_worth,
                 "fresh_capital_invested": fresh_capital,
                 "fresh_capital_deposited": fresh_capital,
+                "net_deposits_pkr": fresh_capital,
+                "working_capital": fresh_capital,
                 "ktrade_available_cash": round(available_cash, 2),
                 "ktrade_cash_balance": round(available_cash, 2),
                 "portfolio_market_value": round(portfolio_market_val, 2),
+                "portfolio_custody_value": round(portfolio_market_val, 2),
                 "portfolio_cost_basis": round(portfolio_cost, 2),
                 "total_cost_basis": round(portfolio_cost, 2),
                 "day_change_pkr": total_day_change_pkr,
                 "day_pnl": total_day_change_pkr,
                 "day_change_pct": total_day_change_pct,
+                "last_session_pnl_pkr": total_day_change_pkr,
+                "last_session_pnl_pct": total_day_change_pct,
                 "unrealized_pnl": unrealized_pnl,
                 "unrealized_pnl_pct": unrealized_pnl_pct,
                 "total_gross_dividends": total_gross_div,

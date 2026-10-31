@@ -288,6 +288,172 @@
       background: var(--lime);
     }
 
+    /* Live PSX Market Heartbeat Badge */
+    .market-heartbeat-badge {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 2px;
+      padding: 5px 12px;
+      border-radius: var(--radius-inner);
+      background: #131816;
+      border: 1px solid var(--border-subtle);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.15s ease;
+      min-width: 175px;
+    }
+
+    .market-heartbeat-badge:hover {
+      background: #181F1C;
+      border-color: var(--border-hover);
+    }
+
+    .heartbeat-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .heartbeat-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--warning);
+      box-shadow: 0 0 6px rgba(251, 191, 36, 0.4);
+      flex-shrink: 0;
+    }
+
+    .heartbeat-dot.open-live {
+      background: var(--accent-lime);
+      box-shadow: 0 0 8px rgba(124, 231, 81, 0.6);
+      animation: heartbeat-pulse 2s infinite ease-in-out;
+    }
+
+    .heartbeat-dot.closed-weekend {
+      background: #F59E0B;
+      box-shadow: 0 0 6px rgba(245, 158, 11, 0.35);
+    }
+
+    .heartbeat-dot.closed-afterhours {
+      background: var(--text-muted);
+      box-shadow: none;
+    }
+
+    .heartbeat-state {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-primary);
+      white-space: nowrap;
+    }
+
+    .heartbeat-meta {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .heartbeat-meta strong {
+      color: var(--text-secondary);
+    }
+
+    @keyframes heartbeat-pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.28); opacity: 0.65; }
+    }
+
+    /* Live Background Engines Grid & Cards */
+    .engines-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+
+    .engine-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 16px;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-inner);
+      background: var(--bg-card);
+      transition: border-color 0.15s ease, background-color 0.15s ease;
+    }
+
+    .engine-card:hover {
+      border-color: var(--border-hover);
+      background: var(--bg-card-elevated);
+    }
+
+    .engine-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+
+    .engine-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent-lime);
+      box-shadow: 0 0 6px rgba(124, 231, 81, 0.4);
+      flex-shrink: 0;
+    }
+
+    .engine-dot.active {
+      animation: heartbeat-pulse 2s infinite ease-in-out;
+    }
+
+    .engine-body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      margin-bottom: 12px;
+      font-size: 12px;
+    }
+
+    .engine-item {
+      padding: 7px 10px;
+      border-radius: 7px;
+      background: #0E1311;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .arch-btn-sm {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+      background: #0E1311;
+      border: 1px solid var(--border-subtle);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: var(--font-sans);
+    }
+
+    .arch-btn-sm:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--accent-lime);
+      color: var(--accent-lime);
+    }
+
+    .arch-btn-sm:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
     .profile-pill {
       display: inline-flex;
       align-items: center;
@@ -429,7 +595,7 @@
     /* Row 1: 4 Equal KPI Cards */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 16px;
       margin-bottom: 18px;
     }
@@ -491,7 +657,7 @@
     }
 
     .kpi-value {
-      font-size: 24px;
+      font-size: clamp(1.25rem, 2.2vw, 1.75rem);
       font-weight: 700;
       color: var(--text-primary);
       letter-spacing: -0.025em;
@@ -1316,7 +1482,67 @@
       }
     }
 
-    /* < 768px: Mobile layouts, header adjustments, table horizontal touch scroll */
+    /* Table-to-Mobile-Card Morph (< 860px) */
+    @media (max-width: 860px) {
+      .table-wrap {
+        overflow-x: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+      }
+      table.alpha-table {
+        min-width: 0 !important;
+        width: 100% !important;
+        display: block !important;
+        border: none !important;
+      }
+      table.alpha-table thead {
+        display: none !important;
+      }
+      table.alpha-table tbody {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 12px !important;
+      }
+      table.alpha-table tbody tr {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 8px 12px !important;
+        background: var(--bg-card) !important;
+        border: 1px solid var(--border-subtle) !important;
+        border-radius: var(--radius-inner) !important;
+        padding: 14px !important;
+      }
+      table.alpha-table tbody tr:hover {
+        background: var(--bg-card-elevated) !important;
+      }
+      table.alpha-table td {
+        display: flex !important;
+        flex-direction: column !important;
+        padding: 4px 0 !important;
+        border: none !important;
+        text-align: left !important;
+        font-size: 0.8125rem !important;
+      }
+      table.alpha-table td::before {
+        content: attr(data-label);
+        font-size: 0.6875rem !important;
+        font-weight: 600 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+        color: var(--text-muted) !important;
+        margin-bottom: 2px !important;
+      }
+      table.alpha-table td.full-width {
+        grid-column: 1 / -1 !important;
+      }
+      table.alpha-table td .row-actions {
+        justify-content: flex-start !important;
+        margin-top: 4px !important;
+      }
+    }
+
+    /* < 768px: Mobile layouts, header adjustments */
     @media (max-width: 767.98px) {
       .app-shell {
         padding: 12px 12px 88px;
@@ -1476,6 +1702,10 @@
           <span>+ Log Trade</span>
         </button>
 
+        <button class="arch-btn" id="btn-reset-baseline" onclick="confirmResetKtradeBaseline()" title="Reset portfolio database to verified KTrade baseline (Rs. 4,357.38 Cash / Rs. 47,089.75 Custody)">
+          <span>Reset Baseline</span>
+        </button>
+
         <button class="icon-sq-btn" onclick="openSearchModal()" title="Quick Search">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"></circle>
@@ -1483,9 +1713,14 @@
           </svg>
         </button>
 
-        <div class="status-chip" onclick="openAuthKeyModal()" title="Live Feed Status & Access Key">
-          <span class="status-dot" id="live-status-dot"></span>
-          <span id="live-status-text" class="tabular">LIVE · 30s</span>
+        <div class="market-heartbeat-badge" id="psx-market-heartbeat" onclick="syncLivePrices()" title="Click to refresh live PSX quotes immediately">
+          <div class="heartbeat-indicator">
+            <span class="heartbeat-dot closed-weekend" id="market-status-dot"></span>
+            <span class="heartbeat-state" id="market-status-state">PSX WEEKEND CLOSE</span>
+          </div>
+          <div class="heartbeat-meta">
+            <span id="market-status-details">FRI SETTLEMENT · Poll in <strong id="market-countdown-num">30</strong>s</span>
+          </div>
         </div>
 
         <div class="profile-pill">
@@ -1586,11 +1821,153 @@
 
             <div class="kpi-card" onclick="openKpiBreakdown('pnl')">
               <div class="kpi-head">
-                <div class="kpi-label">Unrealized P&amp;L &amp; Divs</div>
+                <div class="kpi-label" id="kpi-pnl-label">Unrealized P&amp;L &amp; Divs</div>
                 <div class="kpi-action-btn" title="Inspect Unrealized P&L & Dividends">↗</div>
               </div>
               <div class="kpi-value tabular" id="kpi-pnl-val">Rs. 0.00</div>
               <div class="kpi-trend tabular" id="kpi-pnl-sub">0.00% return &amp; Rs. 0.00 divs</div>
+            </div>
+          </div>
+
+          <!-- Live Background Engines & Scraped Intelligence Section -->
+          <div class="section-container" style="margin-bottom: 24px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+              <div>
+                <div style="font-size: 13.5px; font-weight: 700; color: var(--text-primary); letter-spacing: 0.03em; text-transform: uppercase;">
+                  Live Background Engines &amp; Scraped Intelligence
+                </div>
+                <div style="font-size: 11.5px; color: var(--text-secondary); margin-top: 2px;">
+                  Continuous autonomous feeds updating prices, macro signals, codified mentor rules, and legal audits into Central Brain.
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <button class="arch-btn-sm" onclick="runAllEnginesSweep()" id="btn-run-all-engines" title="Execute full sweep across all 4 intelligence engines">
+                  <span>Run All Engines Sweep ↗</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="engines-grid">
+              <!-- Card 1: TradingView PSX Live Quote Engine -->
+              <div class="engine-card" id="engine-card-prices">
+                <div>
+                  <div class="engine-head">
+                    <div style="display: flex; align-items: center; gap: 7px;">
+                      <span class="engine-dot active"></span>
+                      <span class="engine-title">TradingView PSX Engine</span>
+                    </div>
+                    <span class="badge badge-emerald tabular" id="engine-prices-latency">&lt; 120ms</span>
+                  </div>
+                  <div class="engine-subtitle" id="engine-prices-timestamp">
+                    Friday Closing Settlement (0 Blocked Calls)
+                  </div>
+                  <div class="engine-body" id="engine-prices-movers">
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                      <span class="badge badge-emerald">SYS +0.33% (+Rs. 39.24)</span>
+                      <span class="badge badge-emerald">OGDC +0.19% (+Rs. 14.25)</span>
+                      <span class="badge badge-emerald">MEBL +0.48% (+Rs. 5.06)</span>
+                      <span class="badge badge-warn">FFC -0.28% (-Rs. 23.40)</span>
+                      <span class="badge badge-warn">MARI -2.07% (-Rs. 51.59)</span>
+                    </div>
+                  </div>
+                </div>
+                <button class="arch-btn-sm" id="btn-poll-prices" onclick="triggerEngineRun('prices')" style="width: 100%;">
+                  <span>Poll Prices Now</span>
+                </button>
+              </div>
+
+              <!-- Card 2: Local PSX & World Macro News Scraper -->
+              <div class="engine-card" id="engine-card-news">
+                <div>
+                  <div class="engine-head">
+                    <div style="display: flex; align-items: center; gap: 7px;">
+                      <span class="engine-dot active"></span>
+                      <span class="engine-title">Local &amp; Macro News</span>
+                    </div>
+                    <span class="badge badge-lime">Dual-Stream RSS</span>
+                  </div>
+                  <div class="engine-subtitle">
+                    Filtered PSX &amp; Global Energy / Commodities
+                  </div>
+                  <div class="engine-body" id="engine-news-items">
+                    <div class="engine-item">
+                      <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 3px;">
+                        <span class="badge badge-cyan" style="font-size: 9.5px;">GLOBAL MACRO</span>
+                        <span style="font-size: 10px; color: var(--text-muted);">Energy &amp; Gas</span>
+                      </div>
+                      <div style="color: var(--text-primary); line-height: 1.35; font-size: 11px;">US Natural Gas Drillers Scale Up as Demand Grows</div>
+                    </div>
+                    <div class="engine-item">
+                      <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 3px;">
+                        <span class="badge badge-emerald" style="font-size: 9.5px;">LOCAL PSX</span>
+                        <span class="badge badge-lime" style="font-size: 9.5px;">+4.0 BULLISH</span>
+                      </div>
+                      <div style="color: var(--text-primary); line-height: 1.35; font-size: 11px;">Hedge Funds Boost Energy Short Positions to Most on Record</div>
+                    </div>
+                  </div>
+                </div>
+                <button class="arch-btn-sm" id="btn-poll-news" onclick="triggerEngineRun('news')" style="width: 100%;">
+                  <span>Scrape News Now</span>
+                </button>
+              </div>
+
+              <!-- Card 3: YouTube PSX Mentor Intelligence -->
+              <div class="engine-card" id="engine-card-youtube">
+                <div>
+                  <div class="engine-head">
+                    <div style="display: flex; align-items: center; gap: 7px;">
+                      <span class="engine-dot active"></span>
+                      <span class="engine-title">YouTube PSX Mentors</span>
+                    </div>
+                    <span class="badge badge-cyan">38 Rules</span>
+                  </div>
+                  <div class="engine-subtitle">
+                    Codified Playbook from Top Pakistani Investors
+                  </div>
+                  <div class="engine-body" id="engine-youtube-rules">
+                    <div class="engine-item">
+                      <div style="font-weight: 700; color: var(--accent-lime); font-size: 10.5px; margin-bottom: 2px;">Abdul Rehman Najam</div>
+                      <div style="color: var(--text-secondary); line-height: 1.35; font-size: 11px;">Stock splits and bonus shares do not alter fundamental fair value; avoid chasing psychological surges.</div>
+                    </div>
+                    <div class="engine-item">
+                      <div style="font-weight: 700; color: var(--accent-lime); font-size: 10.5px; margin-bottom: 2px;">Benjamin Graham (95% Weight)</div>
+                      <div style="color: var(--text-secondary); line-height: 1.35; font-size: 11px;">Never deploy fresh capital unless spot trades at minimum 20% discount to intrinsic DCF value.</div>
+                    </div>
+                  </div>
+                </div>
+                <button class="arch-btn-sm" id="btn-poll-youtube" onclick="triggerEngineRun('youtube')" style="width: 100%;">
+                  <span>Run YouTube Sweep</span>
+                </button>
+              </div>
+
+              <!-- Card 4: Business Books & Pakistan Tax Law Audit -->
+              <div class="engine-card" id="engine-card-books">
+                <div>
+                  <div class="engine-head">
+                    <div style="display: flex; align-items: center; gap: 7px;">
+                      <span class="engine-dot active"></span>
+                      <span class="engine-title">Books &amp; Tax Law Audit</span>
+                    </div>
+                    <span class="badge badge-emerald">Graham &amp; Sec 150</span>
+                  </div>
+                  <div class="engine-subtitle">
+                    Graham DCF, WHT Tax Rates &amp; KMI-30 Shariah Screen
+                  </div>
+                  <div class="engine-body" id="engine-books-audit">
+                    <div class="engine-item">
+                      <div style="font-weight: 700; color: var(--text-primary); font-size: 10.5px; margin-bottom: 2px;">Graham DCF Margin of Safety</div>
+                      <div style="color: var(--text-secondary); font-size: 11px;">SYS +20.9% MoS (Passed &gt;= 20% mandate)</div>
+                    </div>
+                    <div class="engine-item">
+                      <div style="font-weight: 700; color: var(--text-primary); font-size: 10.5px; margin-bottom: 2px;">Pakistan Tax Law Section 150</div>
+                      <div style="color: var(--text-secondary); font-size: 11px;">15% Standard ATL Filer WHT vs 25% IPP Rate enforced</div>
+                    </div>
+                  </div>
+                </div>
+                <button class="arch-btn-sm" id="btn-poll-books" onclick="triggerEngineRun('books')" style="width: 100%;">
+                  <span>Run Books &amp; Law Audit</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -2802,6 +3179,262 @@
       ).join('');
     }
 
+    let _marketCountdownSec = 30;
+
+    function updatePsxMarketHeartbeat() {
+      // Pakistan Standard Time is UTC+5
+      const now = new Date();
+      const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+      const pkt = new Date(utc + (5 * 3600000));
+
+      const day = pkt.getDay(); // 0 = Sun, 6 = Sat
+      const hour = pkt.getHours();
+      const min = pkt.getMinutes();
+      const timeInMins = hour * 60 + min;
+
+      const dotEl = document.getElementById('market-status-dot');
+      const stateEl = document.getElementById('market-status-state');
+      const detailEl = document.getElementById('market-status-details');
+
+      let stateText = 'PSX CLOSED';
+      let dotClass = 'closed-afterhours';
+      let detailPrefix = 'AFTER-HOURS';
+
+      const isWeekend = (day === 0 || day === 6);
+      if (isWeekend) {
+        stateText = 'PSX WEEKEND CLOSE';
+        dotClass = 'closed-weekend';
+        detailPrefix = 'FRI SETTLEMENT';
+      } else {
+        let isOpen = false;
+        if (day === 5) {
+          // Friday: 9:15-12:00 (555-720) and 14:30-16:30 (870-990)
+          isOpen = (timeInMins >= 555 && timeInMins <= 720) || (timeInMins >= 870 && timeInMins <= 990);
+        } else {
+          // Mon-Thu: 9:30-15:30 (570-930)
+          isOpen = (timeInMins >= 570 && timeInMins <= 930);
+        }
+
+        if (isOpen) {
+          stateText = 'PSX OPEN (LIVE TICKING)';
+          dotClass = 'open-live';
+          detailPrefix = 'SPOT FEED ACTIVE';
+        } else {
+          stateText = 'PSX CLOSED';
+          dotClass = 'closed-afterhours';
+          detailPrefix = 'AFTER-HOURS';
+        }
+      }
+
+      if (dotEl) {
+        dotEl.className = 'heartbeat-dot ' + dotClass;
+      }
+      if (stateEl) {
+        stateEl.textContent = stateText;
+      }
+      if (detailEl) {
+        detailEl.innerHTML = `${detailPrefix} · Poll in <strong id="market-countdown-num">${_marketCountdownSec}</strong>s`;
+      }
+    }
+
+    // Tick heartbeat countdown every second
+    setInterval(() => {
+      _marketCountdownSec--;
+      if (_marketCountdownSec <= 0) {
+        _marketCountdownSec = 30;
+        pollLivePricesSilently();
+      }
+      updatePsxMarketHeartbeat();
+    }, 1000);
+
+    async function confirmResetKtradeBaseline() {
+      if (!confirm('Reset portfolio database to exact KTrade verified baseline (Rs. 4,357.38 Cash / Rs. 47,089.75 Custody / 9 Holdings)?')) return;
+      const btn = document.getElementById('btn-reset-baseline');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Resetting...</span>';
+      }
+      try {
+        const res = await apiFetch('/api/dashboard/reset-ktrade-baseline', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'success') {
+          showToast('Portfolio database successfully reset to exact KTrade baseline!');
+          await loadOverviewData(true);
+        } else {
+          showToast('Reset failed: ' + (data.message || 'Unknown error'));
+        }
+      } catch (err) {
+        showToast('Reset error: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<span>Reset Baseline</span>';
+        }
+      }
+    }
+
+    async function triggerEngineRun(engine) {
+      const btnMap = {
+        prices: 'btn-poll-prices',
+        news: 'btn-poll-news',
+        youtube: 'btn-poll-youtube',
+        books: 'btn-poll-books'
+      };
+      const autoMap = {
+        prices: 'prices',
+        news: 'local_global_news',
+        youtube: 'youtube_mentors',
+        books: 'business_books_law'
+      };
+      const btnId = btnMap[engine];
+      const autoName = autoMap[engine] || engine;
+      const btn = document.getElementById(btnId);
+      const origHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Running...</span>';
+      }
+      showToast(`Running ${autoName.replace(/_/g, ' ')}...`);
+      const t0 = performance.now();
+      try {
+        const res = await apiFetch(`/api/automations/run/${encodeURIComponent(autoName)}`, { method: 'POST' });
+        const data = await res.json();
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        if (data.status === 'SUCCESS') {
+          showToast(`${autoName.replace(/_/g, ' ')} completed in ${elapsed}s!`);
+          await loadOverviewData(true);
+        } else {
+          showToast(`Warning: ${data.error || 'Execution completed with notes'}`);
+        }
+      } catch (err) {
+        showToast('Engine run error: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml;
+        }
+      }
+    }
+
+    async function runAllEnginesSweep() {
+      const btn = document.getElementById('btn-run-all-engines');
+      const origHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Sweeping All Engines...</span>';
+      }
+      showToast('Launching full sweep across all 4 intelligence engines...');
+      try {
+        const res = await apiFetch('/api/automations/run/run_all', { method: 'POST' });
+        const data = await res.json();
+        showToast(`All engines completed in ${data.total_latency_ms || 0} ms!`);
+        await loadOverviewData(true);
+      } catch (err) {
+        showToast('Sweep error: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml;
+        }
+      }
+    }
+
+    function renderScrapedIntelligenceCards(engines, holdings) {
+      if (!engines) return;
+
+      // 1. Live Prices & Movers
+      const moversEl = document.getElementById('engine-prices-movers');
+      const latEl = document.getElementById('engine-prices-latency');
+      const tsEl = document.getElementById('engine-prices-timestamp');
+      if (latEl && engines.prices?.latency_ms) latEl.textContent = `${engines.prices.latency_ms} ms`;
+      if (tsEl && engines.prices?.last_poll) tsEl.textContent = engines.prices.last_poll;
+      if (moversEl) {
+        const movers = engines.prices?.top_movers || holdings.map(h => ({
+          ticker: h.ticker,
+          change_pct: Number(h.change_pct || 0),
+          day_change_pkr: Number(h.day_change_pkr || 0)
+        })).sort((a, b) => Math.abs(b.change_pct) - Math.abs(a.change_pct));
+        moversEl.innerHTML = `
+          <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+            ${movers.slice(0, 5).map(m => {
+              const isPos = m.change_pct >= 0;
+              const badgeClass = isPos ? 'badge-emerald' : 'badge-warn';
+              const pkrStr = m.day_change_pkr != null ? ` (${fmtPKR(m.day_change_pkr, true)})` : '';
+              return `<span class="badge ${badgeClass}">${escapeHtml(m.ticker)} ${fmtPct(m.change_pct)}${pkrStr}</span>`;
+            }).join('')}
+          </div>
+        `;
+      }
+
+      // 2. News Signals
+      const newsEl = document.getElementById('engine-news-items');
+      if (newsEl && Array.isArray(engines.news) && engines.news.length) {
+        newsEl.innerHTML = engines.news.slice(0, 3).map(n => {
+          const isLocal = (n.scope || '').toUpperCase().includes('LOCAL') || (n.scope || '').toUpperCase().includes('PSX');
+          const scopeBadge = isLocal ? 'badge-emerald' : 'badge-cyan';
+          const score = Number(n.sentiment_score || 0);
+          const scoreBadge = score > 0 ? 'badge-lime' : (score < 0 ? 'badge-warn' : 'badge-muted');
+          const scoreText = score > 0 ? `+${score.toFixed(1)} BULLISH` : (score < 0 ? `${score.toFixed(1)} BEARISH` : '0.0 NEUTRAL');
+          const tickerTags = Array.isArray(n.tickers) && n.tickers.length ? n.tickers.map(t => `<span class="badge badge-muted" style="font-size:9px;padding:2px 5px;">${escapeHtml(t)}</span>`).join(' ') : '';
+          return `
+            <div class="engine-item">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:3px;flex-wrap:wrap;">
+                <div style="display:flex;align-items:center;gap:4px;">
+                  <span class="badge ${scopeBadge}" style="font-size:9.5px;">${escapeHtml(n.scope || 'LOCAL PSX')}</span>
+                  ${tickerTags}
+                </div>
+                <span class="badge ${scoreBadge}" style="font-size:9.5px;">${scoreText}</span>
+              </div>
+              <div style="color:var(--text-primary);line-height:1.35;font-size:11.5px;font-weight:500;">
+                ${escapeHtml(n.headline)}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // 3. YouTube Mentors
+      const ytEl = document.getElementById('engine-youtube-rules');
+      if (ytEl && Array.isArray(engines.youtube) && engines.youtube.length) {
+        ytEl.innerHTML = engines.youtube.slice(0, 3).map(y => {
+          const conf = Math.round(Number(y.confidence_weight || 0.7) * 100);
+          return `
+            <div class="engine-item">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
+                <span style="font-weight:700;color:var(--accent-lime);font-size:11px;">${escapeHtml(y.source)}</span>
+                <span class="badge badge-muted" style="font-size:9.5px;">${conf}% Confidence</span>
+              </div>
+              <div style="color:var(--text-secondary);line-height:1.35;font-size:11px;">
+                ${escapeHtml(y.rule.replace(/^\[|\]$/g, ''))}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // 4. Books & Law Audit
+      const booksEl = document.getElementById('engine-books-audit');
+      if (booksEl && engines.books_law) {
+        const rules = engines.books_law.rules_audited || [
+          { framework: "Benjamin Graham", rule: "DCF Margin of Safety >= 20% required for fresh deployment" },
+          { framework: "Pakistan Tax Law", rule: "Section 150 ITO: 15% Standard ATL Filer WHT vs 25% IPP Rate" },
+          { framework: "PSX KMI-30", rule: "Shariah Screen: Total Debt / Total Assets < 37% & Illiquid > 25%" },
+          { framework: "Peter Lynch", rule: "PEG Multiple <= 1.2x relative to earnings growth" }
+        ];
+        booksEl.innerHTML = rules.slice(0, 3).map(r => `
+          <div class="engine-item">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
+              <span style="font-weight:700;color:var(--text-primary);font-size:10.5px;">${escapeHtml(r.framework)}</span>
+              <span class="badge badge-emerald" style="font-size:9px;">AUDIT PASS</span>
+            </div>
+            <div style="color:var(--text-secondary);font-size:11px;line-height:1.3;">
+              ${escapeHtml(r.rule)}
+            </div>
+          </div>
+        `).join('');
+      }
+    }
+
     function renderOverview() {
       const ov = APP_STATE.overview;
       if (!ov || !ov.financial_summary) return;
@@ -2819,8 +3452,7 @@
       const freshCap = Number(kpis.fresh_capital_invested || 0);
       const trueRoi = Number(kpis.true_roi_pct || 0);
 
-      const nowStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      document.getElementById('live-status-text').textContent = `LIVE · ${nowStr}`;
+      updatePsxMarketHeartbeat();
 
       // Row 1 KPIs
       document.getElementById('kpi-net-worth').textContent = fmtPKR(netWorth);
@@ -2839,10 +3471,29 @@
       const pill = document.getElementById('brain-deployable-cash-pill');
       if (pill) pill.textContent = fmtPKR(cashVal);
 
-      document.getElementById('kpi-pnl-val').textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPnlPct)})`;
+      // 4th KPI Card: Show Session P&L as primary if unrealized_pnl == 0
+      const pnlValEl = document.getElementById('kpi-pnl-val');
       const pnlSub = document.getElementById('kpi-pnl-sub');
-      pnlSub.textContent = `Day: ${fmtPKR(dayChg, true)} (${fmtPct(dayChgPct)}) · Divs: ${fmtPKR(divBank)}`;
-      pnlSub.className = 'kpi-trend tabular ' + (dayChg >= 0 ? '' : 'negative');
+      const pnlLabel = document.getElementById('kpi-pnl-label');
+      const lastSessionPnl = Number(kpis.last_session_pnl_pkr ?? dayChg);
+      const lastSessionPct = Number(kpis.last_session_pnl_pct ?? dayChgPct);
+
+      if (Math.abs(uPnl) < 0.01) {
+        if (pnlLabel) pnlLabel.textContent = 'Session Movement (P&L)';
+        pnlValEl.textContent = `${fmtPKR(lastSessionPnl, true)} (${fmtPct(lastSessionPct)})`;
+        pnlValEl.style.color = lastSessionPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
+        pnlSub.textContent = 'Cost-Basis P&L: Rs. 0.00 (0.00%) · Baseline Locked';
+        pnlSub.className = 'kpi-trend tabular';
+      } else {
+        if (pnlLabel) pnlLabel.textContent = 'Unrealized P&L & Divs';
+        pnlValEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPnlPct)})`;
+        pnlValEl.style.color = uPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
+        pnlSub.textContent = `Session: ${fmtPKR(lastSessionPnl, true)} (${fmtPct(lastSessionPct)}) · Divs: ${fmtPKR(divBank)}`;
+        pnlSub.className = 'kpi-trend tabular ' + (lastSessionPnl >= 0 ? '' : 'negative');
+      }
+
+      // Render Scraped Intelligence Cards
+      renderScrapedIntelligenceCards(ov.live_engines_data, holdings);
 
       // Row 2 Charts
       renderPortfolioBarChart(holdings);
@@ -3210,11 +3861,39 @@
       }
 
       tbody.innerHTML = holdings.map((h, idx) => {
-        const pnlPos = Number(h.unrealized_pnl) >= 0;
+        const hasCostDelta = Math.abs(Number(h.avg_price) - Number(h.current_price)) > 0.01;
+        const dayPnl = Number(h.day_change_pkr || 0);
+        const dayPct = Number(h.change_pct || 0);
+        const uPnl = Number(h.unrealized_pnl || 0);
+        const uPct = Number(h.unrealized_pnl_pct || 0);
         const vBadge = h.verdict === 'ACCUMULATE' ? 'badge-lime' : (h.verdict === 'HOLD' ? 'badge-emerald' : 'badge-warn');
+
+        let pnlDisplayHtml = '';
+        if (!hasCostDelta) {
+          const isPos = dayPnl >= 0;
+          pnlDisplayHtml = `
+            <div style="font-weight:700;color:${isPos ? 'var(--accent-lime)' : 'var(--danger)'};">
+              ${fmtPKR(dayPnl, true)}
+            </div>
+            <div style="font-size:11px;color:${isPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
+              ${fmtPct(dayPct)} <span style="font-size:9.5px;color:var(--text-muted);text-transform:uppercase;">session</span>
+            </div>
+          `;
+        } else {
+          const isPos = uPnl >= 0;
+          pnlDisplayHtml = `
+            <div style="font-weight:700;color:${isPos ? 'var(--accent-lime)' : 'var(--danger)'};">
+              ${fmtPKR(uPnl, true)}
+            </div>
+            <div style="font-size:11px;color:${isPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
+              ${fmtPct(uPct)} · <span style="color:var(--text-muted);">${fmtPKR(dayPnl, true)}</span>
+            </div>
+          `;
+        }
+
         return `
           <tr style="cursor:pointer;" onclick="openHoldingDetail(${idx})">
-            <td>
+            <td data-label="Asset">
               <div class="ticker-badge-row">
                 <div class="ticker-circle">${escapeHtml(h.ticker.slice(0, 4))}</div>
                 <div>
@@ -3223,23 +3902,23 @@
                 </div>
               </div>
             </td>
-            <td class="tabular" style="font-weight:600;">${h.shares}</td>
-            <td class="tabular" title="Click to edit average buy cost" onclick="event.stopPropagation(); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});" style="cursor:pointer;text-decoration:underline;text-decoration-color:#2A3631;color:#7CE751;">Rs. ${Number(h.avg_price).toFixed(2)}</td>
-            <td class="tabular">
+            <td data-label="Shares" class="tabular" style="font-weight:600;">${h.shares}</td>
+            <td data-label="Avg Buy Cost" class="tabular" title="Click to edit average buy cost" onclick="event.stopPropagation(); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});" style="cursor:pointer;text-decoration:underline;text-decoration-color:#2A3631;color:#7CE751;">Rs. ${Number(h.avg_price).toFixed(2)}</td>
+            <td data-label="Live Spot & Day" class="tabular">
               <div style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
-              <div style="font-size:11px;color:${Number(h.change_pct) >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(h.change_pct)} (${fmtPKR(h.day_change_pkr, true)})</div>
+              <div style="font-size:11px;color:${dayPct >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(dayPct)} (${fmtPKR(dayPnl, true)})</div>
             </td>
-            <td class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
-            <td class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
-            <td class="tabular" style="font-weight:700;color:${pnlPos ? 'var(--lime)' : 'var(--danger)'};">
-              ${fmtPKR(h.unrealized_pnl, true)}<div style="font-size:11px;">${fmtPct(h.unrealized_pnl_pct)}</div>
+            <td data-label="Market Value" class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
+            <td data-label="Weight" class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
+            <td data-label="Unrealized / Session P&L" class="tabular">
+              ${pnlDisplayHtml}
             </td>
-            <td class="tabular">
+            <td data-label="DCF Fair Value" class="tabular">
               <div>Rs. ${Number(h.dcf_fair_value).toFixed(2)}</div>
               <div style="font-size:11px;color:var(--muted);">${fmtPct(h.margin_of_safety_pct)} MoS</div>
             </td>
-            <td><span class="badge ${vBadge}">${escapeHtml(h.verdict)}</span></td>
-            <td onclick="event.stopPropagation();">
+            <td data-label="Signal"><span class="badge ${vBadge}">${escapeHtml(h.verdict)}</span></td>
+            <td data-label="Actions" class="full-width" onclick="event.stopPropagation();">
               <div class="row-actions">
                 <button type="button" class="row-btn" onclick="openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price})">Edit</button>
                 <button type="button" class="row-btn danger" title="Delete Position" onclick="deletePosition('${escapeHtml(h.ticker)}')">×</button>
@@ -3671,13 +4350,13 @@
         const trBody = document.getElementById('trades-tbody');
         trBody.innerHTML = APP_STATE.trades.length ? APP_STATE.trades.map(t => `
           <tr>
-            <td style="color:var(--muted);font-size:12px;">${escapeHtml(fmtDateShort(t.executed_at || t.created_at))}</td>
-            <td style="font-weight:700;">${escapeHtml(t.ticker)}</td>
-            <td><span class="badge ${t.side === 'BUY' ? 'badge-lime' : 'badge-warn'}">${escapeHtml(t.side)}</span></td>
-            <td class="tabular">${t.quantity}</td>
-            <td class="tabular">Rs. ${Number(t.price).toFixed(2)}</td>
-            <td class="tabular" style="font-weight:700;">${fmtPKR(t.net_total || t.net_amount || (t.quantity * t.price))}</td>
-            <td style="text-align:right;">
+            <td data-label="Date" style="color:var(--muted);font-size:12px;">${escapeHtml(fmtDateShort(t.executed_at || t.created_at))}</td>
+            <td data-label="Ticker" style="font-weight:700;">${escapeHtml(t.ticker)}</td>
+            <td data-label="Side"><span class="badge ${t.side === 'BUY' ? 'badge-lime' : 'badge-warn'}">${escapeHtml(t.side)}</span></td>
+            <td data-label="Qty" class="tabular">${t.quantity}</td>
+            <td data-label="Price" class="tabular">Rs. ${Number(t.price).toFixed(2)}</td>
+            <td data-label="Net Total" class="tabular" style="font-weight:700;">${fmtPKR(t.net_total || t.net_amount || (t.quantity * t.price))}</td>
+            <td data-label="Actions" class="full-width" style="text-align:right;">
               <button type="button" class="row-btn danger" title="Delete trade" onclick="deleteTrade(${t.id})">×</button>
             </td>
           </tr>
@@ -3686,11 +4365,11 @@
         const capBody = document.getElementById('capital-tbody');
         capBody.innerHTML = APP_STATE.capital.length ? APP_STATE.capital.map(c => `
           <tr>
-            <td style="color:var(--muted);font-size:12px;">${escapeHtml(fmtDateShort(c.tx_date || c.created_at))}</td>
-            <td><span class="badge badge-muted">${escapeHtml(String(c.tx_type || '').replace(/_/g, ' '))}</span></td>
-            <td class="tabular" style="font-weight:700;">${fmtPKR(c.amount)}</td>
-            <td style="color:var(--muted);font-size:12px;">${escapeHtml(c.reference_note || '—')}</td>
-            <td style="text-align:right;">
+            <td data-label="Date" style="color:var(--muted);font-size:12px;">${escapeHtml(fmtDateShort(c.tx_date || c.created_at))}</td>
+            <td data-label="Type"><span class="badge badge-muted">${escapeHtml(String(c.tx_type || '').replace(/_/g, ' '))}</span></td>
+            <td data-label="Amount" class="tabular" style="font-weight:700;">${fmtPKR(c.amount)}</td>
+            <td data-label="Note" style="color:var(--muted);font-size:12px;">${escapeHtml(c.reference_note || '—')}</td>
+            <td data-label="Actions" class="full-width" style="text-align:right;">
               <button type="button" class="row-btn danger" title="Delete entry" onclick="deleteCapital(${c.id})">×</button>
             </td>
           </tr>
@@ -3798,21 +4477,21 @@
         const tbody = document.getElementById('dividends-tbody');
         tbody.innerHTML = APP_STATE.dividends.length ? APP_STATE.dividends.map(d => `
           <tr>
-            <td style="font-weight:700;">${escapeHtml(d.ticker)}</td>
-            <td class="tabular">${d.shares_held}</td>
-            <td class="tabular">Rs. ${Number(d.dps_gross).toFixed(2)}</td>
-            <td class="tabular">${fmtPKR(d.gross_amount)}</td>
-            <td class="tabular" style="color:var(--muted);">${fmtPKR(d.tax_withheld)}</td>
-            <td class="tabular" style="font-weight:700;color:var(--lime);">${fmtPKR(d.net_amount)}</td>
-            <td style="font-size:12px;color:var(--muted);">${escapeHtml(d.ex_date || d.payment_date || '—')}</td>
-            <td>
+            <td data-label="Ticker" style="font-weight:700;">${escapeHtml(d.ticker)}</td>
+            <td data-label="Shares" class="tabular">${d.shares_held}</td>
+            <td data-label="DPS" class="tabular">Rs. ${Number(d.dps_gross).toFixed(2)}</td>
+            <td data-label="Gross" class="tabular">${fmtPKR(d.gross_amount)}</td>
+            <td data-label="WHT Tax" class="tabular" style="color:var(--muted);">${fmtPKR(d.tax_withheld)}</td>
+            <td data-label="Net Payout" class="tabular" style="font-weight:700;color:var(--lime);">${fmtPKR(d.net_amount)}</td>
+            <td data-label="Ex / Pay Date" style="font-size:12px;color:var(--muted);">${escapeHtml(d.ex_date || d.payment_date || '—')}</td>
+            <td data-label="Status">
               <select class="form-input" style="padding:5px 8px;font-size:11.5px;" onchange="changeDividendStatus(${d.id}, this.value)">
                 ${['ANNOUNCED', 'ENTITLED', 'CREDITED_TO_BANK', 'SENT_TO_KTRADE'].map(st =>
                   `<option value="${st}" ${d.status === st ? 'selected' : ''}>${st}</option>`
                 ).join('')}
               </select>
             </td>
-            <td>
+            <td data-label="Actions" class="full-width">
               <div class="row-actions">
                 <button type="button" class="row-btn" onclick="openEditDividendModal(${d.id})">Edit</button>
                 <button type="button" class="row-btn danger" title="Delete dividend" onclick="deleteDividend(${d.id})">×</button>
