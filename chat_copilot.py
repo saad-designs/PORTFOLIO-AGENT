@@ -45,7 +45,7 @@ Your job is to parse the user's natural language updates, questions, OR uploaded
 
 You must respond ONLY with a valid JSON object matching this schema:
 {
-  "action_type": "SYNC_PORTFOLIO" | "BUY_STOCK" | "SELL_STOCK" | "LOG_KTRADE_STATEMENT" | "DEPOSIT_CASH" | "WITHDRAW_CASH" | "LOG_DIVIDEND_IN_BANK" | "LOG_DIVIDEND_ENTITLED" | "TRANSFER_DIVIDEND_TO_KTRADE" | "LOG_RESEARCH_REPORT" | "CHART_ANALYSIS" | "UPDATE_PLAYBOOK" | "GENERAL_QUERY",
+  "action_type": "CENTRAL_BRAIN_ALLOCATE" | "SYNC_PORTFOLIO" | "BUY_STOCK" | "SELL_STOCK" | "LOG_KTRADE_STATEMENT" | "DEPOSIT_CASH" | "WITHDRAW_CASH" | "LOG_DIVIDEND_IN_BANK" | "LOG_DIVIDEND_ENTITLED" | "TRANSFER_DIVIDEND_TO_KTRADE" | "LOG_RESEARCH_REPORT" | "CHART_ANALYSIS" | "UPDATE_PLAYBOOK" | "GENERAL_QUERY",
   "action_data": { ... },
   "additional_actions": [
     {"action_type": "...", "action_data": { ... }}
@@ -55,7 +55,10 @@ You must respond ONLY with a valid JSON object matching this schema:
 (Note: "additional_actions" is optional—include it when the user uploads multiple files that warrant multiple distinct actions, such as two broker reports, multiple chart screenshots, or a KTrade PDF statement alongside a chart screenshot.)
 
 ACTION DEFINITIONS:
-0. SYNC_PORTFOLIO:
+0. CENTRAL_BRAIN_ALLOCATE:
+   - When the user asks what stock to buy, what to allocate capital to, or states they can deposit or deploy Rs. X (e.g. "What should I buy next?", "I have Rs. 10,000 what to buy?", "I can deposit 25k where should I put it?", "Run central brain decision", "What to accumulate next?").
+   - action_data: {"deposit_amount": 10000.0, "notes": "Capital allocation query"}
+1. SYNC_PORTFOLIO:
    - Bulk portfolio reset & custody synchronization when the user pastes or uploads their full KTrade holdings snapshot, asks to replace mock/stale rows, or asks to synchronize their exact holdings and cash balance in one atomic transaction.
    - action_data: {
        "cash_balance": 4357.38,
@@ -127,6 +130,7 @@ ACTION DEFINITIONS:
    - action_data: {}
 
 CRITICAL RULES:
+- STRICT CAPITAL ACCUMULATION MANDATE (NO SELLING): The portfolio is strictly in Buy-Only Capital Accumulation Mode. Never advise selling or trimming core positions. All allocation and capital deployment directives must be strictly BUY.
 - Output STRICT JSON only. Do not wrap in markdown or prefix with text.
 - Do NOT use emojis in your reply—maintain crisp, institutional desk tone with exact PKR figures and percentages.
 - Be exact with PSX ticker symbols (SYS, HUBC, LUCK, FFC, EFERT, FABL, MEBL, MARI, OGDC, PPL, PSO, HBL, UBL, MCB, SAZEW, etc.).
@@ -559,6 +563,51 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
                     content=rule_text,
                     metadata={"source": src_name, "confidence_weight": cw_val},
                 )
+
+        elif action_type == "CENTRAL_BRAIN_ALLOCATE":
+            from central_brain import make_capital_deployment_decision
+            dep_amt = float(action_data.get("deposit_amount") or 0.0)
+            brain_res = make_capital_deployment_decision(deposit_amount=dep_amt, quick_mode=True)
+            winner = brain_res.get("selected_ticker")
+            shs = brain_res.get("recommended_shares")
+            px = brain_res.get("limit_price")
+            verdict = brain_res.get("executive_verdict")
+            why = brain_res.get("why_this_stock", {})
+            rejections = brain_res.get("rejected_alternatives", [])
+            rejection_str = "\n".join([f"- **Rank #{r.get('rank')} {r.get('ticker')}**: {r.get('reason')}" for r in rejections])
+
+            reply_text = (
+                f"### Central Director Brain Decision\n\n"
+                f"**{verdict}**\n\n"
+                f"#### Three-Pillar Quantitative Proof:\n"
+                f"1. **Valuation & Margin of Safety:** {why.get('pillar_1_valuation')}\n\n"
+                f"2. **Portfolio Weight & Yield Impact:** {why.get('pillar_2_weight_yield')}\n\n"
+                f"3. **Macro & Institutional Catalysts:** {why.get('pillar_3_macro_catalysts')}\n\n"
+                f"#### Rejected Alternatives Audit:\n"
+                f"{rejection_str}\n\n"
+                f"*Mandate: Capital Accumulation Mode (Buy-Only). All figures derived deterministically from live TradingView & DCF models.*"
+            )
+            actions_taken.append({
+                "type": "CENTRAL_BRAIN",
+                "label": f"ALLOCATION DIRECTIVE // BUY {shs} {winner} @ {px:,.2f}",
+                "details": f"Total: Rs. {brain_res.get('total_allocation_pkr', 0):,.2f}",
+                "status": "COMPLETED"
+            })
+
+    # Natural language fallback detection for allocation queries
+    alloc_trigger_match = re.search(r'\b(what\s+to\s+buy|what\s+should\s+i\s+buy|where\s+should\s+i\s+invest|which\s+stock|where\s+to\s+put|central\s+brain|deposit\s+rs|deposit\s+\d+|buy\s+with\s+\d+)\b', persisted_user_msg, re.IGNORECASE)
+    if primary_action_type == "GENERAL_QUERY" and alloc_trigger_match:
+        amt_match = re.search(r'(?:rs\.?|pkr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*(k|thousand)?', persisted_user_msg, re.IGNORECASE)
+        dep_amt = 0.0
+        if amt_match:
+            try:
+                num_str = amt_match.group(1).replace(",", "")
+                mult = 1000.0 if amt_match.group(2) else 1.0
+                dep_amt = float(num_str) * mult
+            except Exception:
+                dep_amt = 0.0
+        primary_action_type = "CENTRAL_BRAIN_ALLOCATE"
+        primary_action_data = {"deposit_amount": dep_amt}
 
     action_queue: List[tuple] = []
     if isinstance(parsed.get("actions"), list):

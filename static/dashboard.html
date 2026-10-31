@@ -414,36 +414,28 @@
       background: #161B1A;
     }
 
-    .kpi-cutout-wrap {
-      position: absolute;
-      top: -1px;
-      right: -1px;
-      width: 50px;
-      height: 50px;
-      background: var(--bg);
-      border-bottom-left-radius: 20px;
-      border-left: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      display: grid;
-      place-items: center;
-      padding: 4px 0 0 4px;
+    .kpi-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
     }
 
-    .kpi-cutout-btn {
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      background: #161C1A;
-      border: 1px solid #24302B;
-      color: var(--text);
-      font-size: 14px;
+    .kpi-action-btn {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      font-size: 13px;
       font-weight: 600;
       display: grid;
       place-items: center;
       transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
     }
 
-    .kpi-card:hover .kpi-cutout-btn {
+    .kpi-card:hover .kpi-action-btn {
       background: var(--lime);
       border-color: var(--lime);
       color: #0B0E0D;
@@ -453,8 +445,7 @@
       font-size: 12.5px;
       font-weight: 600;
       color: var(--muted);
-      padding-right: 48px;
-      margin-bottom: 12px;
+      margin-bottom: 0;
     }
 
     .kpi-value {
@@ -1140,7 +1131,7 @@
         </div>
         <div class="brand-text-col">
           <span class="brand-name">Portfolio Manager</span>
-          <span class="brand-badge">PSX QUANT</span>
+          <span class="brand-badge">PSX CENTRAL BRAIN</span>
         </div>
       </div>
 
@@ -1154,8 +1145,16 @@
       </nav>
 
       <div class="header-actions">
-        <button class="arch-btn" id="btn-header-sync-prices" onclick="syncLivePrices()" title="Refresh Live PSX Quotes">
-          <span>Sync Prices</span>
+        <button class="arch-btn" id="btn-header-sync-prices" onclick="syncLivePrices()" title="Refresh Live PSX Quotes via TradingView">
+          <span>Sync Live Prices</span>
+        </button>
+
+        <button class="arch-btn" id="btn-header-deploy-capital" onclick="scrollToCentralBrain()" title="Deploy Capital via Central Director Brain">
+          <span>Deploy Capital</span>
+        </button>
+
+        <button class="arch-btn" id="btn-header-verify-system" onclick="openSystemVerifyModal()" title="Run System & Feeder Verification Suite">
+          <span>Test System</span>
         </button>
 
         <button class="arch-btn" id="btn-git-pull" onclick="triggerGitPullUpdate()" title="Zero-SSH Git Pull from origin/main">
@@ -1245,42 +1244,129 @@
             </div>
           </div>
 
-          <!-- Row 1: 4 Equal KPI Cards -->
+          <!-- Row 1: 4 Equal KPI Cards (Clean Seamless Header, Zero Cutouts) -->
           <div class="kpi-grid">
             <div class="kpi-card" onclick="openKpiBreakdown('net_worth')">
-              <div class="kpi-cutout-wrap">
-                <button class="kpi-cutout-btn" type="button" aria-label="Inspect Total Net Worth">↗</button>
+              <div class="kpi-head">
+                <div class="kpi-label">Total Net Worth</div>
+                <div class="kpi-action-btn" title="Inspect Total Net Worth">↗</div>
               </div>
-              <div class="kpi-label">Total Net Worth</div>
               <div class="kpi-value tabular" id="kpi-net-worth">Rs. 51,447.13</div>
-              <div class="kpi-trend tabular" id="kpi-net-worth-sub">↗ Custody + KTrade Cash</div>
+              <div class="kpi-trend tabular" id="kpi-net-worth-sub">Custody + KTrade Cash</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('custody')">
-              <div class="kpi-cutout-wrap">
-                <button class="kpi-cutout-btn" type="button" aria-label="Inspect Custody Market Value">↗</button>
+              <div class="kpi-head">
+                <div class="kpi-label">Custody Market Value</div>
+                <div class="kpi-action-btn" title="Inspect Custody Market Value">↗</div>
               </div>
-              <div class="kpi-label">Custody Market Value</div>
               <div class="kpi-value tabular" id="kpi-custody-val">Rs. 47,089.75</div>
               <div class="kpi-trend tabular" id="kpi-custody-sub">Day: +Rs. 0.00 (0.00%)</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('cash')">
-              <div class="kpi-cutout-wrap">
-                <button class="kpi-cutout-btn" type="button" aria-label="Inspect Cash Available">↗</button>
+              <div class="kpi-head">
+                <div class="kpi-label">Cash Available</div>
+                <div class="kpi-action-btn" title="Inspect Cash Available">↗</div>
               </div>
-              <div class="kpi-label">Cash Available</div>
               <div class="kpi-value tabular" id="kpi-cash-val">Rs. 4,357.38</div>
-              <div class="kpi-trend tabular" id="kpi-cash-sub">↗ Safe to deploy in KTrade</div>
+              <div class="kpi-trend tabular" id="kpi-cash-sub">Safe to deploy in KTrade</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('pnl')">
-              <div class="kpi-cutout-wrap">
-                <button class="kpi-cutout-btn" type="button" aria-label="Inspect Unrealized P&L & Dividends">↗</button>
+              <div class="kpi-head">
+                <div class="kpi-label">Unrealized P&amp;L &amp; Divs</div>
+                <div class="kpi-action-btn" title="Inspect Unrealized P&L & Dividends">↗</div>
               </div>
-              <div class="kpi-label">Unrealized P&amp;L &amp; Divs</div>
               <div class="kpi-value tabular" id="kpi-pnl-val">Rs. 0.00</div>
               <div class="kpi-trend tabular" id="kpi-pnl-sub">0.00% return &amp; Rs. 0.00 divs</div>
+            </div>
+          </div>
+
+          <!-- Central Brain Capital Allocator Hero Card -->
+          <div class="bento-card" id="central-brain-allocator-card" style="border-color: rgba(124, 231, 81, 0.35); background: linear-gradient(180deg, #151B18 0%, #111514 100%); margin-bottom: 24px;">
+            <div class="card-header" style="border-bottom: 1px solid #1E2623; padding-bottom: 14px;">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="card-title" style="color: #F0F4F2;">Central Director Brain — Capital Allocator</span>
+                  <span class="badge badge-lime">BUY-ONLY ACCUMULATION MANDATE</span>
+                </div>
+                <div class="card-subtitle" style="margin-top: 4px;">Multi-factor deterministic engine evaluating Margin of Safety, Dividend Yield, Portfolio Weight, and Institutional Catalysts.</div>
+              </div>
+              <div class="flex items-center gap-2">
+                <div style="background: #0B0E0D; border: 1px solid #1E2623; border-radius: 8px; padding: 4px 10px; font-size: 12px; font-family: monospace;">
+                  <span style="color: var(--muted);">Deployable Cash: </span>
+                  <strong style="color: var(--text);" id="brain-deployable-cash-pill">Rs. 4,357.38</strong>
+                </div>
+              </div>
+            </div>
+
+            <div style="padding: 16px 20px;">
+              <!-- Input & Trigger Controls -->
+              <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px;">
+                <div style="display: flex; align-items: center; gap: 8px; background: #0B0E0D; border: 1px solid #1E2623; border-radius: 8px; padding: 6px 12px; flex: 1; min-width: 250px;">
+                  <label for="brain-deposit-input" style="font-size: 12px; color: var(--muted); white-space: nowrap;">Additional Deposit (PKR):</label>
+                  <input type="number" id="brain-deposit-input" value="0" min="0" step="500" placeholder="0 to use existing cash" style="background: transparent; color: var(--text); font-family: monospace; font-size: 13px; border: none; outline: none; width: 100%;" onkeydown="if(event.key==='Enter') runCentralBrainDecision()">
+                </div>
+                <button class="arch-btn-accent" id="btn-run-central-brain" onclick="runCentralBrainDecision()">
+                  <span>Run Central Brain Decision ↗</span>
+                </button>
+                <button class="arch-btn" onclick="openSystemVerifyModal()">
+                  <span>Feeder Verification Suite</span>
+                </button>
+              </div>
+
+              <!-- Live Decision Output Stage -->
+              <div id="brain-decision-output" style="display: none;">
+                <!-- Top Pick Hero Grid -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; padding: 14px 16px; border-radius: 12px; background: #0E1211; border: 1px solid #24302B; margin-bottom: 14px;">
+                  <div>
+                    <div style="font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: 600; letter-spacing: 0.05em;">Allocated Target</div>
+                    <div style="font-size: 22px; font-weight: 800; color: var(--lime); font-family: monospace; margin-top: 2px;" id="brain-res-target">--</div>
+                    <div style="font-size: 12px; color: var(--muted);" id="brain-res-sector">--</div>
+                  </div>
+                  <div>
+                    <div style="font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: 600; letter-spacing: 0.05em;">Action &amp; Quantity</div>
+                    <div style="font-size: 20px; font-weight: 800; color: var(--text); font-family: monospace; margin-top: 2px;" id="brain-res-action">BUY -- shs</div>
+                    <div style="font-size: 12px; color: var(--muted);" id="brain-res-price">@ Rs. --</div>
+                  </div>
+                  <div>
+                    <div style="font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: 600; letter-spacing: 0.05em;">Total Allocation</div>
+                    <div style="font-size: 20px; font-weight: 800; color: var(--text); font-family: monospace; margin-top: 2px;" id="brain-res-total">Rs. --</div>
+                    <div style="font-size: 12px; color: var(--muted);" id="brain-res-remaining">Remaining: Rs. --</div>
+                  </div>
+                  <div style="display: flex; align-items: center; justify-content: flex-end;">
+                    <button class="arch-btn-accent" style="width: 100%; justify-content: center;" id="btn-execute-brain-trade" onclick="executeBrainTrade()">
+                      <span>Execute &amp; Log Buy Order ↗</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Executive Verdict Callout -->
+                <div style="padding: 12px 14px; border-radius: 8px; background: #111614; border: 1px solid #1E2623; font-size: 13px; color: #E2E8F0; margin-bottom: 14px; font-family: monospace; line-height: 1.6;" id="brain-res-verdict"></div>
+
+                <!-- 3-Pillar Proof Columns -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 14px;">
+                  <div style="padding: 12px 14px; border-radius: 8px; background: #0B0E0D; border: 1px solid #1E2623;">
+                    <div style="font-size: 11.5px; font-weight: 700; color: var(--lime); margin-bottom: 6px; text-transform: uppercase;">1. Valuation &amp; Safety</div>
+                    <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin: 0;" id="brain-pillar-1">--</p>
+                  </div>
+                  <div style="padding: 12px 14px; border-radius: 8px; background: #0B0E0D; border: 1px solid #1E2623;">
+                    <div style="font-size: 11.5px; font-weight: 700; color: var(--lime); margin-bottom: 6px; text-transform: uppercase;">2. Weight &amp; Yield Impact</div>
+                    <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin: 0;" id="brain-pillar-2">--</p>
+                  </div>
+                  <div style="padding: 12px 14px; border-radius: 8px; background: #0B0E0D; border: 1px solid #1E2623;">
+                    <div style="font-size: 11.5px; font-weight: 700; color: var(--lime); margin-bottom: 6px; text-transform: uppercase;">3. Macro &amp; Catalysts</div>
+                    <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin: 0;" id="brain-pillar-3">--</p>
+                  </div>
+                </div>
+
+                <!-- Rejected Alternatives Audit -->
+                <div style="padding: 12px 14px; border-radius: 8px; background: #0B0E0D; border: 1px solid #1E2623;">
+                  <div style="font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin-bottom: 8px;">Audit of Rejected Alternatives (#2 &amp; #3 Candidates)</div>
+                  <div style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted);" id="brain-rejected-list"></div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1808,7 +1894,7 @@
     <div class="modal-card">
       <div class="card-header">
         <div>
-          <div class="card-title">Log PSX Dividend</div>
+          <div class="card-title" id="div-modal-title">Log PSX Dividend</div>
           <div class="card-subtitle">Enter Total Net Received, Total Gross, or Per-Share DPS</div>
         </div>
         <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('div-modal')">×</button>
@@ -1864,6 +1950,47 @@
           </div>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- System & Feeder Verification Suite Modal -->
+  <div id="system-verify-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('system-verify-modal')">
+    <div class="modal-card" style="max-width: 680px;">
+      <div class="card-header">
+        <div>
+          <div class="card-title">System &amp; Feeder Verification Suite</div>
+          <div class="card-subtitle">Real-time PASS/FAIL diagnostics across all 6 core sub-systems</div>
+        </div>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('system-verify-modal')">×</button>
+      </div>
+
+      <div style="padding: 18px 20px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:10px;background:#0B0E0D;border:1px solid #1E2623;margin-bottom:14px;">
+          <div>
+            <span style="font-size:12px;color:var(--muted);">Overall Platform Health:</span>
+            <span id="verify-overall-status" style="font-weight:800;font-family:monospace;font-size:13px;margin-left:8px;color:var(--lime);">READY</span>
+          </div>
+          <button class="arch-btn-accent" id="btn-run-full-verification" onclick="runFullSystemVerification()">
+            <span>Verify All Features ↗</span>
+          </button>
+        </div>
+
+        <!-- 6 Diagnostic Result Cards Grid -->
+        <div id="verify-cards-grid" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:10px;margin-bottom:16px;">
+          <!-- Dynamically populated -->
+        </div>
+
+        <!-- Quick Feeder Triggers -->
+        <div style="padding-top:14px;border-top:1px solid #1E2623;">
+          <div style="font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Trigger Real-Time Background Intelligence Sweeps</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">
+            <button class="arch-btn" style="font-size:12px;padding:6px 12px;" onclick="triggerFeeder('news')">Run News Sweep</button>
+            <button class="arch-btn" style="font-size:12px;padding:6px 12px;" onclick="triggerFeeder('youtube')">Run YouTube Sweep</button>
+            <button class="arch-btn" style="font-size:12px;padding:6px 12px;" onclick="triggerFeeder('email')">Run Email Sweep</button>
+            <button class="arch-btn" style="font-size:12px;padding:6px 12px;" onclick="triggerFeeder('brain')">Run Brain Synthesis</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -2167,7 +2294,9 @@
 
       document.getElementById('kpi-cash-val').textContent = fmtPKR(cashVal);
       const cashRatio = netWorth > 0 ? ((cashVal / netWorth) * 100).toFixed(1) : '0.0';
-      document.getElementById('kpi-cash-sub').textContent = `↗ Safe to deploy in KTrade (${cashRatio}%)`;
+      document.getElementById('kpi-cash-sub').textContent = `Safe to deploy in KTrade (${cashRatio}%)`;
+      const pill = document.getElementById('brain-deployable-cash-pill');
+      if (pill) pill.textContent = fmtPKR(cashVal);
 
       const combinedPnlAndDiv = uPnl + divBank;
       document.getElementById('kpi-pnl-val').textContent = fmtPKR(combinedPnlAndDiv, true);
@@ -2624,15 +2753,177 @@
     async function syncLivePrices() {
       const btn = document.getElementById('btn-header-sync-prices');
       if (btn) btn.style.opacity = '0.65';
-      showToast('Fetching live PSX quotes across all holdings...');
+      showToast('Fetching live PSX quotes via TradingView Pakistan Scanner...');
       try {
-        await apiFetch('/api/dashboard/trigger-sweep/prices', { method: 'POST' });
+        const res = await apiFetch('/api/dashboard/sync-prices', { method: 'POST' });
+        const data = await res.json();
         await loadOverviewData(true);
-        showToast('Live PSX prices & P&L updated.');
+        showToast(`Live prices updated for ${data.updated || 9} holdings via TradingView.`);
       } catch (err) {
         showToast('Price sync error: ' + err.message);
       } finally {
         if (btn) btn.style.opacity = '1';
+      }
+    }
+
+    /* Central Director Brain & Capital Allocator */
+    let CURRENT_BRAIN_DECISION = null;
+
+    function scrollToCentralBrain() {
+      switchTab('overview');
+      const el = document.getElementById('central-brain-allocator-card');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function runCentralBrainDecision() {
+      const btn = document.getElementById('btn-run-central-brain');
+      const depInp = document.getElementById('brain-deposit-input');
+      const depositAmt = Math.max(0, parseFloat(depInp.value || '0'));
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Evaluating PSX Multi-Factor Engine...</span>';
+      }
+      try {
+        const res = await apiFetch('/api/dashboard/central-brain/allocate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deposit_amount: depositAmt })
+        });
+        const decision = await res.json();
+        CURRENT_BRAIN_DECISION = decision;
+        renderCentralBrainDecision(decision);
+        showToast(`Central Brain: Decisive BUY allocated to ${decision.selected_ticker}.`);
+      } catch (err) {
+        showToast('Central Brain calculation failed: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<span>Run Central Brain Decision ↗</span>';
+        }
+      }
+    }
+
+    function renderCentralBrainDecision(d) {
+      const box = document.getElementById('brain-decision-output');
+      if (!box) return;
+      box.style.display = 'block';
+
+      document.getElementById('brain-res-target').textContent = d.selected_ticker || '--';
+      document.getElementById('brain-res-sector').textContent = (d.action || 'BUY') + ' Directive';
+      document.getElementById('brain-res-action').textContent = `${d.action || 'BUY'} ${(d.recommended_shares || 0).toLocaleString()} shs`;
+      document.getElementById('brain-res-price').textContent = `@ Rs. ${(d.limit_price || 0).toFixed(2)}`;
+      document.getElementById('brain-res-total').textContent = fmtPKR(d.total_allocation_pkr || 0);
+      document.getElementById('brain-res-remaining').textContent = `Remaining: ${fmtPKR(d.remaining_cash_pkr || 0)}`;
+
+      document.getElementById('brain-res-verdict').textContent = d.executive_verdict || '';
+      document.getElementById('brain-pillar-1').textContent = d.why_this_stock?.pillar_1_valuation || '';
+      document.getElementById('brain-pillar-2').textContent = d.why_this_stock?.pillar_2_weight_yield || '';
+      document.getElementById('brain-pillar-3').textContent = d.why_this_stock?.pillar_3_macro_catalysts || '';
+
+      const rejBox = document.getElementById('brain-rejected-list');
+      if (rejBox) {
+        rejBox.innerHTML = (d.rejected_alternatives || []).map(r => `<div>• <strong>${escapeHtml(r.ticker)}</strong>: ${escapeHtml(r.reason)}</div>`).join('') || '<div>None.</div>';
+      }
+    }
+
+    async function executeBrainTrade() {
+      if (!CURRENT_BRAIN_DECISION) return;
+      const d = CURRENT_BRAIN_DECISION;
+      if (d.recommended_shares <= 0) {
+        alert(`Cannot execute: deployable cash is insufficient for 1 full share of ${d.selected_ticker}. Shortfall: ${fmtPKR(d.cash_shortfall_pkr)}.`);
+        return;
+      }
+      if (!confirm(`Execute BUY order for ${d.recommended_shares} ${d.selected_ticker} @ Rs. ${d.limit_price.toFixed(2)} (Total: ${fmtPKR(d.total_allocation_pkr)})?`)) {
+        return;
+      }
+      try {
+        const res = await apiFetch('/api/dashboard/central-brain/execute-allocation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker: d.selected_ticker,
+            shares: d.recommended_shares,
+            price: d.limit_price,
+            notes: `Executed via Central Brain Allocation: ${d.selected_ticker}`
+          })
+        });
+        showToast(`Order executed! Logged trade for ${d.recommended_shares} ${d.selected_ticker}.`);
+        await Promise.all([loadOverviewData(false), loadTransactionsData()]);
+      } catch (err) {
+        showToast('Failed executing allocation: ' + err.message);
+      }
+    }
+
+    /* System & Feeder Verification Suite */
+    function openSystemVerifyModal() {
+      document.getElementById('system-verify-modal').classList.add('open');
+      runFullSystemVerification();
+    }
+
+    async function runFullSystemVerification() {
+      const overallBadge = document.getElementById('verify-overall-status');
+      const grid = document.getElementById('verify-cards-grid');
+      if (overallBadge) {
+        overallBadge.textContent = 'TESTING ALL FEEDERS...';
+        overallBadge.style.color = '#F59E0B';
+      }
+      if (grid) {
+        grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 24px; color: var(--muted); font-size: 13px;">Pinging all 6 sub-systems & measuring live latencies...</div>';
+      }
+
+      try {
+        const res = await apiFetch('/api/test/all-features');
+        const data = await res.json();
+        if (overallBadge) {
+          overallBadge.textContent = data.status === 'PASS' ? 'SYSTEM 100% HEALTHY' : 'DIAGNOSTIC ISSUES DETECTED';
+          overallBadge.style.color = data.status === 'PASS' ? 'var(--lime)' : 'var(--danger)';
+        }
+
+        const feats = data.features || {};
+        if (grid) {
+          grid.innerHTML = Object.entries(feats).map(([k, v]) => {
+            const pass = v.status === 'PASS';
+            const badgeCls = pass ? 'badge-lime' : (v.status === 'WARN' || v.status === 'PARTIAL' ? 'badge-warn' : 'badge-danger');
+            const name = k.replace(/_/g, ' ').toUpperCase();
+            const latency = v.latency_ms != null ? `${v.latency_ms} ms` : '—';
+            const detailStr = Object.entries(v)
+              .filter(([key]) => !['status', 'latency_ms'].includes(key))
+              .map(([key, val]) => `${key}: ${typeof val === 'object' ? JSON.stringify(val) : val}`)
+              .join(' · ');
+
+            return `
+              <div style="padding: 12px; border-radius: 8px; background: #0B0E0D; border: 1px solid #1E2623;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+                  <span style="font-size: 12px; font-weight: 700; color: var(--text);">${escapeHtml(name)}</span>
+                  <div style="display: flex; align-items: center; gap: 6px;">
+                    <span style="font-size: 11px; font-family: monospace; color: var(--muted);">${latency}</span>
+                    <span class="badge ${badgeCls}">${v.status}</span>
+                  </div>
+                </div>
+                <div style="font-size: 11px; font-family: monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(detailStr)}</div>
+              </div>
+            `;
+          }).join('');
+        }
+      } catch (err) {
+        if (overallBadge) {
+          overallBadge.textContent = 'SUITE TEST FAILED';
+          overallBadge.style.color = 'var(--danger)';
+        }
+        if (grid) {
+          grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 24px; color: var(--danger); font-size: 13px;">Failed running verification: ${err.message}</div>`;
+        }
+      }
+    }
+
+    async function triggerFeeder(type) {
+      showToast(`Launching ${type} sweep in background...`);
+      try {
+        const res = await apiFetch(`/api/dashboard/feeders/run-${type}`, { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || `${type} sweep triggered successfully.`);
+      } catch (err) {
+        showToast(`Failed triggering ${type}: ` + err.message);
       }
     }
 
@@ -2793,13 +3084,33 @@
               </select>
             </td>
             <td>
-              <button type="button" class="row-btn danger" title="Delete dividend" onclick="deleteDividend(${d.id})">Delete</button>
+              <div class="row-actions">
+                <button type="button" class="row-btn" onclick="openEditDividendModal(${d.id})">Edit</button>
+                <button type="button" class="row-btn danger" title="Delete dividend" onclick="deleteDividend(${d.id})">×</button>
+              </div>
             </td>
           </tr>
         `).join('') : '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px;">No dividends logged yet. Click "+ Log Dividend" to add a payout.</td></tr>';
       } catch (err) {
         console.error(err);
       }
+    }
+
+    function openEditDividendModal(id) {
+      const d = (APP_STATE.dividends || []).find(item => item.id === id);
+      if (!d) return;
+      APP_STATE.editingDividendId = id;
+      document.getElementById('div-modal-title').textContent = `Edit ${d.ticker} Dividend Record`;
+      document.getElementById('div-ticker').value = d.ticker || '';
+      document.getElementById('div-shares').value = d.shares_held || '';
+      document.getElementById('div-tax').value = d.tax_rate_pct != null ? d.tax_rate_pct : '15';
+      document.getElementById('div-status').value = d.status || 'CREDITED_TO_BANK';
+      document.getElementById('div-ex-date').value = d.ex_date || '';
+
+      setDividendInputMode('net');
+      document.getElementById('div-primary-val').value = d.net_amount || d.gross_amount || '';
+      recalcDividendPreview();
+      document.getElementById('div-modal').classList.add('open');
     }
 
     async function deleteDividend(id) {
@@ -2814,6 +3125,14 @@
     }
 
     function openDividendModal() {
+      APP_STATE.editingDividendId = null;
+      document.getElementById('div-modal-title').textContent = 'Log PSX Dividend';
+      document.getElementById('div-ticker').value = '';
+      document.getElementById('div-shares').value = '';
+      document.getElementById('div-primary-val').value = '';
+      document.getElementById('div-tax').value = '15';
+      document.getElementById('div-ex-date').value = '';
+      document.getElementById('div-status').value = 'CREDITED_TO_BANK';
       setDividendInputMode('net');
       recalcDividendPreview();
       document.getElementById('div-modal').classList.add('open');
@@ -2911,15 +3230,25 @@
         status: document.getElementById('div-status').value
       };
       try {
-        await apiFetch('/api/dashboard/dividends', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+        if (APP_STATE.editingDividendId) {
+          await apiFetch(`/api/dashboard/dividends/${APP_STATE.editingDividendId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          showToast(`Updated ${ticker} dividend: Net ${fmtPKR(calc.net)}.`);
+        } else {
+          await apiFetch('/api/dashboard/dividends', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          showToast(`Saved ${ticker} dividend: Net ${fmtPKR(calc.net)} (Gross ${fmtPKR(calc.gross)}).`);
+        }
         closeModal('div-modal');
+        APP_STATE.editingDividendId = null;
         e.target.reset();
         document.getElementById('div-tax').value = '15';
-        showToast(`Saved ${ticker} dividend: Net ${fmtPKR(calc.net)} (Gross ${fmtPKR(calc.gross)}).`);
         await Promise.all([loadOverviewData(false), loadDividendsData()]);
       } catch (err) {
         showToast('Failed saving dividend: ' + err.message);

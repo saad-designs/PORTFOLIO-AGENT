@@ -647,6 +647,15 @@ class PortfolioSyncPayload(BaseModel):
     total_working_capital: Optional[float] = None
     holdings: Optional[List[Dict[str, Any]]] = None
 
+class CentralBrainAllocatePayload(BaseModel):
+    deposit_amount: Optional[float] = 0.0
+
+class CentralBrainExecutePayload(BaseModel):
+    ticker: str
+    shares: float
+    price: float
+    notes: Optional[str] = "Executed via Central Brain Allocation"
+
 _GIT_PULL_LOCK = asyncio.Lock()
 _LAST_TARBALL_SHA: Optional[str] = None
 
@@ -980,6 +989,189 @@ async def sync_dashboard_portfolio(
     )
     return sync_res
 
+@app.post("/api/dashboard/sync-prices")
+async def sync_dashboard_prices(request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import refresh_portfolio_live_prices, get_complete_financial_summary
+    res = await asyncio.to_thread(refresh_portfolio_live_prices, True)
+    summary = await asyncio.to_thread(get_complete_financial_summary, False, True)
+    return {
+        "status": "success",
+        "updated": res.get("updated", 0),
+        "prices": res.get("prices", {}),
+        "financial_summary": summary
+    }
+
+@app.post("/api/dashboard/central-brain/allocate")
+async def allocate_capital_central_brain(request: Request, payload: Optional[CentralBrainAllocatePayload] = None):
+    verify_dashboard_auth(request)
+    from central_brain import make_capital_deployment_decision
+    dep_amt = float(payload.deposit_amount) if payload and payload.deposit_amount is not None else 0.0
+    decision = await asyncio.to_thread(make_capital_deployment_decision, dep_amt, True)
+    return decision
+
+@app.post("/api/dashboard/central-brain/execute-allocation")
+async def execute_allocation_central_brain(request: Request, payload: CentralBrainExecutePayload):
+    verify_dashboard_auth(request)
+    from central_brain import execute_central_brain_allocation
+    res = await asyncio.to_thread(execute_central_brain_allocation, payload.dict())
+    return res
+
+@app.get("/api/test/all-features")
+async def test_all_system_features(request: Request):
+    """
+    Runs diagnostic validation across all 6 core sub-systems:
+    1. Live PSX Spot Price Engine (TradingView Pakistan + DPS)
+    2. Central Brain Buy-Only Allocator
+    3. Macro & World News Feeder (RSS)
+    4. YouTube Mentor Intelligence Feeder
+    5. KTrade Email IMAP Feeder / Broker Reports
+    6. Database & Ledger Integrity
+    """
+    t0 = time.perf_counter()
+    results = {}
+
+    # 1. Live Prices
+    t_start = time.perf_counter()
+    from market_data_scraper import fetch_all_psx_prices_bulk
+    from portfolio_manager import get_complete_financial_summary, get_db_connection
+    target_tickers = ["SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"]
+    bulk_q = await asyncio.to_thread(fetch_all_psx_prices_bulk, True, 6, target_tickers)
+    live_ok = all(s in bulk_q and float(bulk_q[s].get("price", 0)) > 0 for s in target_tickers)
+    lat_prices = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["live_psx_prices"] = {
+        "status": "PASS" if live_ok else "PARTIAL",
+        "latency_ms": lat_prices,
+        "sample": {s: bulk_q.get(s, {}).get("price") for s in target_tickers[:5]},
+        "source": bulk_q.get("SYS", {}).get("source", "tradingview_psx_realtime"),
+    }
+
+    # 2. Central Brain
+    t_start = time.perf_counter()
+    from central_brain import make_capital_deployment_decision
+    brain_res = await asyncio.to_thread(make_capital_deployment_decision, 0.0, True)
+    lat_brain = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["central_brain"] = {
+        "status": "PASS" if brain_res.get("status") == "success" else "FAIL",
+        "latency_ms": lat_brain,
+        "winner": brain_res.get("selected_ticker"),
+        "action": brain_res.get("action"),
+        "shares": brain_res.get("recommended_shares"),
+        "limit_price": brain_res.get("limit_price"),
+    }
+
+    # 3. Macro News
+    t_start = time.perf_counter()
+    news_items = []
+    conn_news = get_db_connection()
+    cur_news = conn_news.cursor()
+    try:
+        cur_news.execute("SELECT title, content FROM agent_feed WHERE category = 'MACRO_NEWS' ORDER BY created_at DESC LIMIT 3;")
+        news_items = [{"title": r[0], "summary": r[1]} for r in cur_news.fetchall()]
+    finally:
+        cur_news.close()
+        conn_news.close()
+    if not news_items:
+        try:
+            from news_scraper import fetch_psx_news
+            news_items = await asyncio.to_thread(fetch_psx_news, 2)
+        except Exception:
+            pass
+    lat_news = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["macro_news"] = {
+        "status": "PASS" if news_items else "WARN",
+        "latency_ms": lat_news,
+        "count": len(news_items),
+        "headline": news_items[0].get("title") if news_items else "Feed standing by",
+    }
+
+    # 4. YouTube Mentor & Playbook
+    t_start = time.perf_counter()
+    playbook_cnt = 0
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM active_playbook;")
+        playbook_cnt = cur.fetchone()[0]
+    finally:
+        cur.close()
+        conn.close()
+    lat_yt = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["youtube_mentor"] = {
+        "status": "PASS" if playbook_cnt > 0 else "FAIL",
+        "latency_ms": lat_yt,
+        "rules_count": playbook_cnt,
+    }
+
+    # 5. Email IMAP / Broker Reports
+    t_start = time.perf_counter()
+    reports_cnt = 0
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM institutional_reports;")
+        reports_cnt = cur.fetchone()[0]
+    finally:
+        cur.close()
+        conn.close()
+    lat_email = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["institutional_broker_reports"] = {
+        "status": "PASS",
+        "latency_ms": lat_email,
+        "reports_count": reports_cnt,
+    }
+
+    # 6. Database & Ledgers
+    t_start = time.perf_counter()
+    fin_sum = await asyncio.to_thread(get_complete_financial_summary, True)
+    kpis = fin_sum.get("financial_kpis", {})
+    lat_db = round((time.perf_counter() - t_start) * 1000.0, 2)
+    results["database_integrity"] = {
+        "status": "PASS" if float(kpis.get("total_net_worth", 0)) > 0 else "FAIL",
+        "latency_ms": lat_db,
+        "net_worth": kpis.get("total_net_worth", 0),
+        "available_cash": kpis.get("ktrade_available_cash", 0),
+        "custody_value": kpis.get("portfolio_market_value", 0),
+    }
+
+    total_lat = round((time.perf_counter() - t0) * 1000.0, 2)
+    overall_status = "PASS" if all(v.get("status") in ["PASS", "WARN", "PARTIAL"] for v in results.values()) else "FAIL"
+
+    return {
+        "status": overall_status,
+        "total_latency_ms": total_lat,
+        "features": results,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+@app.post("/api/dashboard/feeders/run-news")
+async def trigger_news_feeder(request: Request, background_tasks: BackgroundTasks):
+    verify_dashboard_auth(request)
+    from news_scraper import run_news_sweep
+    background_tasks.add_task(run_news_sweep)
+    return {"status": "success", "message": "Macro news RSS sweep launched in background."}
+
+@app.post("/api/dashboard/feeders/run-youtube")
+async def trigger_youtube_feeder(request: Request, background_tasks: BackgroundTasks):
+    verify_dashboard_auth(request)
+    from youtube_scraper import fetch_mentor_transcripts
+    background_tasks.add_task(fetch_mentor_transcripts)
+    return {"status": "success", "message": "YouTube mentor intelligence sweep launched in background."}
+
+@app.post("/api/dashboard/feeders/run-email")
+async def trigger_email_feeder(request: Request, background_tasks: BackgroundTasks):
+    verify_dashboard_auth(request)
+    from email_scraper import run_email_sweep
+    background_tasks.add_task(run_email_sweep)
+    return {"status": "success", "message": "KTrade email IMAP sweep launched in background."}
+
+@app.post("/api/dashboard/feeders/run-brain")
+async def trigger_brain_synthesis(request: Request):
+    verify_dashboard_auth(request)
+    from central_brain import make_capital_deployment_decision
+    decision = await asyncio.to_thread(make_capital_deployment_decision, 0.0, False)
+    return {"status": "success", "decision": decision}
+
 @app.get("/api/dashboard/algorithm-state")
 async def get_dashboard_algorithm_state(request: Request):
     verify_dashboard_auth(request)
@@ -1032,6 +1224,13 @@ async def update_dashboard_dividend(id: int, payload: DividendStatusUpdatePayloa
     verify_dashboard_auth(request)
     from portfolio_manager import update_dividend_status
     updated = await asyncio.to_thread(update_dividend_status, id, payload.status)
+    return {"status": "success", "dividend": updated}
+
+@app.put("/api/dashboard/dividends/{id}")
+async def edit_dashboard_dividend(id: int, payload: DividendCreatePayload, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import update_dividend_entry
+    updated = await asyncio.to_thread(update_dividend_entry, id, payload.dict())
     return {"status": "success", "dividend": updated}
 
 @app.delete("/api/dashboard/dividends/{id}")

@@ -2339,14 +2339,16 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     }
 
 
-def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
+def get_complete_financial_summary(use_cached_prices: bool = False, force_live: bool = False) -> dict:
     """
     Computes complete PSX investment summary, capital accounting, and mark-to-market valuations.
     - Single source of truth: capital_ledger (cash + working capital), portfolio_holdings, dividend_ledger.
-    - When use_cached_prices=True: uses last_price stored in portfolio_holdings (<150ms response, 0 HTTP calls).
-    - When use_cached_prices=False: scrapes live PSX prices in parallel and updates portfolio_holdings.last_price.
+    - When use_cached_prices=True (and not force_live): uses last_price stored in portfolio_holdings (<150ms response, 0 HTTP calls).
+    - When use_cached_prices=False or force_live=True: scrapes live PSX prices via TradingView/DPS and updates portfolio_holdings.last_price.
     """
     global _CACHED_FIN_SUMMARY, _CACHED_FIN_SUMMARY_TS
+    if force_live:
+        use_cached_prices = False
     if use_cached_prices and _CACHED_FIN_SUMMARY is not None and (_time.time() - _CACHED_FIN_SUMMARY_TS) < 20.0:
         return _CACHED_FIN_SUMMARY
 
@@ -2460,7 +2462,7 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
                 price_map[sym] = (cached_p, cached_chg)
         else:
             from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker
-            bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=False)
+            bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=True)
             scraped_updates = []
             for r in holdings_rows:
                 sym = str(r[0]).upper()
@@ -2469,25 +2471,33 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
                 if q and q.get("price", 0.0) > 0:
                     cp = float(q["price"])
                     chg = float(q.get("change_pct", 0.0))
+                    dy = q.get("dividend_yield")
                     price_map[sym] = (cp, chg)
-                    scraped_updates.append((cp, chg, sym))
+                    scraped_updates.append((cp, chg, dy, sym))
                 else:
                     cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
                     if cp > 0:
                         price_map[sym] = (float(cp), float(chg or 0.0))
-                        scraped_updates.append((float(cp), float(chg or 0.0), sym))
+                        scraped_updates.append((float(cp), float(chg or 0.0), None, sym))
                     else:
                         price_map[sym] = (default_p, float(r[6] or 0.0))
 
             if scraped_updates:
                 try:
                     cur.execute("SAVEPOINT sp_persist_spot;")
-                    for cp, chg, sym in scraped_updates:
-                        cur.execute("""
-                            UPDATE portfolio_holdings
-                            SET last_price = %s, last_change_pct = %s, price_updated_at = NOW()
-                            WHERE UPPER(ticker) = %s;
-                        """, (cp, chg, sym))
+                    for cp, chg, dy, sym in scraped_updates:
+                        if dy is not None and dy > 0:
+                            cur.execute("""
+                                UPDATE portfolio_holdings
+                                SET last_price = %s, last_change_pct = %s, dividend_yield = %s, price_updated_at = NOW()
+                                WHERE UPPER(ticker) = %s;
+                            """, (cp, chg, dy, sym))
+                        else:
+                            cur.execute("""
+                                UPDATE portfolio_holdings
+                                SET last_price = %s, last_change_pct = %s, price_updated_at = NOW()
+                                WHERE UPPER(ticker) = %s;
+                            """, (cp, chg, sym))
                     cur.execute("RELEASE SAVEPOINT sp_persist_spot;")
                     conn.commit()
                 except Exception:
@@ -3057,6 +3067,106 @@ def delete_dividend_entry(dividend_id: int) -> dict:
         conn.commit()
         invalidate_financial_summary_cache()
         return {"status": "success", "deleted": deleted, "id": int(dividend_id)}
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def update_dividend_entry(dividend_id: int, payload: dict) -> dict:
+    """
+    Updates an existing dividend entry in dividend_ledger and synchronizes capital_ledger
+    if the reinvestment status (SENT_TO_KTRADE) or net amount changed.
+    """
+    from utils import normalize_ticker
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, status, net_amount, ticker FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Dividend #{dividend_id} not found.")
+
+        old_status = row[1]
+        old_net = float(row[2] or 0.0)
+
+        sym = normalize_ticker(payload.get("ticker") or row[3])
+        shs = float(payload.get("shares_held") or 0.0)
+        dps = float(payload.get("dps_gross") or 0.0)
+        gross = float(payload.get("gross_amount") or 0.0)
+        tax_pct = float(payload.get("tax_rate_pct") or 15.0)
+        net = float(payload.get("net_amount") or 0.0)
+        ex_d = payload.get("ex_date")
+        new_status = payload.get("status") or old_status
+        notes = payload.get("notes") or ""
+
+        # Re-derive math consistently if values provided
+        tax_frac = tax_pct / 100.0
+        if net > 0 and gross == 0:
+            gross = round(net / (1.0 - tax_frac), 2) if (1.0 - tax_frac) > 0 else net
+            tax_withheld = round(gross - net, 2)
+            if shs > 0:
+                dps = round(gross / shs, 4)
+        elif gross > 0 and net == 0:
+            tax_withheld = round(gross * tax_frac, 2)
+            net = round(gross - tax_withheld, 2)
+            if shs > 0:
+                dps = round(gross / shs, 4)
+        elif dps > 0 and shs > 0 and gross == 0:
+            gross = round(shs * dps, 2)
+            tax_withheld = round(gross * tax_frac, 2)
+            net = round(gross - tax_withheld, 2)
+        else:
+            tax_withheld = round(gross - net, 2) if gross >= net else 0.0
+
+        cur.execute("""
+            UPDATE dividend_ledger
+            SET ticker = %s,
+                shares_held = %s,
+                dps_gross = %s,
+                gross_amount = %s,
+                tax_rate_pct = %s,
+                tax_withheld = %s,
+                net_amount = %s,
+                ex_date = %s,
+                status = %s,
+                notes = %s
+            WHERE id = %s
+            RETURNING id, ticker, net_amount, status;
+        """, (sym, shs, dps, gross, tax_pct, tax_withheld, net, ex_d, new_status, notes, int(dividend_id)))
+
+        ref_tag = f"Reinvested Dividend #{int(dividend_id)}:"
+        if new_status == "SENT_TO_KTRADE" and old_status != "SENT_TO_KTRADE":
+            cur.execute("""
+                INSERT INTO capital_ledger (tx_type, amount, reference_note, notes, tx_date, created_at)
+                VALUES ('DIVIDEND_SENT_TO_KTRADE', %s, %s, %s, NOW(), NOW());
+            """, (net, f"{ref_tag} {sym}", f"{ref_tag} Reinvested into KTrade cash"))
+        elif new_status != "SENT_TO_KTRADE" and old_status == "SENT_TO_KTRADE":
+            cur.execute("""
+                DELETE FROM capital_ledger
+                WHERE tx_type = 'DIVIDEND_SENT_TO_KTRADE'
+                  AND (notes LIKE %s OR reference_note LIKE %s);
+            """, (f"{ref_tag}%", f"{ref_tag}%"))
+        elif new_status == "SENT_TO_KTRADE" and old_status == "SENT_TO_KTRADE" and abs(net - old_net) > 0.01:
+            cur.execute("""
+                UPDATE capital_ledger
+                SET amount = %s
+                WHERE tx_type = 'DIVIDEND_SENT_TO_KTRADE'
+                  AND (notes LIKE %s OR reference_note LIKE %s);
+            """, (net, f"{ref_tag}%", f"{ref_tag}%"))
+
+        conn.commit()
+        invalidate_financial_summary_cache()
+        return {
+            "status": "updated",
+            "id": int(dividend_id),
+            "ticker": sym,
+            "net_amount": net,
+            "gross_amount": gross,
+            "dividend_status": new_status,
+        }
     except Exception as e:
         conn.rollback()
         raise e

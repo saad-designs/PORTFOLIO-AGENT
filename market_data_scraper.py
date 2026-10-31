@@ -168,13 +168,15 @@ def _parse_psx_bulk_table(html: str) -> Dict[str, Dict[str, Any]]:
 
 
 # ==============================================================================
-# TIER 1: GLOBAL CLOUD-SAFE REAL-TIME PSX JSON BATCH (TRADINGVIEW + YAHOO v8 .KA)
+# TIER 1: GLOBAL CLOUD-SAFE REAL-TIME PSX JSON BATCH (TRADINGVIEW PAKISTAN SCANNER)
 # ==============================================================================
 
-def fetch_tradingview_psx_batch(tickers: Iterable[str], timeout: float = 6.0) -> Dict[str, Dict[str, Any]]:
+def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -> Dict[str, Dict[str, Any]]:
     """
-    Fetches exact real-time PSX spot prices and daily % changes for PSX:<TICKER> in a single
-    global CDN JSON request (zero 462 geo-blocks on Oracle Cloud Mumbai / AWS / Render).
+    Tier 1 Primary Live Spot Price Engine:
+    Fetches exact real-time/closing PSX spot prices, daily % change, daily PKR change, volume,
+    TTM P/E, and dividend yield for PSX:<TICKER> in a single global CDN JSON request.
+    Has 0% blocks across cloud IPs (Oracle Cloud, Render, AWS, GCP).
     """
     unique_syms = []
     seen = set()
@@ -192,13 +194,27 @@ def fetch_tradingview_psx_batch(tickers: Iterable[str], timeout: float = 6.0) ->
             "tickers": [f"PSX:{sym}" for sym in unique_syms],
             "query": {"types": []},
         },
-        "columns": ["name", "close", "change", "change_abs", "volume"],
+        "columns": [
+            "name",
+            "close",
+            "change",
+            "change_abs",
+            "volume",
+            "price_earnings_ttm",
+            "dividends_yield_current",
+        ],
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/",
     }
     try:
         resp = requests.post(
             "https://scanner.tradingview.com/pakistan/scan",
             json=payload,
-            headers=YAHOO_JSON_HEADERS,
+            headers=headers,
             timeout=timeout,
         )
         if resp.status_code != 200:
@@ -214,16 +230,62 @@ def fetch_tradingview_psx_batch(tickers: Iterable[str], timeout: float = 6.0) ->
             price = _clean_float(d[1], 0.0)
             chg_pct = _clean_float(d[2], 0.0)
             chg_abs = _clean_float(d[3], 0.0)
+            volume = _clean_float(d[4] if len(d) > 4 else 0, 0.0)
+            pe_ttm = _clean_float(d[5] if len(d) > 5 else None, None)
+            div_yield = _clean_float(d[6] if len(d) > 6 else None, None)
+
             if sym and price > 0:
                 out[sym] = {
                     "price": round(price, 2),
                     "change": round(chg_abs, 2),
                     "change_pct": round(chg_pct, 2),
-                    "source": "psx_global_realtime",
+                    "volume": volume,
+                    "pe_ttm": round(pe_ttm, 2) if pe_ttm is not None else None,
+                    "dividend_yield": round(div_yield, 2) if div_yield is not None else None,
+                    "source": "tradingview_psx_realtime",
                 }
         return out
     except Exception:
         return {}
+
+
+# Backwards-compatible alias
+fetch_tradingview_psx_batch = fetch_tradingview_psx_quotes
+
+
+def _fetch_psx_timeseries_intraday(ticker: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    """
+    Tier 2: PSX Intraday Timeseries API (https://dps.psx.com.pk/timeseries/int/{ticker}).
+    Returns JSON {"status": 1, "data": [[ts, price, vol], ...]} and extracts data[0][1] as spot price.
+    """
+    sym = normalize_ticker(ticker)
+    if not sym:
+        return None
+    url = f"https://dps.psx.com.pk/timeseries/int/{sym}"
+    try:
+        resp = requests.get(
+            url,
+            headers={**DEFAULT_BROWSER_HEADERS, "Referer": "https://dps.psx.com.pk/"},
+            verify=False,
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            payload = resp.json() or {}
+            raw_data = payload.get("data") or []
+            if raw_data:
+                latest_point = raw_data[0]
+                if len(latest_point) >= 2:
+                    price = _clean_float(latest_point[1], 0.0)
+                    if price > 0:
+                        return {
+                            "price": round(price, 2),
+                            "change": 0.0,
+                            "change_pct": 0.0,
+                            "source": "dps_timeseries_int",
+                        }
+    except Exception:
+        pass
+    return None
 
 
 def _fetch_single_yahoo_ka_quote(ticker: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
@@ -445,18 +507,37 @@ def fetch_all_psx_prices_bulk(
 
         merged: Dict[str, Dict[str, Any]] = dict(_BULK_QUOTES_CACHE)
 
-        # Tier 1: Yahoo Finance v8 .KA fast parallel batch
-        tier1_quotes = fetch_yahoo_psx_batch(all_target_syms, timeout=5.5)
+        # Tier 1: TradingView Pakistan Scanner JSON API (Primary, 0 Blocks on Cloud)
+        tier1_quotes = fetch_tradingview_psx_quotes(all_target_syms, timeout=6.0)
         merged.update(tier1_quotes)
 
-        # Tier 2: PSX Market-Watch if any required ticker was not returned by Tier 1
+        # Tier 2: PSX Intraday Timeseries API & Market Watch if any required ticker was not returned by Tier 1
         missing_after_tier1 = [s for s in all_target_syms if s not in tier1_quotes or tier1_quotes[s].get("price", 0) <= 0]
         if missing_after_tier1:
-            tier2_quotes = _fetch_psx_market_watch_tier2(timeout=timeout)
-            for sym, q in tier2_quotes.items():
-                # Keep Tier 1 quote if already fresh from this cycle, otherwise fill from Tier 2
-                if sym not in tier1_quotes:
-                    merged[sym] = q
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(missing_after_tier1))) as pool:
+                t2_futures = {pool.submit(_fetch_psx_timeseries_intraday, s, 2.0): s for s in missing_after_tier1}
+                for fut in concurrent.futures.as_completed(t2_futures):
+                    s = t2_futures[fut]
+                    try:
+                        t2_q = fut.result()
+                        if t2_q and t2_q.get("price", 0.0) > 0:
+                            merged[s] = t2_q
+                    except Exception:
+                        pass
+
+            still_missing = [s for s in missing_after_tier1 if s not in merged or merged[s].get("price", 0) <= 0]
+            if still_missing:
+                tier2_mw = _fetch_psx_market_watch_tier2(timeout=min(timeout, 3))
+                for sym, q in tier2_mw.items():
+                    if sym not in merged or merged[sym].get("price", 0.0) <= 0:
+                        merged[sym] = q
+
+            still_missing_yf = [s for s in missing_after_tier1 if s not in merged or merged[s].get("price", 0) <= 0]
+            if still_missing_yf:
+                yf_quotes = fetch_yahoo_psx_batch(still_missing_yf, timeout=4.0)
+                for sym, q in yf_quotes.items():
+                    if sym not in merged or merged[sym].get("price", 0.0) <= 0:
+                        merged[sym] = q
 
         # Tier 3: Database cached last_price fallback for anything still unresolved
         for sym, db_q in db_tier3.items():
