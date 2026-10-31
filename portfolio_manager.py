@@ -2271,10 +2271,10 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
 def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     """
     Bulk PSX quote sweep: fetches all PSX ticker prices in a SINGLE HTTP request
-    (cached in memory for 120s via fetch_bulk_psx_quotes) and updates last_price,
+    (cached in memory for 120s via fetch_all_psx_prices_bulk) and updates last_price,
     last_change_pct, and price_updated_at in portfolio_holdings for all active holdings.
     """
-    from market_data_scraper import fetch_bulk_psx_quotes, get_bulk_quote_for_ticker
+    from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -2288,7 +2288,7 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     if not rows:
         return {"updated": 0, "prices": {}}
 
-    bulk_quotes = fetch_bulk_psx_quotes(force_refresh=force_refresh)
+    bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=force_refresh)
     scraped: Dict[str, tuple[float, float, bool]] = {}
 
     for r in rows:
@@ -2453,8 +2453,8 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
                 cached_chg = float(row[6]) if row[6] is not None else 0.0
                 price_map[sym] = (cached_p, cached_chg)
         else:
-            from market_data_scraper import fetch_bulk_psx_quotes, get_bulk_quote_for_ticker
-            bulk_quotes = fetch_bulk_psx_quotes(force_refresh=False)
+            from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker
+            bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=False)
             scraped_updates = []
             for r in holdings_rows:
                 sym = str(r[0]).upper()

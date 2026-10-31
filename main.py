@@ -465,6 +465,89 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 async def ping():
     return "OK"
 
+@app.get("/api/test/psx-scraper")
+async def test_psx_scraper_endpoint(force_refresh: bool = True):
+    """
+    Diagnostic verification endpoint: fetches live PSX quotes for all 9 KTrade holdings
+    (SYS, FFC, OGDC, MARI, HUBC, LUCK, EFERT, MEBL, FABL), updates portfolio_holdings,
+    and returns PASS/FAIL status, scrape latency in ms, and live prices for all 9 tickers.
+    """
+    from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker, fetch_psx_data_robust
+    from portfolio_manager import get_db_connection, invalidate_financial_summary_cache
+
+    target_tickers = ["SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"]
+    t_start = time.perf_counter()
+
+    bulk_quotes = await asyncio.to_thread(fetch_all_psx_prices_bulk, force_refresh)
+    scrape_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
+
+    prices_out: Dict[str, Dict[str, Any]] = {}
+    for sym in target_tickers:
+        q = bulk_quotes.get(sym)
+        if q and float(q.get("price", 0.0)) > 0:
+            prices_out[sym] = {
+                "price": round(float(q["price"]), 2),
+                "change_pct": round(float(q.get("change_pct", 0.0)), 2),
+                "source": "bulk_market_watch",
+            }
+        else:
+            robust_data = await fetch_psx_data_robust(f"https://dps.psx.com.pk/company/{sym}", is_json=True)
+            if isinstance(robust_data, dict) and float(robust_data.get("price", 0.0)) > 0:
+                prices_out[sym] = {
+                    "price": round(float(robust_data["price"]), 2),
+                    "change_pct": round(float(robust_data.get("change_pct", 0.0)), 2),
+                    "source": "company_html_fallback",
+                }
+            else:
+                cp, chg = await asyncio.to_thread(get_bulk_quote_for_ticker, sym, True)
+                prices_out[sym] = {
+                    "price": round(float(cp or 0.0), 2),
+                    "change_pct": round(float(chg or 0.0), 2),
+                    "source": "requests_company_fallback" if cp > 0 else "failed",
+                }
+
+    def _persist_quotes():
+        conn = get_db_connection()
+        cur = conn.cursor()
+        updated_rows = 0
+        try:
+            for sym, info in prices_out.items():
+                if info["price"] > 0:
+                    cur.execute(
+                        """
+                        UPDATE portfolio_holdings
+                        SET last_price = %s,
+                            last_change_pct = %s,
+                            price_updated_at = NOW()
+                        WHERE UPPER(ticker) = %s;
+                        """,
+                        (info["price"], info["change_pct"], sym),
+                    )
+                    updated_rows += cur.rowcount
+            conn.commit()
+            invalidate_financial_summary_cache()
+        except Exception:
+            conn.rollback()
+        finally:
+            cur.close()
+            conn.close()
+        return updated_rows
+
+    db_updated = await asyncio.to_thread(_persist_quotes)
+    total_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
+    passed_count = sum(1 for v in prices_out.values() if v["price"] > 0)
+
+    return {
+        "status": "PASS" if passed_count == len(target_tickers) else ("PARTIAL" if passed_count > 0 else "FAIL"),
+        "latency_ms": scrape_latency_ms,
+        "total_with_db_ms": total_latency_ms,
+        "holdings_tested": len(target_tickers),
+        "holdings_passed": passed_count,
+        "db_rows_updated": db_updated,
+        "bulk_tickers_cached": len(bulk_quotes),
+        "prices": prices_out,
+    }
+
 DASHBOARD_KEY = os.getenv("DASHBOARD_KEY", "").strip()
 
 def verify_dashboard_auth(request: Request):

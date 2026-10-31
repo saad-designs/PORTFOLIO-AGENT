@@ -162,12 +162,12 @@ def _parse_psx_bulk_table(html: str) -> Dict[str, Dict[str, float]]:
     return quotes
 
 
-def fetch_bulk_psx_quotes(force_refresh: bool = False, timeout: int = 12) -> Dict[str, Dict[str, float]]:
+def fetch_all_psx_prices_bulk(force_refresh: bool = False, timeout: int = 12) -> Dict[str, Dict[str, float]]:
     """
-    Fetches all PSX ticker prices in a single HTTP request (verify=False) and caches them
+    Fetches all PSX ticker prices in a single HTTP request to https://dps.psx.com.pk/market-watch
+    (verify=False) and caches {ticker: {"price": float, "change": float, "change_pct": float}}
     in memory for 120 seconds.
-    Tries https://dps.psx.com.pk/market-watch first, with automatic single-request fallback
-    to https://dps.psx.com.pk/screener if DOSarrest blocks XHR /market-watch without cookies.
+    Automatically falls back to https://dps.psx.com.pk/screener if DOSarrest blocks XHR /market-watch.
     """
     global _BULK_QUOTES_CACHE, _BULK_QUOTES_TS
 
@@ -224,6 +224,10 @@ def fetch_bulk_psx_quotes(force_refresh: bool = False, timeout: int = 12) -> Dic
         return _BULK_QUOTES_CACHE
 
 
+# Backwards-compatible alias
+fetch_bulk_psx_quotes = fetch_all_psx_prices_bulk
+
+
 async def fetch_bulk_psx_quotes_async(force_refresh: bool = False, timeout: int = 12) -> Dict[str, Dict[str, float]]:
     """
     Async bulk PSX quote fetcher using aiohttp with ssl=False (Ubuntu ARM64 safe) and 120s memory cache.
@@ -276,13 +280,13 @@ async def fetch_bulk_psx_quotes_async(force_refresh: bool = False, timeout: int 
 def get_bulk_quote_for_ticker(ticker: str, allow_single_fallback: bool = True) -> Tuple[float, float]:
     """
     Returns (price, change_pct) for a PSX ticker using the 120s in-memory bulk market cache first.
-    Falls back to single-company scrape (verify=False) only if missing from bulk table.
+    Falls back to single-company HTML scrape (verify=False, .quote__close) only if missing from bulk table.
     """
     sym = str(ticker or "").strip().upper()
     if not sym:
         return 0.0, 0.0
 
-    bulk = fetch_bulk_psx_quotes(force_refresh=False)
+    bulk = fetch_all_psx_prices_bulk(force_refresh=False)
     entry = bulk.get(sym)
     if entry and entry.get("price", 0.0) > 0:
         return float(entry["price"]), float(entry.get("change_pct", 0.0))
@@ -294,17 +298,7 @@ def get_bulk_quote_for_ticker(ticker: str, allow_single_fallback: bool = True) -
     try:
         res = requests.get(url, headers=DEFAULT_BROWSER_HEADERS, verify=False, timeout=10)
         res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-        price = 0.0
-        change_pct = 0.0
-        price_elem = soup.select_one(".quote__close")
-        if price_elem:
-            price = _clean_float(price_elem.get_text(strip=True), 0.0)
-        change_elem = soup.select_one(".quote__change")
-        if change_elem:
-            m = re.search(r"\(([-+]?[0-9]*\.?[0-9]+)%\)", change_elem.get_text(" ", strip=True))
-            if m:
-                change_pct = float(m.group(1))
+        price, change_pct = parse_company_quote_html(res.text)
         if price > 0:
             with _BULK_LOCK:
                 _BULK_QUOTES_CACHE[sym] = {"price": price, "change": 0.0, "change_pct": change_pct}
@@ -381,17 +375,42 @@ def _looks_like_html(body: str, content_type: str = "") -> bool:
     return s.startswith(("<!doctype", "<html", "<head", "<body", "<div", "<table", "<!--"))
 
 
-def _extract_company_metrics_from_html(html: str) -> Optional[Dict[str, Any]]:
-    """Extracts fundamental fields from SSR /company/<TICKER> HTML when legacy /api/company/<TICKER> is requested."""
+def parse_company_quote_html(html: str) -> Tuple[float, float]:
+    """
+    Parses /company/<TICKER> SSR HTML using BeautifulSoup (soup.select_one('.quote__close'))
+    to extract (spot_price, change_pct).
+    """
+    if not html:
+        return 0.0, 0.0
+    soup = BeautifulSoup(html, "html.parser")
+    price = 0.0
+    change_pct = 0.0
+    price_elem = soup.select_one(".quote__close")
+    if price_elem:
+        price = _clean_float(price_elem.get_text(strip=True), 0.0)
+    change_elem = soup.select_one(".quote__change")
+    if change_elem:
+        txt = change_elem.get_text(" ", strip=True)
+        m = re.search(r"\(([-+]?[0-9]*\.?[0-9]+)%\)", txt)
+        if m:
+            change_pct = float(m.group(1))
+        else:
+            change_pct = _clean_float(txt, 0.0)
+    return price, change_pct
+
+
+def _extract_company_metrics_from_html(html: str, ticker: str = "") -> Optional[Dict[str, Any]]:
+    """Extracts spot quote and fundamental fields from SSR /company/<TICKER> HTML via BeautifulSoup."""
     if not html:
         return None
+    price, change_pct = parse_company_quote_html(html)
     soup = BeautifulSoup(html, "html.parser")
     out: Dict[str, Any] = {}
-    price_el = soup.select_one(".quote__close")
-    if price_el:
-        p = _clean_float(price_el.get_text(strip=True), 0.0)
-        if p > 0:
-            out["price"] = p
+    if ticker:
+        out["ticker"] = ticker.upper()
+    if price > 0:
+        out["price"] = price
+        out["change_pct"] = change_pct
 
     for item in soup.select(".stats_item"):
         lbl_el = item.select_one(".stats_label")
@@ -418,17 +437,18 @@ async def fetch_psx_data_robust(
     """
     Hardened async PSX scraper with ssl=False on all aiohttp calls (fixes SSL certificate
     verification failures on Ubuntu ARM64 Docker).
-    Never calls json.loads(html) when /company/<TICKER> or an HTML payload is returned.
+    When url contains '/company/', parses HTML via BeautifulSoup (soup.select_one('.quote__close'))
+    when is_json=True (or returns raw HTML when is_json=False), never calling json.loads(html).
     """
     max_retries = 3
-    is_company_html_page = ("/company/" in url) and ("/api/" not in url)
+    is_company_url = "/company/" in url
     is_legacy_company_api = "/api/company/" in url
+    ticker_tail = url.rstrip("/").split("/")[-1].upper() if is_company_url else ""
 
     target_url = url
     if "symbols" in url or "KMI30" in url:
         target_url = "https://dps.psx.com.pk/screener"
     elif is_legacy_company_api:
-        ticker_tail = url.rstrip("/").split("/")[-1].upper()
         target_url = f"https://dps.psx.com.pk/company/{ticker_tail}"
 
     for attempt in range(max_retries):
@@ -472,22 +492,27 @@ async def fetch_psx_data_robust(
                                 {"symbol": "PSO"}, {"symbol": "MARI"}, {"symbol": "POL"},
                                 {"symbol": "OGDC"}, {"symbol": "PPL"}, {"symbol": "MTL"},
                                 {"symbol": "THALL"}, {"symbol": "CHCC"}, {"symbol": "FFC"},
-                                {"symbol": "ATRL"}, {"symbol": "NRL"}, {"symbol": "TRG"},
-                                {"symbol": "AVN"}, {"symbol": "SAZEW"}, {"symbol": "INIL"},
-                                {"symbol": "ISL"}, {"symbol": "PIOC"}, {"symbol": "DGKC"},
-                                {"symbol": "MLCF"}, {"symbol": "MUREB"}, {"symbol": "SEARL"},
-                                {"symbol": "AGP"}, {"symbol": "ABOT"}, {"symbol": "FCCL"},
+                                {"symbol": "FABL"}, {"symbol": "ATRL"}, {"symbol": "NRL"},
+                                {"symbol": "TRG"}, {"symbol": "AVN"}, {"symbol": "SAZEW"},
+                                {"symbol": "INIL"}, {"symbol": "ISL"}, {"symbol": "PIOC"},
+                                {"symbol": "DGKC"}, {"symbol": "MLCF"}, {"symbol": "MUREB"},
+                                {"symbol": "SEARL"}, {"symbol": "AGP"}, {"symbol": "ABOT"},
+                                {"symbol": "FCCL"},
                             ]
 
-                        # Never run json.loads() on /company/<TICKER> HTML pages
-                        if is_company_html_page or not is_json:
+                        # Raw HTML requested explicitly (e.g., _scrape_psx_pe or announcements)
+                        if not is_json:
                             return html
 
-                        if is_legacy_company_api and _looks_like_html(html, content_type):
-                            return _extract_company_metrics_from_html(html)
+                        # /company/<TICKER> or /api/company/<TICKER> with is_json=True:
+                        # Parse HTML via BeautifulSoup (.quote__close) instead of json.loads(html)
+                        if is_company_url:
+                            parsed_metrics = _extract_company_metrics_from_html(html, ticker=ticker_tail)
+                            if parsed_metrics:
+                                return parsed_metrics
+                            return None
 
                         if _looks_like_html(html, content_type):
-                            # Response is HTML despite is_json=True; do not call json.loads(html)
                             return None
 
                         try:
