@@ -47,6 +47,9 @@ import base64
 import uuid
 import json
 import re
+import datetime
+import importlib
+import shutil
 
 if os.name != "nt":
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -436,6 +439,52 @@ async def lifespan(app: FastAPI):
         id="youtube_ingestion_daily",
         name="Daily YouTube Transcript Sweep"
     )
+    async def _scheduled_psx_live_price_tick():
+        """Refreshes PSX holdings every 60s during PSX market hours (Mon-Fri 09:05-16:45 PKT)."""
+        try:
+            pkt_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+            is_weekday = pkt_now.weekday() < 5
+            in_market_window = (
+                (pkt_now.hour > 9 or (pkt_now.hour == 9 and pkt_now.minute >= 5))
+                and (pkt_now.hour < 16 or (pkt_now.hour == 16 and pkt_now.minute <= 45))
+            )
+            if is_weekday and in_market_window:
+                from portfolio_manager import refresh_portfolio_live_prices
+                await asyncio.to_thread(refresh_portfolio_live_prices, True)
+        except Exception as price_tick_err:
+            print(f"⚠️ [60s Price Monitor] {price_tick_err}", flush=True)
+
+    async def _scheduled_auto_git_pull_tick():
+        """Zero-SSH auto-deployment: checks origin/main every 60s inside Cloud/Docker containers."""
+        auto_enabled = (
+            os.getenv("AUTO_GIT_PULL", "").strip().lower() == "true"
+            or os.getenv("CLOUD_ENV", "").strip().lower() == "true"
+        )
+        if not auto_enabled:
+            return
+        try:
+            await execute_git_pull_and_reload(trigger_source="scheduler_60s")
+        except Exception as git_err:
+            print(f"⚠️ [Auto Git Pull] {git_err}", flush=True)
+
+    scheduler.add_job(
+        _scheduled_psx_live_price_tick,
+        'interval',
+        seconds=60,
+        id="psx_live_price_monitor_60s",
+        name="60s PSX Market-Hours Live Price Monitor",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _scheduled_auto_git_pull_tick,
+        'interval',
+        seconds=60,
+        id="zero_ssh_auto_git_pull_60s",
+        name="60s Zero-SSH Auto Git Pull",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     
     loop = asyncio.get_running_loop()
@@ -488,7 +537,7 @@ async def test_psx_scraper_endpoint(force_refresh: bool = True):
             prices_out[sym] = {
                 "price": round(float(q["price"]), 2),
                 "change_pct": round(float(q.get("change_pct", 0.0)), 2),
-                "source": "bulk_market_watch",
+                "source": q.get("source", "psx_3tier_bulk"),
             }
         else:
             robust_data = await fetch_psx_data_robust(f"https://dps.psx.com.pk/company/{sym}", is_json=True)
@@ -563,16 +612,22 @@ def verify_dashboard_auth(request: Request):
 
 class DividendCreatePayload(BaseModel):
     ticker: str
-    shares_held: float
-    dps_gross: float
+    shares_held: Optional[float] = None
+    dps_gross: Optional[float] = None
+    gross_amount: Optional[float] = None
+    net_amount: Optional[float] = None
     tax_rate_pct: Optional[float] = 15.00
     ex_date: Optional[str] = None
     payment_date: Optional[str] = None
-    status: Optional[str] = "ENTITLED"
+    status: Optional[str] = "CREDITED_TO_BANK"
     notes: Optional[str] = None
 
 class DividendStatusUpdatePayload(BaseModel):
     status: str
+
+class PositionUpdatePayload(BaseModel):
+    shares: float
+    avg_price: float
 
 class CapitalTransactionPayload(BaseModel):
     tx_type: str
@@ -591,6 +646,185 @@ class PortfolioSyncPayload(BaseModel):
     cash_balance: Optional[float] = None
     total_working_capital: Optional[float] = None
     holdings: Optional[List[Dict[str, Any]]] = None
+
+_GIT_PULL_LOCK = asyncio.Lock()
+_LAST_TARBALL_SHA: Optional[str] = None
+
+async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[str, Any]:
+    """
+    Zero-SSH Auto-Deployment Engine:
+    1) Uses git fetch origin main + git reset --hard origin/main (bootstrapping .git if needed).
+    2) Falls back to GitHub main tarball sync if git binary is absent inside an older container.
+    3) Hot-reloads updated Python modules; if main.py changed in CLOUD_ENV, schedules clean execv restart.
+    """
+    global _LAST_TARBALL_SHA
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_url = os.getenv("GITHUB_REPO_URL", "https://github.com/saad-designs/PORTFOLIO-AGENT.git").strip()
+
+    async with _GIT_PULL_LOCK:
+        def _sync_worker() -> Dict[str, Any]:
+            global _LAST_TARBALL_SHA
+            env_path = os.path.join(repo_dir, ".env")
+            env_backup = None
+            if os.path.exists(env_path):
+                try:
+                    with open(env_path, "rb") as ef:
+                        env_backup = ef.read()
+                except Exception:
+                    env_backup = None
+
+            git_bin = shutil.which("git")
+            changed_files: List[str] = []
+            old_sha = ""
+            new_sha = ""
+            updated = False
+
+            try:
+                if git_bin:
+                    git_dir = os.path.join(repo_dir, ".git")
+                    if not os.path.isdir(git_dir):
+                        subprocess.run([git_bin, "init"], cwd=repo_dir, check=True, capture_output=True, text=True, timeout=15)
+                        subprocess.run([git_bin, "remote", "add", "origin", repo_url], cwd=repo_dir, check=False, capture_output=True, text=True, timeout=10)
+
+                    head_proc = subprocess.run([git_bin, "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, timeout=10)
+                    old_sha = (head_proc.stdout or "").strip() if head_proc.returncode == 0 else ""
+
+                    fetch_proc = subprocess.run([git_bin, "fetch", "origin", "main"], cwd=repo_dir, capture_output=True, text=True, timeout=25)
+                    if fetch_proc.returncode != 0:
+                        return {
+                            "status": "error",
+                            "updated": False,
+                            "trigger": trigger_source,
+                            "detail": (fetch_proc.stderr or fetch_proc.stdout or "git fetch failed").strip(),
+                        }
+
+                    rem_proc = subprocess.run([git_bin, "rev-parse", "origin/main"], cwd=repo_dir, capture_output=True, text=True, timeout=10)
+                    new_sha = (rem_proc.stdout or "").strip()
+
+                    if old_sha and new_sha and old_sha == new_sha:
+                        return {
+                            "status": "up_to_date",
+                            "updated": False,
+                            "commit": new_sha[:7],
+                            "trigger": trigger_source,
+                        }
+
+                    if old_sha and new_sha:
+                        diff_proc = subprocess.run(
+                            [git_bin, "diff", "--name-only", old_sha, new_sha],
+                            cwd=repo_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        if diff_proc.returncode == 0:
+                            changed_files = [ln.strip() for ln in (diff_proc.stdout or "").splitlines() if ln.strip()]
+
+                    subprocess.run([git_bin, "reset", "--hard", "origin/main"], cwd=repo_dir, check=True, capture_output=True, text=True, timeout=20)
+                    updated = True
+                else:
+                    # Fallback for un-rebuilt slim containers without /usr/bin/git
+                    import io
+                    import tarfile
+                    import requests as _req
+                    meta_r = _req.get("https://api.github.com/repos/saad-designs/PORTFOLIO-AGENT/commits/main", timeout=10)
+                    if meta_r.status_code != 200:
+                        return {"status": "error", "updated": False, "detail": f"GitHub API HTTP {meta_r.status_code}"}
+                    new_sha = str(meta_r.json().get("sha") or "")
+                    if _LAST_TARBALL_SHA and new_sha == _LAST_TARBALL_SHA:
+                        return {"status": "up_to_date", "updated": False, "commit": new_sha[:7], "trigger": trigger_source}
+                    tar_r = _req.get("https://codeload.github.com/saad-designs/PORTFOLIO-AGENT/tar.gz/refs/heads/main", timeout=25)
+                    tar_r.raise_for_status()
+                    with tarfile.open(fileobj=io.BytesIO(tar_r.content), mode="r:gz") as tf:
+                        for member in tf.getmembers():
+                            if not member.isfile():
+                                continue
+                            parts = member.name.split("/", 1)
+                            if len(parts) < 2 or not parts[1] or parts[1] == ".env":
+                                continue
+                            rel_path = os.path.normpath(parts[1])
+                            if rel_path.startswith(".."):
+                                continue
+                            dest_path = os.path.join(repo_dir, rel_path)
+                            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                            src_f = tf.extractfile(member)
+                            if src_f:
+                                with open(dest_path, "wb") as out_f:
+                                    out_f.write(src_f.read())
+                            changed_files.append(rel_path.replace("\\", "/"))
+                    old_sha = _LAST_TARBALL_SHA or ""
+                    _LAST_TARBALL_SHA = new_sha
+                    updated = True
+            finally:
+                if env_backup is not None and not os.path.exists(env_path):
+                    try:
+                        with open(env_path, "wb") as ef:
+                            ef.write(env_backup)
+                    except Exception:
+                        pass
+
+            reloaded_modules: List[str] = []
+            if updated:
+                reload_order = [
+                    "utils",
+                    "market_data_scraper",
+                    "portfolio_manager",
+                    "valuation_engine",
+                    "learning_engine",
+                    "chat_copilot",
+                    "news_scraper",
+                ]
+                for mod_name in reload_order:
+                    if mod_name in sys.modules:
+                        try:
+                            importlib.reload(sys.modules[mod_name])
+                            reloaded_modules.append(mod_name)
+                        except Exception as rel_err:
+                            print(f"⚠️ [Hot Reload] Could not reload {mod_name}: {rel_err}", flush=True)
+
+            return {
+                "status": "updated" if updated else "up_to_date",
+                "updated": updated,
+                "previous_commit": old_sha[:7] if old_sha else None,
+                "commit": new_sha[:7] if new_sha else None,
+                "changed_files": changed_files,
+                "reloaded_modules": reloaded_modules,
+                "trigger": trigger_source,
+            }
+
+        res = await asyncio.to_thread(_sync_worker)
+        if (
+            res.get("updated")
+            and "main.py" in (res.get("changed_files") or [])
+            and os.getenv("CLOUD_ENV", "").strip().lower() == "true"
+        ):
+            async def _delayed_execv():
+                await asyncio.sleep(1.2)
+                print("🔄 [Zero-SSH Deploy] main.py updated — restarting process cleanly via os.execv...", flush=True)
+                cleanup_node_process()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+
+            asyncio.create_task(_delayed_execv())
+            res["restarting_main"] = True
+        return res
+
+@app.post("/api/dashboard/git-pull")
+async def trigger_dashboard_git_pull(request: Request):
+    verify_dashboard_auth(request)
+    return await execute_git_pull_and_reload(trigger_source="dashboard_button")
+
+@app.put("/api/dashboard/positions/{ticker}")
+async def update_dashboard_position(ticker: str, payload: PositionUpdatePayload, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import update_portfolio_position
+    updated = await asyncio.to_thread(update_portfolio_position, ticker, payload.shares, payload.avg_price)
+    return {"status": "success", "position": updated}
+
+@app.delete("/api/dashboard/positions/{ticker}")
+async def delete_dashboard_position(ticker: str, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import delete_portfolio_position
+    return await asyncio.to_thread(delete_portfolio_position, ticker)
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -782,10 +1016,12 @@ async def create_dashboard_dividend(payload: DividendCreatePayload, request: Req
         ticker=payload.ticker,
         shares_held=payload.shares_held,
         dps_gross=payload.dps_gross,
+        gross_amount=payload.gross_amount,
+        net_amount=payload.net_amount,
         tax_rate_pct=payload.tax_rate_pct if payload.tax_rate_pct is not None else 15.00,
         ex_date=payload.ex_date,
         payment_date=payload.payment_date,
-        status=payload.status or "ENTITLED",
+        status=payload.status or "CREDITED_TO_BANK",
         notes=payload.notes
     )
     return {"status": "success", "dividend": entry}
@@ -797,6 +1033,12 @@ async def update_dashboard_dividend(id: int, payload: DividendStatusUpdatePayloa
     from portfolio_manager import update_dividend_status
     updated = await asyncio.to_thread(update_dividend_status, id, payload.status)
     return {"status": "success", "dividend": updated}
+
+@app.delete("/api/dashboard/dividends/{id}")
+async def delete_dashboard_dividend(id: int, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import delete_dividend_entry
+    return await asyncio.to_thread(delete_dividend_entry, id)
 
 @app.get("/api/dashboard/capital")
 async def get_dashboard_capital(request: Request, limit: int = 100):
@@ -816,6 +1058,12 @@ async def create_dashboard_capital(payload: CapitalTransactionPayload, request: 
         reference_note=payload.reference_note
     )
     return {"status": "success", "entry": entry}
+
+@app.delete("/api/dashboard/capital/{id}")
+async def delete_dashboard_capital(id: int, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import delete_capital_entry
+    return await asyncio.to_thread(delete_capital_entry, id)
 
 @app.get("/api/dashboard/trades")
 async def get_dashboard_trades(request: Request, limit: int = 100):
@@ -839,97 +1087,144 @@ async def create_dashboard_trade(payload: TradeRecordPayload, request: Request):
     )
     return {"status": "success", "trade": trade}
 
+@app.delete("/api/dashboard/trades/{id}")
+async def delete_dashboard_trade(id: int, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import delete_trade_entry
+    return await asyncio.to_thread(delete_trade_entry, id)
+
 @app.get("/api/dashboard/intelligence")
 async def get_dashboard_intelligence(request: Request):
     verify_dashboard_auth(request)
     from portfolio_manager import get_db_connection, get_desk_manager_thought
-    
+
     def _fetch_intelligence():
         conn = get_db_connection()
         cur = conn.cursor()
+        messages = []
+        pending_signals = []
+        institutional_reports = []
+        active_playbook = []
+        mentor_knowledge = []
         try:
-            cur.execute("""
-                SELECT id, chat_id, sender, body, timestamp, created_at, extension
-                FROM messages
-                ORDER BY created_at DESC
-                LIMIT 25;
-            """)
-            messages = [
-                {
-                    "id": r[0], "chat_id": r[1], "sender": r[2], "body": r[3],
-                    "timestamp": r[4], "created_at": r[5].isoformat() if r[5] else None,
-                    "extension": r[6]
-                }
-                for r in cur.fetchall()
-            ]
+            try:
+                cur.execute("""
+                    SELECT id, chat_id, sender, body, timestamp, created_at
+                    FROM messages
+                    ORDER BY created_at DESC
+                    LIMIT 25;
+                """)
+                messages = [
+                    {
+                        "id": r[0],
+                        "chat_id": r[1],
+                        "sender": r[2],
+                        "body": r[3],
+                        "timestamp": r[4],
+                        "created_at": r[5].isoformat() if r[5] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception as q_err:
+                conn.rollback()
+                print(f"⚠️ [Intelligence] messages query skipped: {q_err}", flush=True)
 
-            cur.execute("""
-                SELECT id, source, signal_payload, status, created_at
-                FROM pending_signals
-                ORDER BY created_at DESC
-                LIMIT 20;
-            """)
-            pending_signals = [
-                {
-                    "id": r[0], "source": r[1], "payload": r[2], "status": r[3],
-                    "created_at": r[4].isoformat() if r[4] else None
-                }
-                for r in cur.fetchall()
-            ]
+            try:
+                cur.execute("""
+                    SELECT id, source, signal_payload, status, created_at
+                    FROM pending_signals
+                    ORDER BY created_at DESC
+                    LIMIT 20;
+                """)
+                pending_signals = [
+                    {
+                        "id": r[0],
+                        "source": r[1],
+                        "payload": r[2],
+                        "status": r[3],
+                        "created_at": r[4].isoformat() if r[4] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception as q_err:
+                conn.rollback()
+                print(f"⚠️ [Intelligence] pending_signals query skipped: {q_err}", flush=True)
 
-            cur.execute("""
-                SELECT id, source, ticker, subject, sentiment, summary, created_at
-                FROM institutional_reports
-                ORDER BY created_at DESC
-                LIMIT 20;
-            """)
-            institutional_reports = [
-                {
-                    "id": r[0], "source": r[1], "ticker": r[2], "subject": r[3],
-                    "sentiment": r[4], "summary": r[5], "created_at": r[6].isoformat() if r[6] else None
-                }
-                for r in cur.fetchall()
-            ]
+            try:
+                cur.execute("""
+                    SELECT id, source, ticker, subject, sentiment, summary, created_at
+                    FROM institutional_reports
+                    ORDER BY created_at DESC
+                    LIMIT 20;
+                """)
+                institutional_reports = [
+                    {
+                        "id": r[0],
+                        "source": r[1],
+                        "ticker": r[2],
+                        "subject": r[3],
+                        "sentiment": r[4],
+                        "summary": r[5],
+                        "created_at": r[6].isoformat() if r[6] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception as q_err:
+                conn.rollback()
+                print(f"⚠️ [Intelligence] institutional_reports query skipped: {q_err}", flush=True)
 
-            cur.execute("""
-                SELECT id, source, rule, COALESCE(confidence_weight, 0.70), COALESCE(times_applied, 1),
-                       COALESCE(regime_tag, 'ALL'), teaching_note, created_at
-                FROM active_playbook
-                ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
-                LIMIT 20;
-            """)
-            active_playbook = [
-                {
-                    "id": r[0], "source": r[1], "rule": r[2],
-                    "confidence_weight": float(r[3] or 0.70),
-                    "times_applied": int(r[4] or 1),
-                    "regime_tag": r[5] or "ALL",
-                    "teaching_note": r[6] or "",
-                    "created_at": r[7].isoformat() if r[7] else None
-                }
-                for r in cur.fetchall()
-            ]
+            try:
+                cur.execute("""
+                    SELECT id, source, rule, COALESCE(confidence_weight, 0.70), COALESCE(times_applied, 1),
+                           COALESCE(regime_tag, 'ALL'), teaching_note, created_at
+                    FROM active_playbook
+                    ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
+                    LIMIT 20;
+                """)
+                active_playbook = [
+                    {
+                        "id": r[0],
+                        "source": r[1],
+                        "rule": r[2],
+                        "confidence_weight": float(r[3] or 0.70),
+                        "times_applied": int(r[4] or 1),
+                        "regime_tag": r[5] or "ALL",
+                        "teaching_note": r[6] or "",
+                        "created_at": r[7].isoformat() if r[7] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception as q_err:
+                conn.rollback()
+                print(f"⚠️ [Intelligence] active_playbook query skipped: {q_err}", flush=True)
 
-            cur.execute("""
-                SELECT id, source_type, source_url, content, created_at
-                FROM agent_knowledge
-                ORDER BY created_at DESC
-                LIMIT 20;
-            """)
-            mentor_knowledge = [
-                {
-                    "id": r[0], "source_type": r[1], "source_url": r[2],
-                    "content": r[3], "created_at": r[4].isoformat() if r[4] else None
-                }
-                for r in cur.fetchall()
-            ]
+            try:
+                cur.execute("""
+                    SELECT id, source_type, source_url, content, created_at
+                    FROM agent_knowledge
+                    ORDER BY created_at DESC
+                    LIMIT 20;
+                """)
+                mentor_knowledge = [
+                    {
+                        "id": r[0],
+                        "source_type": r[1],
+                        "source_url": r[2],
+                        "content": r[3],
+                        "created_at": r[4].isoformat() if r[4] else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception as q_err:
+                conn.rollback()
+                print(f"⚠️ [Intelligence] agent_knowledge query skipped: {q_err}", flush=True)
 
             return {
                 "messages": messages,
                 "pending_signals": pending_signals,
                 "institutional_reports": institutional_reports,
                 "active_playbook": active_playbook,
-                "mentor_knowledge": mentor_knowledge
+                "mentor_knowledge": mentor_knowledge,
             }
         finally:
             cur.close()
@@ -939,44 +1234,63 @@ async def get_dashboard_intelligence(request: Request):
     intel_data["desk_manager_thought"] = await asyncio.to_thread(get_desk_manager_thought)
     return {"status": "success", **intel_data}
 
+@app.delete("/api/dashboard/feed/{id}")
+async def delete_dashboard_feed_item(id: int, request: Request):
+    verify_dashboard_auth(request)
+    from portfolio_manager import delete_agent_feed_entry
+    return await asyncio.to_thread(delete_agent_feed_entry, id)
+
 @app.get("/api/dashboard/feed")
 async def get_dashboard_feed(request: Request, limit: int = 50):
     verify_dashboard_auth(request)
     from portfolio_manager import get_agent_feed, get_db_connection
     feed = await asyncio.to_thread(get_agent_feed, limit)
-    
+
     def _fetch_ancillary():
         conn = get_db_connection()
         cur = conn.cursor()
+        pending, playbook, knowledge = [], [], []
         try:
-            cur.execute("SELECT id, source, signal_payload, status, created_at FROM pending_signals ORDER BY created_at DESC LIMIT 20;")
-            pending = [
-                {"id": r[0], "source": r[1], "payload": r[2], "status": r[3], "created_at": r[4].isoformat() if r[4] else None}
-                for r in cur.fetchall()
-            ]
-            cur.execute("""
-                SELECT id, source, rule, COALESCE(confidence_weight, 0.70), COALESCE(times_applied, 1),
-                       COALESCE(regime_tag, 'ALL'), teaching_note, created_at
-                FROM active_playbook
-                ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
-                LIMIT 20;
-            """)
-            playbook = [
-                {
-                    "id": r[0], "source": r[1], "rule": r[2],
-                    "confidence_weight": float(r[3] or 0.70),
-                    "times_applied": int(r[4] or 1),
-                    "regime_tag": r[5] or "ALL",
-                    "teaching_note": r[6] or "",
-                    "created_at": r[7].isoformat() if r[7] else None
-                }
-                for r in cur.fetchall()
-            ]
-            cur.execute("SELECT id, source_type, source_url, content, created_at FROM agent_knowledge ORDER BY created_at DESC LIMIT 20;")
-            knowledge = [
-                {"id": r[0], "source_type": r[1], "source_url": r[2], "content": r[3], "created_at": r[4].isoformat() if r[4] else None}
-                for r in cur.fetchall()
-            ]
+            try:
+                cur.execute("SELECT id, source, signal_payload, status, created_at FROM pending_signals ORDER BY created_at DESC LIMIT 20;")
+                pending = [
+                    {"id": r[0], "source": r[1], "payload": r[2], "status": r[3], "created_at": r[4].isoformat() if r[4] else None}
+                    for r in cur.fetchall()
+                ]
+            except Exception:
+                conn.rollback()
+
+            try:
+                cur.execute("""
+                    SELECT id, source, rule, COALESCE(confidence_weight, 0.70), COALESCE(times_applied, 1),
+                           COALESCE(regime_tag, 'ALL'), teaching_note, created_at
+                    FROM active_playbook
+                    ORDER BY COALESCE(confidence_weight, 0.70) DESC, created_at DESC
+                    LIMIT 20;
+                """)
+                playbook = [
+                    {
+                        "id": r[0], "source": r[1], "rule": r[2],
+                        "confidence_weight": float(r[3] or 0.70),
+                        "times_applied": int(r[4] or 1),
+                        "regime_tag": r[5] or "ALL",
+                        "teaching_note": r[6] or "",
+                        "created_at": r[7].isoformat() if r[7] else None
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception:
+                conn.rollback()
+
+            try:
+                cur.execute("SELECT id, source_type, source_url, content, created_at FROM agent_knowledge ORDER BY created_at DESC LIMIT 20;")
+                knowledge = [
+                    {"id": r[0], "source_type": r[1], "source_url": r[2], "content": r[3], "created_at": r[4].isoformat() if r[4] else None}
+                    for r in cur.fetchall()
+                ]
+            except Exception:
+                conn.rollback()
+
             return pending, playbook, knowledge
         finally:
             cur.close()

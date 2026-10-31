@@ -1709,23 +1709,29 @@ def record_dividend(
     dps = float(dps_gross) if dps_gross is not None else 0.0
     tax_rate = float(tax_rate_pct) if tax_rate_pct is not None else 15.00
     
-    # Financial math resolution
-    if gross_amount is None:
+    # Financial math resolution (supports DPS mode, Total Gross mode, or Total Net mode)
+    if gross_amount is None or float(gross_amount) <= 0:
         if shares > 0 and dps > 0:
             gross_amount = round(shares * dps, 2)
-        elif net_amount is not None:
-            gross_amount = round(float(net_amount) / (1.0 - (tax_rate / 100.0)), 2) if tax_rate < 100 else float(net_amount)
+        elif net_amount is not None and float(net_amount) > 0:
+            gross_amount = round(float(net_amount) / (1.0 - (tax_rate / 100.0)), 2) if tax_rate < 100 else round(float(net_amount), 2)
         else:
             gross_amount = 0.0
     else:
         gross_amount = round(float(gross_amount), 2)
 
+    if dps <= 0 and shares > 0 and gross_amount > 0:
+        dps = round(gross_amount / shares, 4)
+
     if tax_withheld is None:
-        tax_withheld = round(gross_amount * (tax_rate / 100.0), 2)
+        if net_amount is not None and float(net_amount) > 0 and gross_amount >= float(net_amount):
+            tax_withheld = round(gross_amount - float(net_amount), 2)
+        else:
+            tax_withheld = round(gross_amount * (tax_rate / 100.0), 2)
     else:
         tax_withheld = round(float(tax_withheld), 2)
 
-    if net_amount is None:
+    if net_amount is None or float(net_amount) <= 0:
         net_amount = round(gross_amount - tax_withheld, 2)
     else:
         net_amount = round(float(net_amount), 2)
@@ -2532,6 +2538,10 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
             portfolio_cost += cb
             sector_totals[sector] = sector_totals.get(sector, 0.0) + mv
 
+            denom_day = 1.0 + (change_pct / 100.0)
+            prev_mv = (mv / denom_day) if abs(denom_day) > 1e-6 else mv
+            day_chg_pkr = round(mv - prev_mv, 2)
+
             holdings_detail.append({
                 "ticker": tick,
                 "sector": sector,
@@ -2539,6 +2549,7 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
                 "avg_price": avg_price,
                 "current_price": curr_price,
                 "change_pct": change_pct,
+                "day_change_pkr": day_chg_pkr,
                 "market_value": mv,
                 "cost_basis": cb,
                 "unrealized_pnl": pnl,
@@ -2582,6 +2593,10 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
         # Sort holdings by market_value DESC
         holdings_detail.sort(key=lambda x: x["market_value"], reverse=True)
 
+        total_day_change_pkr = round(sum(float(h.get("day_change_pkr", 0.0)) for h in holdings_detail), 2)
+        prev_custody_val = portfolio_market_val - total_day_change_pkr
+        total_day_change_pct = round((total_day_change_pkr / prev_custody_val * 100.0), 2) if prev_custody_val > 0 else 0.0
+
         unrealized_pnl = round(portfolio_market_val - portfolio_cost, 2)
         unrealized_pnl_pct = round((unrealized_pnl / portfolio_cost * 100), 2) if portfolio_cost > 0 else 0.0
         net_worth = round(portfolio_market_val + available_cash, 2)
@@ -2598,6 +2613,8 @@ def get_complete_financial_summary(use_cached_prices: bool = False) -> dict:
                 "portfolio_market_value": round(portfolio_market_val, 2),
                 "portfolio_cost_basis": round(portfolio_cost, 2),
                 "total_cost_basis": round(portfolio_cost, 2),
+                "day_change_pkr": total_day_change_pkr,
+                "day_change_pct": total_day_change_pct,
                 "unrealized_pnl": unrealized_pnl,
                 "unrealized_pnl_pct": unrealized_pnl_pct,
                 "total_gross_dividends": total_gross_div,
@@ -2922,3 +2939,199 @@ def get_chat_history(limit: int = 50) -> list[dict]:
 
 
 
+
+# ==============================================================================
+# CRUD EDIT & DELETE HELPERS FOR DASHBOARD RECORD MANAGEMENT
+# ==============================================================================
+
+def get_cached_db_prices() -> dict:
+    """Tier 3 live-price fallback: returns {TICKER: (last_price_or_avg, last_change_pct)} from portfolio_holdings."""
+    out = {}
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT UPPER(ticker), COALESCE(NULLIF(last_price, 0), avg_buy_price), COALESCE(last_change_pct, 0)
+            FROM portfolio_holdings
+            WHERE shares > 0;
+        """)
+        for r in cur.fetchall():
+            if r[0] and r[1] and float(r[1]) > 0:
+                out[str(r[0]).upper()] = (round(float(r[1]), 2), round(float(r[2] or 0.0), 2))
+    except Exception:
+        pass
+    finally:
+        cur.close()
+        conn.close()
+    return out
+
+
+def update_portfolio_position(ticker: str, shares: float, avg_price: float) -> dict:
+    """Updates shares and avg_buy_price for a holding in portfolio_holdings."""
+    from utils import normalize_ticker
+    clean_ticker = normalize_ticker(ticker)
+    if not clean_ticker:
+        raise ValueError("Ticker is required.")
+    shs = float(shares)
+    avg_p = round(float(avg_price), 4)
+    if shs < 0 or avg_p < 0:
+        raise ValueError("Shares and average price must be non-negative.")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        if shs == 0:
+            cur.execute("DELETE FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker,))
+            conn.commit()
+            invalidate_financial_summary_cache()
+            return {"status": "deleted", "ticker": clean_ticker, "shares": 0.0, "avg_price": avg_p}
+
+        cur.execute("""
+            INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, last_price, updated_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (ticker) DO UPDATE
+            SET shares = EXCLUDED.shares,
+                avg_buy_price = EXCLUDED.avg_buy_price,
+                last_price = COALESCE(NULLIF(portfolio_holdings.last_price, 0), EXCLUDED.avg_buy_price),
+                updated_at = NOW()
+            RETURNING ticker, shares, avg_buy_price, last_price, last_change_pct;
+        """, (clean_ticker, shs, avg_p, avg_p))
+        row = cur.fetchone()
+        conn.commit()
+        invalidate_financial_summary_cache()
+        spot = float(row[3] or avg_p)
+        mv = round(float(row[1]) * spot, 2)
+        cb = round(float(row[1]) * float(row[2]), 2)
+        return {
+            "status": "updated",
+            "ticker": row[0],
+            "shares": float(row[1]),
+            "avg_price": float(row[2]),
+            "last_price": spot,
+            "market_value": mv,
+            "cost_basis": cb,
+            "unrealized_pnl": round(mv - cb, 2),
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_portfolio_position(ticker: str) -> dict:
+    """Deletes a holding row from portfolio_holdings."""
+    from utils import normalize_ticker
+    clean_ticker = normalize_ticker(ticker)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker,))
+        deleted = cur.rowcount
+        conn.commit()
+        invalidate_financial_summary_cache()
+        return {"status": "success", "deleted": deleted, "ticker": clean_ticker}
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_dividend_entry(dividend_id: int) -> dict:
+    """Deletes a dividend row from dividend_ledger and reverses any linked reinvestment ledger entry."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, status FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
+        existing = cur.fetchone()
+        cur.execute("DELETE FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
+        deleted = cur.rowcount
+        if existing and existing[1] == "SENT_TO_KTRADE":
+            cur.execute(
+                "DELETE FROM capital_ledger WHERE tx_type = 'DIVIDEND_SENT_TO_KTRADE' AND (notes LIKE %s OR reference_note LIKE %s);",
+                (f"Reinvested Dividend #{int(dividend_id)}:%", f"Reinvested Dividend #{int(dividend_id)}:%"),
+            )
+        conn.commit()
+        invalidate_financial_summary_cache()
+        return {"status": "success", "deleted": deleted, "id": int(dividend_id)}
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_trade_entry(trade_id: int) -> dict:
+    """Deletes a trade execution row from trade_history and reverses any auto-booked cash adjustment."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT ticker, side, quantity, price, notes FROM trade_history WHERE id = %s;",
+            (int(trade_id),),
+        )
+        tr = cur.fetchone()
+        cur.execute("DELETE FROM trade_history WHERE id = %s;", (int(trade_id),))
+        deleted = cur.rowcount
+        if tr and (tr[4] or "") != "KTrade Custody Baseline Sync":
+            t_sym, t_side, t_qty, t_prc, _ = tr
+            cash_note = f"Trade Execution: {t_side} {float(t_qty):g} {t_sym} @ {float(t_prc)}"
+            cur.execute(
+                """
+                DELETE FROM capital_ledger
+                WHERE id IN (
+                    SELECT id FROM capital_ledger
+                    WHERE tx_type = 'FEE_ADJUSTMENT' AND (notes = %s OR reference_note = %s)
+                    ORDER BY id DESC LIMIT 1
+                );
+                """,
+                (cash_note, cash_note),
+            )
+        conn.commit()
+        invalidate_financial_summary_cache()
+        return {"status": "success", "deleted": deleted, "id": int(trade_id)}
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_capital_entry(entry_id: int) -> dict:
+    """Deletes a capital/cash entry from capital_ledger and recalculates balances."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM capital_ledger WHERE id = %s;", (int(entry_id),))
+        deleted = cur.rowcount
+        conn.commit()
+        invalidate_financial_summary_cache()
+        return {"status": "success", "deleted": deleted, "id": int(entry_id)}
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_agent_feed_entry(feed_id: int) -> dict:
+    """Deletes an activity/signal row from agent_feed."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM agent_feed WHERE id = %s;", (int(feed_id),))
+        deleted = cur.rowcount
+        conn.commit()
+        return {"status": "success", "deleted": deleted, "id": int(feed_id)}
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()

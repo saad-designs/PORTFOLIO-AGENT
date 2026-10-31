@@ -10,8 +10,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# 1. Install system dependencies: curl, build tools, ffmpeg, chromium, CA certificates
+# 1. Install system dependencies: git, curl, build tools, ffmpeg, chromium, CA certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     curl \
     gnupg \
     gcc \

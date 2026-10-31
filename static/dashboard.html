@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AlphaWise — PSX Wealth & Co-Investor</title>
+  <title>Portfolio Manager — PSX Quant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
@@ -16,9 +16,7 @@
       --border: #1F2623;
       --border-strong: #2A3530;
       --lime: #7CE751;
-      --lime-hover: #8CF062;
       --lime-soft: rgba(124, 231, 81, 0.13);
-      --lime-glow: rgba(124, 231, 81, 0.24);
       --emerald: #34D399;
       --emerald-soft: rgba(52, 211, 153, 0.13);
       --text: #F2F6F4;
@@ -26,9 +24,9 @@
       --muted: #8A9992;
       --muted-dim: #5E6D66;
       --danger: #F87171;
-      --danger-soft: rgba(248, 113, 113, 0.13);
+      --danger-soft: rgba(248, 113, 113, 0.14);
       --warning: #FBBF24;
-      --warning-soft: rgba(251, 191, 36, 0.13);
+      --warning-soft: rgba(251, 191, 36, 0.14);
       --radius-card: 22px;
       --radius-inner: 16px;
       --radius-pill: 999px;
@@ -53,15 +51,6 @@
       overflow-x: hidden;
     }
 
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background: radial-gradient(ellipse 62% 28% at 50% -4%, rgba(124, 231, 81, 0.065), transparent 72%);
-      z-index: 0;
-    }
-
     .tabular {
       font-variant-numeric: tabular-nums;
       letter-spacing: -0.015em;
@@ -78,16 +67,13 @@
       background: none;
     }
 
-    /* Outer Frame */
     .app-shell {
-      position: relative;
-      z-index: 1;
-      max-width: 1560px;
+      max-width: 1580px;
       margin: 0 auto;
       padding: 18px 24px 36px;
     }
 
-    /* Top Navigation Header */
+    /* Top Header — Clean Matte Architecture, Zero Scale/Bounce Jitter */
     .top-header {
       display: flex;
       align-items: center;
@@ -108,143 +94,196 @@
     .brand-mark {
       width: 38px;
       height: 38px;
-      border-radius: 12px;
-      background: linear-gradient(145deg, rgba(124, 231, 81, 0.18), rgba(124, 231, 81, 0.06));
-      border: 1px solid rgba(124, 231, 81, 0.35);
+      border-radius: 11px;
+      background: #141917;
+      border: 1px solid #24302B;
       display: grid;
       place-items: center;
       color: var(--lime);
     }
 
+    .brand-text-col {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
     .brand-name {
-      font-size: 20px;
-      font-weight: 800;
-      letter-spacing: -0.03em;
+      font-size: 18.5px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
       color: var(--text);
     }
 
+    .brand-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 3px 7px;
+      border-radius: 6px;
+      background: #161C1A;
+      border: 1px solid #24302B;
+      color: var(--lime);
+    }
+
+    /* Solid Matte Top Pill Bar */
     .pill-nav {
       display: flex;
       align-items: center;
-      gap: 4px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-pill);
-      padding: 5px;
+      gap: 2px;
+      background: #111514;
+      border: 1px solid #1E2623;
+      border-radius: 999px;
+      padding: 4px;
       overflow-x: auto;
       max-width: 100%;
     }
 
     .pill-tab {
-      padding: 9px 18px;
-      border-radius: var(--radius-pill);
+      padding: 8px 16px;
+      border-radius: 999px;
       font-size: 13px;
-      font-weight: 600;
-      color: var(--muted);
+      font-weight: 500;
+      background: transparent;
+      color: #8A9992;
+      border: none;
       white-space: nowrap;
-      transition: all 0.18s ease;
+      transition: color 0.15s ease, background-color 0.15s ease;
     }
 
     .pill-tab:hover {
-      color: var(--text);
-      background: rgba(255, 255, 255, 0.03);
+      color: #E2E8F0;
+      background: #171D1B;
     }
 
     .pill-tab.active {
-      background: var(--lime);
+      background: #7CE751;
       color: #0B0E0D;
-      font-weight: 700;
-      box-shadow: 0 4px 16px rgba(124, 231, 81, 0.25);
+      font-weight: 600;
     }
 
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
+      flex-wrap: wrap;
     }
 
-    .icon-circle-btn {
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: var(--card);
-      border: 1px solid var(--border);
+    /* Flat Architectural Action Pills */
+    .arch-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 14px;
+      background: #161C1A;
+      border: 1px solid #24302B;
+      color: #E2E8F0;
+      border-radius: 10px;
+      font-size: 12.5px;
+      font-weight: 600;
+      transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+    }
+
+    .arch-btn:hover {
+      border-color: #7CE751;
+      color: #FFFFFF;
+      background: #1A221F;
+    }
+
+    .arch-btn-accent {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 15px;
+      background: #7CE751;
+      border: 1px solid #7CE751;
+      color: #0B0E0D;
+      border-radius: 10px;
+      font-size: 12.5px;
+      font-weight: 600;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .arch-btn-accent:hover {
+      background: #8BE965;
+      border-color: #8BE965;
+    }
+
+    .icon-sq-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: #161C1A;
+      border: 1px solid #24302B;
       display: grid;
       place-items: center;
-      color: var(--muted);
-      transition: all 0.18s ease;
+      color: #8A9992;
+      transition: border-color 0.15s ease, color 0.15s ease;
     }
 
-    .icon-circle-btn:hover {
-      color: var(--text);
-      border-color: var(--border-strong);
-      background: var(--card-hover);
+    .icon-sq-btn:hover {
+      border-color: #7CE751;
+      color: #E2E8F0;
     }
 
     .status-chip {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      padding: 8px 14px;
-      border-radius: var(--radius-pill);
-      background: var(--card);
-      border: 1px solid var(--border);
+      gap: 7px;
+      padding: 7px 12px;
+      border-radius: 10px;
+      background: #161C1A;
+      border: 1px solid #24302B;
       font-size: 12px;
       font-weight: 600;
-      color: var(--text-secondary);
+      color: #E2E8F0;
+      cursor: pointer;
+      transition: border-color 0.15s ease;
+    }
+
+    .status-chip:hover {
+      border-color: #7CE751;
     }
 
     .status-dot {
-      width: 8px;
-      height: 8px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
       background: var(--lime);
-      box-shadow: 0 0 0 4px rgba(124, 231, 81, 0.16);
     }
 
     .profile-pill {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
-      padding: 5px 14px 5px 6px;
-      border-radius: var(--radius-pill);
-      background: var(--card);
-      border: 1px solid var(--border);
+      gap: 9px;
+      padding: 4px 12px 4px 5px;
+      border-radius: 10px;
+      background: #161C1A;
+      border: 1px solid #24302B;
     }
 
     .profile-avatar {
-      width: 30px;
-      height: 30px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, var(--lime), var(--emerald));
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      background: #7CE751;
       color: #0B0E0D;
-      font-weight: 800;
-      font-size: 13px;
+      font-weight: 700;
+      font-size: 12px;
       display: grid;
       place-items: center;
     }
 
-    .profile-meta {
-      display: flex;
-      flex-direction: column;
-      line-height: 1.15;
-    }
-
     .profile-name {
       font-size: 12.5px;
-      font-weight: 700;
-      color: var(--text);
+      font-weight: 600;
+      color: #E2E8F0;
     }
 
-    .profile-sub {
-      font-size: 10.5px;
-      color: var(--muted);
-    }
-
-    /* Workspace Layout: Floating Left Icon Rail + Main Canvas */
+    /* Workspace Layout */
     .workspace {
       display: grid;
-      grid-template-columns: 60px minmax(0, 1fr);
+      grid-template-columns: 58px minmax(0, 1fr);
       gap: 20px;
       align-items: start;
     }
@@ -252,40 +291,38 @@
     .icon-rail {
       position: sticky;
       top: 20px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-pill);
-      padding: 9px 7px;
+      background: #111514;
+      border: 1px solid #1E2623;
+      border-radius: 999px;
+      padding: 8px 6px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 8px;
-      box-shadow: var(--shadow-soft);
+      gap: 6px;
     }
 
     .rail-btn {
-      width: 44px;
-      height: 44px;
+      width: 42px;
+      height: 42px;
       border-radius: 50%;
       display: grid;
       place-items: center;
-      color: var(--muted);
-      transition: all 0.18s ease;
-      position: relative;
+      color: #8A9992;
+      background: transparent;
+      transition: color 0.15s ease, background-color 0.15s ease;
     }
 
     .rail-btn:hover {
-      color: var(--text);
-      background: var(--card-hover);
+      color: #E2E8F0;
+      background: #171D1B;
     }
 
     .rail-btn.active {
-      background: var(--lime);
+      background: #7CE751;
       color: #0B0E0D;
-      box-shadow: 0 4px 14px rgba(124, 231, 81, 0.28);
     }
 
-    /* Greeting Header */
+    /* Page Greeting Header */
     .page-header {
       display: flex;
       align-items: flex-end;
@@ -296,15 +333,15 @@
     }
 
     .page-title {
-      font-size: 27px;
-      font-weight: 800;
-      letter-spacing: -0.03em;
+      font-size: 25px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
       color: var(--text);
       line-height: 1.2;
     }
 
     .page-subtitle {
-      font-size: 13.5px;
+      font-size: 13px;
       color: var(--muted);
       margin-top: 4px;
       font-weight: 500;
@@ -313,46 +350,8 @@
     .quick-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
       flex-wrap: wrap;
-    }
-
-    .btn-secondary {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 18px;
-      border-radius: var(--radius-pill);
-      background: var(--card);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 600;
-      transition: all 0.18s ease;
-    }
-
-    .btn-secondary:hover {
-      background: var(--card-hover);
-      border-color: var(--border-strong);
-    }
-
-    .btn-lime {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 20px;
-      border-radius: var(--radius-pill);
-      background: var(--lime);
-      color: #0B0E0D;
-      font-size: 13px;
-      font-weight: 700;
-      transition: all 0.18s ease;
-      box-shadow: 0 6px 20px rgba(124, 231, 81, 0.22);
-    }
-
-    .btn-lime:hover {
-      background: var(--lime-hover);
-      transform: translateY(-1px);
     }
 
     /* Bento Cards */
@@ -362,7 +361,7 @@
       border-radius: var(--radius-card);
       padding: 22px 24px;
       position: relative;
-      transition: border-color 0.2s ease, transform 0.2s ease;
+      transition: border-color 0.15s ease;
     }
 
     .bento-card:hover {
@@ -379,7 +378,7 @@
     }
 
     .card-title {
-      font-size: 16px;
+      font-size: 15.5px;
       font-weight: 700;
       letter-spacing: -0.015em;
       color: var(--text);
@@ -406,7 +405,7 @@
       padding: 20px 22px;
       position: relative;
       cursor: pointer;
-      transition: all 0.2s ease;
+      transition: border-color 0.15s ease, background-color 0.15s ease;
       overflow: hidden;
     }
 
@@ -415,15 +414,14 @@
       background: #161B1A;
     }
 
-    /* Sculpted FinWise Top-Right Cutout Notch & Circular Action Button */
     .kpi-cutout-wrap {
       position: absolute;
       top: -1px;
       right: -1px;
-      width: 52px;
-      height: 52px;
+      width: 50px;
+      height: 50px;
       background: var(--bg);
-      border-bottom-left-radius: 22px;
+      border-bottom-left-radius: 20px;
       border-left: 1px solid var(--border);
       border-bottom: 1px solid var(--border);
       display: grid;
@@ -432,40 +430,39 @@
     }
 
     .kpi-cutout-btn {
-      width: 36px;
-      height: 36px;
+      width: 34px;
+      height: 34px;
       border-radius: 50%;
-      background: var(--card-elevated);
-      border: 1px solid var(--border-strong);
+      background: #161C1A;
+      border: 1px solid #24302B;
       color: var(--text);
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 600;
       display: grid;
       place-items: center;
-      transition: all 0.18s ease;
+      transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
     }
 
-    .kpi-card:hover .kpi-cutout-btn,
-    .kpi-cutout-btn:hover {
+    .kpi-card:hover .kpi-cutout-btn {
       background: var(--lime);
       border-color: var(--lime);
       color: #0B0E0D;
     }
 
     .kpi-label {
-      font-size: 13px;
+      font-size: 12.5px;
       font-weight: 600;
       color: var(--muted);
       padding-right: 48px;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
     }
 
     .kpi-value {
-      font-size: 25px;
+      font-size: 24px;
       font-weight: 800;
       color: var(--text);
       letter-spacing: -0.025em;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
 
     .kpi-trend {
@@ -477,39 +474,8 @@
       color: var(--emerald);
     }
 
-    .kpi-trend.negative {
-      color: var(--danger);
-    }
-
-    .kpi-trend.neutral {
-      color: var(--muted);
-    }
-
-    /* Hover micro-breakdown tooltip inside KPI card */
-    .kpi-hover-pill {
-      position: absolute;
-      left: 22px;
-      right: 22px;
-      bottom: 10px;
-      padding: 6px 10px;
-      border-radius: 10px;
-      background: rgba(11, 14, 13, 0.92);
-      border: 1px solid var(--border-strong);
-      font-size: 11px;
-      color: var(--text-secondary);
-      opacity: 0;
-      transform: translateY(4px);
-      pointer-events: none;
-      transition: all 0.18s ease;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .kpi-card:hover .kpi-hover-pill {
-      opacity: 1;
-      transform: translateY(0);
-    }
+    .kpi-trend.negative { color: var(--danger); }
+    .kpi-trend.neutral { color: var(--muted); }
 
     /* Row 2: 58% / 42% Visual Analytics */
     .analytics-row {
@@ -521,33 +487,37 @@
 
     .seg-pills {
       display: inline-flex;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-pill);
+      background: #111514;
+      border: 1px solid #1E2623;
+      border-radius: 10px;
       padding: 3px;
       gap: 2px;
     }
 
     .seg-btn {
-      padding: 6px 13px;
-      border-radius: var(--radius-pill);
+      padding: 6px 12px;
+      border-radius: 8px;
       font-size: 12px;
       font-weight: 600;
-      color: var(--muted);
-      transition: all 0.16s ease;
+      color: #8A9992;
+      background: transparent;
+      transition: color 0.15s ease, background-color 0.15s ease;
+    }
+
+    .seg-btn:hover {
+      color: #E2E8F0;
     }
 
     .seg-btn.active {
-      background: var(--lime);
+      background: #7CE751;
       color: #0B0E0D;
-      font-weight: 700;
+      font-weight: 600;
     }
 
-    /* Vertical Bar Chart */
     .bar-chart-stage {
       position: relative;
       height: 252px;
-      padding: 18px 8px 32px 52px;
+      padding: 18px 8px 32px 54px;
       display: flex;
       align-items: flex-end;
       justify-content: space-between;
@@ -556,7 +526,7 @@
 
     .chart-grid-lines {
       position: absolute;
-      inset: 18px 8px 32px 52px;
+      inset: 18px 8px 32px 54px;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
@@ -571,9 +541,9 @@
 
     .chart-y-label {
       position: absolute;
-      left: -50px;
+      left: -52px;
       top: -8px;
-      width: 44px;
+      width: 46px;
       text-align: right;
       font-size: 11px;
       color: var(--muted-dim);
@@ -581,25 +551,25 @@
 
     .benchmark-line {
       position: absolute;
-      left: 52px;
+      left: 54px;
       right: 8px;
       border-top: 1.5px dashed var(--emerald);
       pointer-events: none;
       z-index: 2;
-      transition: bottom 0.3s ease;
+      transition: bottom 0.25s ease;
     }
 
     .benchmark-tag {
       position: absolute;
       right: 0;
       top: -20px;
-      background: rgba(20, 24, 23, 0.92);
+      background: #111514;
       border: 1px solid rgba(52, 211, 153, 0.35);
       color: var(--emerald);
       font-size: 10.5px;
       font-weight: 600;
       padding: 1px 8px;
-      border-radius: var(--radius-pill);
+      border-radius: 8px;
     }
 
     .bar-col {
@@ -618,10 +588,10 @@
       width: 100%;
       max-width: 38px;
       min-height: 8px;
-      border-radius: 11px 11px 5px 5px;
+      border-radius: 10px 10px 4px 4px;
       background: linear-gradient(180deg, #7CE751 0%, rgba(124, 231, 81, 0.15) 100%);
       border: 1px solid rgba(124, 231, 81, 0.35);
-      transition: height 0.35s cubic-bezier(0.22, 1, 0.36, 1), filter 0.16s ease, transform 0.16s ease;
+      transition: height 0.3s ease, filter 0.15s ease;
     }
 
     .bar-fill.neg {
@@ -631,8 +601,6 @@
 
     .bar-col:hover .bar-fill {
       filter: brightness(1.12);
-      transform: scaleX(1.06);
-      box-shadow: 0 0 22px rgba(124, 231, 81, 0.25);
     }
 
     .bar-x-label {
@@ -641,40 +609,38 @@
       font-size: 11.5px;
       font-weight: 700;
       color: var(--muted);
-      transition: color 0.15s ease;
     }
 
     .bar-col:hover .bar-x-label {
       color: var(--lime);
     }
 
-    /* Floating Chart Tooltip */
     .floating-tooltip {
       position: fixed;
       z-index: 90;
       background: #101413;
       border: 1px solid var(--border-strong);
-      border-radius: 15px;
+      border-radius: 14px;
       padding: 12px 14px;
       box-shadow: var(--shadow-pop);
       pointer-events: none;
-      min-width: 215px;
+      min-width: 220px;
       display: none;
     }
 
-    /* Donut Allocation Card */
+    /* Donut Allocation */
     .donut-layout {
       display: grid;
-      grid-template-columns: 196px minmax(0, 1fr);
+      grid-template-columns: 192px minmax(0, 1fr);
       align-items: center;
-      gap: 20px;
+      gap: 18px;
       min-height: 242px;
     }
 
     .donut-wrap {
       position: relative;
-      width: 188px;
-      height: 188px;
+      width: 186px;
+      height: 186px;
       margin: 0 auto;
     }
 
@@ -689,31 +655,11 @@
       pointer-events: none;
     }
 
-    .donut-center-lbl {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--muted);
-    }
+    .donut-center-lbl { font-size: 11px; font-weight: 600; color: var(--muted); }
+    .donut-center-sym { font-size: 20px; font-weight: 800; color: var(--text); margin-top: 1px; }
+    .donut-center-sub { font-size: 11.5px; font-weight: 700; color: var(--lime); }
 
-    .donut-center-sym {
-      font-size: 21px;
-      font-weight: 800;
-      color: var(--text);
-      letter-spacing: -0.02em;
-      margin-top: 1px;
-    }
-
-    .donut-center-sub {
-      font-size: 11.5px;
-      font-weight: 700;
-      color: var(--lime);
-    }
-
-    .donut-legend {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
+    .donut-legend { display: flex; flex-direction: column; gap: 9px; }
 
     .legend-item {
       display: flex;
@@ -721,61 +667,26 @@
       justify-content: space-between;
       gap: 8px;
       padding: 5px 8px;
-      border-radius: 10px;
+      border-radius: 9px;
       cursor: pointer;
-      transition: background 0.15s ease;
+      transition: background-color 0.15s ease;
     }
 
-    .legend-item:hover {
-      background: var(--card-elevated);
-    }
+    .legend-item:hover { background: var(--card-elevated); }
+    .legend-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .legend-sym { font-size: 13px; font-weight: 700; color: var(--text); }
+    .legend-right { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+    .legend-wt { color: var(--muted); font-weight: 500; margin-left: 4px; }
 
-    .legend-left {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      min-width: 0;
-    }
-
-    .legend-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-
-    .legend-sym {
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--text);
-    }
-
-    .legend-right {
-      font-size: 12.5px;
-      font-weight: 600;
-      color: var(--text-secondary);
-      white-space: nowrap;
-    }
-
-    .legend-wt {
-      color: var(--muted);
-      font-weight: 500;
-      margin-left: 4px;
-    }
-
-    /* Row 3: 3-Column Actionable Bento */
+    /* Row 3 Bento */
     .bottom-bento-row {
       display: grid;
       grid-template-columns: 1.05fr 1.15fr 0.95fr;
       gap: 16px;
     }
 
-    /* Target Progress Rows */
-    .target-list {
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
+    .target-list { display: flex; flex-direction: column; gap: 12px; }
 
     .target-item {
       padding: 12px 14px;
@@ -783,19 +694,17 @@
       background: var(--card-elevated);
       border: 1px solid var(--border);
       cursor: pointer;
-      transition: border-color 0.16s ease;
+      transition: border-color 0.15s ease;
     }
 
-    .target-item:hover {
-      border-color: rgba(124, 231, 81, 0.4);
-    }
+    .target-item:hover { border-color: rgba(124, 231, 81, 0.4); }
 
     .target-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      margin-bottom: 9px;
+      margin-bottom: 8px;
     }
 
     .ticker-badge-row {
@@ -806,11 +715,11 @@
     }
 
     .ticker-circle {
-      width: 36px;
-      height: 36px;
-      border-radius: 50%;
-      background: rgba(124, 231, 81, 0.12);
-      border: 1px solid rgba(124, 231, 81, 0.26);
+      width: 35px;
+      height: 35px;
+      border-radius: 10px;
+      background: #141B18;
+      border: 1px solid #24302B;
       color: var(--lime);
       font-size: 11px;
       font-weight: 800;
@@ -820,17 +729,17 @@
     }
 
     .progress-track {
-      height: 7px;
+      height: 6px;
       width: 100%;
-      border-radius: var(--radius-pill);
+      border-radius: 999px;
       background: #0E1211;
       overflow: hidden;
-      margin-bottom: 7px;
+      margin-bottom: 6px;
     }
 
     .progress-bar {
       height: 100%;
-      border-radius: var(--radius-pill);
+      border-radius: 999px;
       background: linear-gradient(90deg, var(--emerald), var(--lime));
     }
 
@@ -841,24 +750,19 @@
       color: var(--muted);
     }
 
-    /* Recent Signals & Activity 5-row Feed */
-    .activity-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
+    .activity-list { display: flex; flex-direction: column; gap: 8px; }
 
     .activity-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      gap: 10px;
       padding: 10px 12px;
-      border-radius: 14px;
+      border-radius: 13px;
       background: var(--card-elevated);
       border: 1px solid transparent;
       cursor: pointer;
-      transition: all 0.16s ease;
+      transition: border-color 0.15s ease, background-color 0.15s ease;
     }
 
     .activity-row:hover {
@@ -869,14 +773,14 @@
     .activity-main {
       display: flex;
       align-items: center;
-      gap: 11px;
+      gap: 10px;
       min-width: 0;
       flex: 1;
     }
 
     .activity-title {
       font-size: 13px;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--text);
       white-space: nowrap;
       overflow: hidden;
@@ -891,7 +795,6 @@
       text-overflow: ellipsis;
     }
 
-    /* Bottom-Right 2x2 Mini-Card Grid */
     .mini-accounts-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -901,72 +804,36 @@
     .mini-account-card {
       background: var(--card-elevated);
       border: 1px solid var(--border);
-      border-radius: 18px;
+      border-radius: 16px;
       padding: 16px;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      min-height: 124px;
+      min-height: 122px;
       cursor: pointer;
-      transition: all 0.18s ease;
+      transition: border-color 0.15s ease, background-color 0.15s ease;
     }
 
     .mini-account-card:hover {
-      border-color: rgba(124, 231, 81, 0.42);
+      border-color: rgba(124, 231, 81, 0.45);
       background: var(--card-hover);
-      transform: translateY(-2px);
     }
 
     .mini-account-card.highlight {
-      background: linear-gradient(155deg, rgba(124, 231, 81, 0.14), rgba(25, 31, 29, 0.95));
-      border-color: rgba(124, 231, 81, 0.32);
+      background: linear-gradient(155deg, rgba(124, 231, 81, 0.11), rgba(25, 31, 29, 0.96));
+      border-color: rgba(124, 231, 81, 0.3);
     }
 
-    .mini-acc-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
+    .mini-acc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .mini-acc-name { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+    .mini-acc-val { font-size: 17.5px; font-weight: 800; color: var(--text); margin: 10px 0 6px; }
+    .mini-acc-tag { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; color: var(--lime); }
 
-    .mini-acc-name {
-      font-size: 12.5px;
-      font-weight: 600;
-      color: var(--muted);
-    }
+    /* Views & Tables */
+    .view-section { display: none; }
+    .view-section.active { display: block; }
 
-    .mini-acc-val {
-      font-size: 18px;
-      font-weight: 800;
-      color: var(--text);
-      margin: 10px 0 6px;
-    }
-
-    .mini-acc-tag {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      color: var(--lime);
-    }
-
-    /* Tables & Badges for Secondary Tabs */
-    .view-section {
-      display: none;
-    }
-
-    .view-section.active {
-      display: block;
-      animation: fadeIn 0.2s ease;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .table-wrap {
-      overflow-x: auto;
-    }
+    .table-wrap { overflow-x: auto; }
 
     table.alpha-table {
       width: 100%;
@@ -975,8 +842,8 @@
     }
 
     table.alpha-table th {
-      padding: 12px 14px;
-      font-size: 11.5px;
+      padding: 12px 13px;
+      font-size: 11px;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.04em;
@@ -986,25 +853,50 @@
     }
 
     table.alpha-table td {
-      padding: 15px 14px;
-      border-bottom: 1px solid rgba(31, 38, 35, 0.7);
-      font-size: 13.5px;
+      padding: 13px;
+      border-bottom: 1px solid rgba(31, 38, 35, 0.75);
+      font-size: 13px;
       vertical-align: middle;
-    }
-
-    table.alpha-table tbody tr {
-      transition: background 0.14s ease;
     }
 
     table.alpha-table tbody tr:hover {
       background: var(--card-elevated);
     }
 
+    /* Inline Row Action Buttons (Edit & Delete) */
+    .row-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .row-btn {
+      padding: 5px 9px;
+      border-radius: 7px;
+      font-size: 11.5px;
+      font-weight: 600;
+      background: #161C1A;
+      border: 1px solid #24302B;
+      color: #C5D0CB;
+      transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+    }
+
+    .row-btn:hover {
+      border-color: var(--lime);
+      color: #FFFFFF;
+    }
+
+    .row-btn.danger:hover {
+      border-color: var(--danger);
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
     .badge {
       display: inline-flex;
       align-items: center;
-      padding: 4px 10px;
-      border-radius: var(--radius-pill);
+      padding: 3px 9px;
+      border-radius: 7px;
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.02em;
@@ -1016,7 +908,7 @@
     .badge-warn { background: var(--warning-soft); color: var(--warning); }
     .badge-muted { background: rgba(138, 153, 146, 0.14); color: var(--text-secondary); }
 
-    /* AI Money Coach Layout */
+    /* AI Money Coach */
     .coach-container {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 320px;
@@ -1027,7 +919,7 @@
     .coach-chat-card {
       display: flex;
       flex-direction: column;
-      height: 660px;
+      height: 650px;
       padding: 0;
       overflow: hidden;
     }
@@ -1051,8 +943,8 @@
 
     .msg-bubble {
       max-width: 82%;
-      padding: 14px 18px;
-      border-radius: 18px;
+      padding: 13px 17px;
+      border-radius: 16px;
       font-size: 13.5px;
       line-height: 1.6;
       word-wrap: break-word;
@@ -1063,7 +955,7 @@
       background: var(--lime);
       color: #0B0E0D;
       font-weight: 600;
-      border-bottom-right-radius: 5px;
+      border-bottom-right-radius: 4px;
     }
 
     .msg-bubble.assistant {
@@ -1071,7 +963,7 @@
       background: var(--card-elevated);
       border: 1px solid var(--border);
       color: var(--text);
-      border-bottom-left-radius: 5px;
+      border-bottom-left-radius: 4px;
     }
 
     .coach-footer {
@@ -1087,10 +979,7 @@
       margin-bottom: 10px;
     }
 
-    .preview-tray:empty {
-      display: none;
-      margin-bottom: 0;
-    }
+    .preview-tray:empty { display: none; margin-bottom: 0; }
 
     .preview-chip {
       position: relative;
@@ -1098,7 +987,7 @@
       align-items: center;
       gap: 8px;
       padding: 6px 28px 6px 8px;
-      border-radius: 12px;
+      border-radius: 10px;
       background: var(--card-elevated);
       border: 1px solid var(--border-strong);
       font-size: 11.5px;
@@ -1109,7 +998,7 @@
       width: 34px;
       height: 34px;
       object-fit: cover;
-      border-radius: 7px;
+      border-radius: 6px;
     }
 
     .preview-remove {
@@ -1128,91 +1017,82 @@
       place-items: center;
     }
 
-    .coach-input-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
+    .coach-input-row { display: flex; align-items: center; gap: 10px; }
 
     .coach-text-input {
       flex: 1;
       background: var(--card);
       border: 1px solid var(--border-strong);
-      border-radius: var(--radius-pill);
-      padding: 12px 18px;
+      border-radius: 10px;
+      padding: 11px 16px;
       font-size: 13.5px;
       color: var(--text);
       outline: none;
     }
 
-    .coach-text-input:focus {
-      border-color: var(--lime);
-    }
+    .coach-text-input:focus { border-color: var(--lime); }
 
-    /* Modals & Detail Overlay */
+    /* Modals */
     .modal-backdrop {
       position: fixed;
       inset: 0;
       z-index: 100;
-      background: rgba(5, 7, 6, 0.76);
-      backdrop-filter: blur(6px);
+      background: rgba(5, 7, 6, 0.78);
+      backdrop-filter: blur(5px);
       display: none;
       align-items: center;
       justify-content: center;
       padding: 20px;
     }
 
-    .modal-backdrop.open {
-      display: flex;
-    }
+    .modal-backdrop.open { display: flex; }
 
     .modal-card {
       background: var(--card);
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-card);
       width: 100%;
-      max-width: 540px;
-      max-height: 88vh;
+      max-width: 560px;
+      max-height: 90vh;
       overflow-y: auto;
-      padding: 26px;
+      padding: 24px 26px;
       box-shadow: var(--shadow-pop);
     }
 
     .form-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
-      margin-top: 16px;
+      gap: 13px;
+      margin-top: 14px;
     }
 
-    .form-field {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .form-field.full {
-      grid-column: 1 / -1;
-    }
-
-    .form-field label {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--muted);
-    }
+    .form-field { display: flex; flex-direction: column; gap: 6px; }
+    .form-field.full { grid-column: 1 / -1; }
+    .form-field label { font-size: 12px; font-weight: 600; color: var(--muted); }
 
     .form-input {
       background: var(--bg);
       border: 1px solid var(--border-strong);
-      border-radius: 12px;
-      padding: 10px 13px;
+      border-radius: 10px;
+      padding: 10px 12px;
       font-size: 13.5px;
       color: var(--text);
       outline: none;
     }
 
-    .form-input:focus {
-      border-color: var(--lime);
+    .form-input:focus { border-color: var(--lime); }
+
+    .calc-preview-box {
+      padding: 12px 14px;
+      border-radius: 11px;
+      background: #101513;
+      border: 1px solid #24302B;
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px;
     }
 
     .toast {
@@ -1220,12 +1100,12 @@
       bottom: 24px;
       right: 24px;
       z-index: 150;
-      background: #161D1B;
-      border: 1px solid rgba(124, 231, 81, 0.45);
+      background: #161C1A;
+      border: 1px solid #7CE751;
       color: var(--text);
-      padding: 12px 18px;
-      border-radius: 14px;
-      font-size: 13px;
+      padding: 11px 16px;
+      border-radius: 11px;
+      font-size: 12.5px;
       font-weight: 600;
       box-shadow: var(--shadow-pop);
       display: none;
@@ -1249,16 +1129,19 @@
 </head>
 <body>
   <div class="app-shell">
-    <!-- Top Header & Pill Navigation -->
+    <!-- Top Header & Solid Matte Navigation -->
     <header class="top-header">
       <div class="brand" onclick="switchTab('overview')">
         <div class="brand-mark" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="6 17 12 11 18 17"></polyline>
             <polyline points="6 11 12 5 18 11"></polyline>
           </svg>
         </div>
-        <span class="brand-name">AlphaWise</span>
+        <div class="brand-text-col">
+          <span class="brand-name">Portfolio Manager</span>
+          <span class="brand-badge">PSX QUANT</span>
+        </div>
       </div>
 
       <nav class="pill-nav" aria-label="Primary Navigation">
@@ -1271,24 +1154,33 @@
       </nav>
 
       <div class="header-actions">
-        <button class="icon-circle-btn" onclick="openSearchModal()" title="Quick Search">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <button class="arch-btn" id="btn-header-sync-prices" onclick="syncLivePrices()" title="Refresh Live PSX Quotes">
+          <span>Sync Prices</span>
+        </button>
+
+        <button class="arch-btn" id="btn-git-pull" onclick="triggerGitPullUpdate()" title="Zero-SSH Git Pull from origin/main">
+          <span>Sync Update</span>
+        </button>
+
+        <button class="arch-btn" onclick="openTxModal('trade')">
+          <span>+ Log Trade</span>
+        </button>
+
+        <button class="icon-sq-btn" onclick="openSearchModal()" title="Quick Search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"></circle>
             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
           </svg>
         </button>
 
-        <div class="status-chip" onclick="openAuthKeyModal()" title="PSX Live Status & Access Key" style="cursor:pointer;">
+        <div class="status-chip" onclick="openAuthKeyModal()" title="Live Feed Status & Access Key">
           <span class="status-dot" id="live-status-dot"></span>
-          <span id="live-status-text">LIVE · PSX</span>
+          <span id="live-status-text" class="tabular">LIVE · 30s</span>
         </div>
 
         <div class="profile-pill">
           <div class="profile-avatar">S</div>
-          <div class="profile-meta">
-            <span class="profile-name">Saad</span>
-            <span class="profile-sub">KTrade Custody</span>
-          </div>
+          <span class="profile-name">Saad</span>
         </div>
       </div>
     </header>
@@ -1297,7 +1189,7 @@
       <!-- Left Floating Slim Icon Rail -->
       <aside class="icon-rail" aria-label="Section Rail">
         <button class="rail-btn active" data-rail="overview" onclick="switchTab('overview')" title="Overview">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="7" rx="2"></rect>
             <rect x="14" y="3" width="7" height="7" rx="2"></rect>
             <rect x="14" y="14" width="7" height="7" rx="2"></rect>
@@ -1305,14 +1197,14 @@
           </svg>
         </button>
         <button class="rail-btn" data-rail="positions" onclick="switchTab('positions')" title="Positions">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <line x1="18" y1="20" x2="18" y2="10"></line>
             <line x1="12" y1="20" x2="12" y2="4"></line>
             <line x1="6" y1="20" x2="6" y2="14"></line>
           </svg>
         </button>
         <button class="rail-btn" data-rail="transactions" onclick="switchTab('transactions')" title="Transactions">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="17 1 21 5 17 9"></polyline>
             <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
             <polyline points="7 23 3 19 7 15"></polyline>
@@ -1320,19 +1212,19 @@
           </svg>
         </button>
         <button class="rail-btn" data-rail="dividends" onclick="switchTab('dividends')" title="Dividends">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="9"></circle>
             <path d="M15 9.354a4 4 0 1 0 0 5.292"></path>
             <line x1="12" y1="6" x2="12" y2="18"></line>
           </svg>
         </button>
         <button class="rail-btn" data-rail="intelligence" onclick="switchTab('intelligence')" title="Intelligence">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
           </svg>
         </button>
         <button class="rail-btn" data-rail="coach" onclick="switchTab('coach')" title="AI Money Coach">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
         </button>
@@ -1340,7 +1232,7 @@
 
       <!-- Main Bento Canvas -->
       <main id="main-canvas">
-        <!-- 1. OVERVIEW TAB (3-Row FinWise Bento Grid) -->
+        <!-- 1. OVERVIEW TAB -->
         <section id="view-overview" class="view-section active">
           <div class="page-header">
             <div>
@@ -1348,21 +1240,12 @@
               <p class="page-subtitle" id="greeting-subtitle">Good afternoon, Saad</p>
             </div>
             <div class="quick-actions">
-              <button class="btn-secondary" id="btn-sync-prices" onclick="syncLivePrices()">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="23 4 23 10 17 10"></polyline>
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-                </svg>
-                <span>Sync Prices</span>
-              </button>
-              <button class="btn-lime" onclick="switchTab('coach')">
-                <span>Ask AI Coach</span>
-                <span>↗</span>
-              </button>
+              <button class="arch-btn" onclick="openDividendModal()">+ Log Dividend</button>
+              <button class="arch-btn-accent" onclick="switchTab('coach')">Ask AI Coach ↗</button>
             </div>
           </div>
 
-          <!-- Row 1: 4 Equal KPI Cards with Top-Right Cutout Button -->
+          <!-- Row 1: 4 Equal KPI Cards -->
           <div class="kpi-grid">
             <div class="kpi-card" onclick="openKpiBreakdown('net_worth')">
               <div class="kpi-cutout-wrap">
@@ -1370,8 +1253,7 @@
               </div>
               <div class="kpi-label">Total Net Worth</div>
               <div class="kpi-value tabular" id="kpi-net-worth">Rs. 51,447.13</div>
-              <div class="kpi-trend" id="kpi-net-worth-sub">↗ Custody + KTrade Cash</div>
-              <div class="kpi-hover-pill" id="kpi-net-worth-hover">Custody Value + Liquid Cash vs Working Capital</div>
+              <div class="kpi-trend tabular" id="kpi-net-worth-sub">↗ Custody + KTrade Cash</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('custody')">
@@ -1380,8 +1262,7 @@
               </div>
               <div class="kpi-label">Custody Market Value</div>
               <div class="kpi-value tabular" id="kpi-custody-val">Rs. 47,089.75</div>
-              <div class="kpi-trend" id="kpi-custody-sub">9 Active PSX Holdings</div>
-              <div class="kpi-hover-pill" id="kpi-custody-hover">Cost Basis: Rs. 47,264.18 · KMI-30 Shariah Book</div>
+              <div class="kpi-trend tabular" id="kpi-custody-sub">Day: +Rs. 0.00 (0.00%)</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('cash')">
@@ -1390,8 +1271,7 @@
               </div>
               <div class="kpi-label">Cash Available</div>
               <div class="kpi-value tabular" id="kpi-cash-val">Rs. 4,357.38</div>
-              <div class="kpi-trend" id="kpi-cash-sub">↗ Safe to deploy in KTrade</div>
-              <div class="kpi-hover-pill" id="kpi-cash-hover">Unencumbered KTrade brokerage buying power</div>
+              <div class="kpi-trend tabular" id="kpi-cash-sub">↗ Safe to deploy in KTrade</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('pnl')">
@@ -1400,18 +1280,17 @@
               </div>
               <div class="kpi-label">Unrealized P&amp;L &amp; Divs</div>
               <div class="kpi-value tabular" id="kpi-pnl-val">Rs. 0.00</div>
-              <div class="kpi-trend" id="kpi-pnl-sub">0.00% return &amp; Rs. 0.00 divs</div>
-              <div class="kpi-hover-pill" id="kpi-pnl-hover">Mark-to-Market P&amp;L + Net Bank Dividends</div>
+              <div class="kpi-trend tabular" id="kpi-pnl-sub">0.00% return &amp; Rs. 0.00 divs</div>
             </div>
           </div>
 
-          <!-- Row 2: 2-Column Visual Analytics (58% / 42%) -->
+          <!-- Row 2: 2-Column Visual Analytics -->
           <div class="analytics-row">
             <div class="bento-card">
               <div class="card-header">
                 <div>
                   <div class="card-title">Portfolio Value Overview</div>
-                  <div class="card-subtitle">All 9 KTrade PSX holdings vs equal-weight benchmark</div>
+                  <div class="card-subtitle">Live mark-to-market PSX holdings vs equal-weight benchmark</div>
                 </div>
                 <div class="seg-pills">
                   <button class="seg-btn active" data-chart-mode="market_value" onclick="setBarChartMode('market_value')">Market Value</button>
@@ -1419,9 +1298,7 @@
                   <button class="seg-btn" data-chart-mode="unrealized_pnl" onclick="setBarChartMode('unrealized_pnl')">Unrealized P&amp;L</button>
                 </div>
               </div>
-              <div class="bar-chart-stage" id="portfolio-bar-chart">
-                <!-- Populated dynamically with lime gradient bars & dashed green benchmark line -->
-              </div>
+              <div class="bar-chart-stage" id="portfolio-bar-chart"></div>
             </div>
 
             <div class="bento-card">
@@ -1434,7 +1311,7 @@
               </div>
               <div class="donut-layout">
                 <div class="donut-wrap">
-                  <svg id="allocation-donut-svg" width="188" height="188" viewBox="0 0 188 188"></svg>
+                  <svg id="allocation-donut-svg" width="186" height="186" viewBox="0 0 186 186"></svg>
                   <div class="donut-center">
                     <span class="donut-center-lbl" id="donut-lbl">Top Holding</span>
                     <span class="donut-center-sym" id="donut-sym">SYS</span>
@@ -1448,36 +1325,33 @@
 
           <!-- Row 3: 3-Column Actionable Bento -->
           <div class="bottom-bento-row">
-            <!-- Bottom-Left: Valuation & Target Progress -->
             <div class="bento-card">
               <div class="card-header">
                 <div>
                   <div class="card-title">Valuation &amp; Target Progress</div>
                   <div class="card-subtitle">Spot price vs intrinsic DCF fair value</div>
                 </div>
-                <button class="icon-circle-btn" style="width:32px;height:32px;" onclick="switchTab('positions')" title="All Positions">↗</button>
+                <button class="icon-sq-btn" style="width:30px;height:30px;" onclick="switchTab('positions')" title="All Positions">↗</button>
               </div>
               <div class="target-list" id="valuation-progress-list"></div>
             </div>
 
-            <!-- Bottom-Center: Recent Signals & Activity -->
             <div class="bento-card">
               <div class="card-header">
                 <div>
                   <div class="card-title">Recent Signals &amp; Activity</div>
-                  <div class="card-subtitle">Click any row for full analysis &amp; teaching note</div>
+                  <div class="card-subtitle">Click for analysis or × to remove stale alerts</div>
                 </div>
-                <button class="icon-circle-btn" style="width:32px;height:32px;" onclick="switchTab('intelligence')" title="Open Intelligence">↗</button>
+                <button class="icon-sq-btn" style="width:30px;height:30px;" onclick="switchTab('intelligence')" title="Open Intelligence">↗</button>
               </div>
               <div class="activity-list" id="recent-activity-list"></div>
             </div>
 
-            <!-- Bottom-Right: Accounts & Engines (2x2 Mini-Card Grid) -->
             <div class="bento-card">
               <div class="card-header">
                 <div>
                   <div class="card-title">Accounts &amp; Engines</div>
-                  <div class="card-subtitle">Custody vaults &amp; autonomous runtime</div>
+                  <div class="card-subtitle">Custody vaults &amp; runtime telemetry</div>
                 </div>
               </div>
               <div class="mini-accounts-grid">
@@ -1525,12 +1399,12 @@
         <section id="view-positions" class="view-section">
           <div class="page-header">
             <div>
-              <h1 class="page-title">Custody Positions &amp; DCF Valuation</h1>
-              <p class="page-subtitle">Click any holding to inspect intrinsic margin of safety, stop-loss guardrails, and playbook rules</p>
+              <h1 class="page-title">Custody Positions &amp; Cost Basis Editor</h1>
+              <p class="page-subtitle">Edit Shares or Avg Cost on any holding to see exact real-time Unrealized P&amp;L</p>
             </div>
             <div class="quick-actions">
-              <button class="btn-secondary" onclick="syncLivePrices()">Sync PSX Spot Prices</button>
-              <button class="btn-lime" onclick="openTxModal('trade')">+ Log Trade Execution</button>
+              <button class="arch-btn" onclick="openEditPositionModal('', 0, 0)">+ Add / Set Position</button>
+              <button class="arch-btn-accent" onclick="openTxModal('trade')">+ Log Trade Execution</button>
             </div>
           </div>
 
@@ -1541,14 +1415,14 @@
                   <tr>
                     <th>Ticker &amp; Sector</th>
                     <th>Shares</th>
-                    <th>Avg Cost</th>
-                    <th>Live Spot</th>
+                    <th>Avg Buy Cost</th>
+                    <th>Live Spot &amp; Day</th>
                     <th>Market Value</th>
                     <th>Weight</th>
                     <th>Unrealized P&amp;L</th>
                     <th>DCF Fair Value</th>
-                    <th>Margin of Safety</th>
                     <th>Signal</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody id="positions-tbody"></tbody>
@@ -1562,20 +1436,20 @@
           <div class="page-header">
             <div>
               <h1 class="page-title">Transactions &amp; Capital Ledger</h1>
-              <p class="page-subtitle">Verified KTrade buy/sell executions and brokerage cash movements</p>
+              <p class="page-subtitle">Manage KTrade buy/sell executions and brokerage cash movements</p>
             </div>
             <div class="quick-actions">
-              <button class="btn-secondary" onclick="openTxModal('cash')">+ Deposit / Adjust Cash</button>
-              <button class="btn-lime" onclick="openTxModal('trade')">+ Log Trade / Cash</button>
+              <button class="arch-btn" onclick="openTxModal('cash')">+ Deposit / Adjust Cash</button>
+              <button class="arch-btn-accent" onclick="openTxModal('trade')">+ Log Trade / Cash</button>
             </div>
           </div>
 
-          <div class="analytics-row" style="grid-template-columns: 1.25fr 1fr;">
+          <div class="analytics-row" style="grid-template-columns: 1.28fr 1fr;">
             <div class="bento-card">
               <div class="card-header">
                 <div>
                   <div class="card-title">KTrade Order Executions</div>
-                  <div class="card-subtitle">Equity buys, trims, and brokerage fees</div>
+                  <div class="card-subtitle">Delete any erroneous trade row to keep your audit log clean</div>
                 </div>
               </div>
               <div class="table-wrap">
@@ -1588,6 +1462,7 @@
                       <th>Qty</th>
                       <th>Price</th>
                       <th>Net Total</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody id="trades-tbody"></tbody>
@@ -1599,7 +1474,7 @@
               <div class="card-header">
                 <div>
                   <div class="card-title">Brokerage Capital Ledger</div>
-                  <div class="card-subtitle">Fresh deposits, withdrawals, and dividend sweeps</div>
+                  <div class="card-subtitle">Deposits, withdrawals, and dividend sweeps</div>
                 </div>
               </div>
               <div class="table-wrap">
@@ -1610,6 +1485,7 @@
                       <th>Type</th>
                       <th>Amount</th>
                       <th>Note</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody id="capital-tbody"></tbody>
@@ -1624,10 +1500,10 @@
           <div class="page-header">
             <div>
               <h1 class="page-title">Dividends &amp; WHT Tracker</h1>
-              <p class="page-subtitle">Track PSX cash payouts from announcement through 15% Filer WHT deduction to bank credit</p>
+              <p class="page-subtitle">Log payouts by Total Net Received, Total Gross, or Per-Share DPS with instant WHT math</p>
             </div>
             <div class="quick-actions">
-              <button class="btn-lime" onclick="openDividendModal()">+ Log Dividend</button>
+              <button class="arch-btn-accent" onclick="openDividendModal()">+ Log Dividend</button>
             </div>
           </div>
 
@@ -1667,6 +1543,7 @@
                     <th>Net Payout</th>
                     <th>Ex / Pay Date</th>
                     <th>Status</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody id="dividends-tbody"></tbody>
@@ -1680,12 +1557,12 @@
           <div class="page-header">
             <div>
               <h1 class="page-title">Desk Manager &amp; Market Intelligence</h1>
-              <p class="page-subtitle">Executive portfolio synthesis, Bayesian playbook rules, WhatsApp KTrade signals, and mentor notes</p>
+              <p class="page-subtitle">Executive portfolio synthesis, Bayesian playbook rules, WhatsApp KTrade signals, and feed management</p>
             </div>
             <div class="quick-actions">
-              <button class="btn-secondary" onclick="triggerSweep('news')">Sweep PSX News</button>
-              <button class="btn-secondary" onclick="triggerSweep('learning')">Grade Predictions</button>
-              <button class="btn-lime" onclick="triggerSweep('business')">Run Desk Synthesis</button>
+              <button class="arch-btn" onclick="triggerSweep('news')">Sweep PSX News</button>
+              <button class="arch-btn" onclick="triggerSweep('learning')">Grade Predictions</button>
+              <button class="arch-btn-accent" onclick="triggerSweep('business')">Run Desk Synthesis</button>
             </div>
           </div>
 
@@ -1704,6 +1581,16 @@
             <div class="bento-card">
               <div class="card-header">
                 <div>
+                  <div class="card-title">Agent Activity Feed</div>
+                  <div class="card-subtitle">Manage published alerts &amp; memos</div>
+                </div>
+              </div>
+              <div class="activity-list" id="intel-feed-manage-list"></div>
+            </div>
+
+            <div class="bento-card">
+              <div class="card-header">
+                <div>
                   <div class="card-title">Active Playbook Rules</div>
                   <div class="card-subtitle">Confidence-weighted heuristics</div>
                 </div>
@@ -1714,21 +1601,11 @@
             <div class="bento-card">
               <div class="card-header">
                 <div>
-                  <div class="card-title">WhatsApp &amp; Research Signals</div>
-                  <div class="card-subtitle">Brokerage &amp; institutional alerts</div>
+                  <div class="card-title">WhatsApp &amp; Mentor Vault</div>
+                  <div class="card-subtitle">Brokerage &amp; educational signals</div>
                 </div>
               </div>
               <div class="activity-list" id="intel-signals-list"></div>
-            </div>
-
-            <div class="bento-card">
-              <div class="card-header">
-                <div>
-                  <div class="card-title">Mentor Knowledge Vault</div>
-                  <div class="card-subtitle">Distilled PSX principles &amp; lessons</div>
-                </div>
-              </div>
-              <div class="activity-list" id="intel-mentor-list"></div>
             </div>
           </div>
         </section>
@@ -1748,7 +1625,7 @@
                 <div class="ticker-badge-row">
                   <div class="ticker-circle">AI</div>
                   <div>
-                    <div class="card-title">AlphaWise Money Coach</div>
+                    <div class="card-title">PSX Quant Money Coach</div>
                     <div class="card-subtitle">Connected to live 9-stock KTrade custody &amp; Gemini 2.5</div>
                   </div>
                 </div>
@@ -1761,27 +1638,27 @@
                 <div id="file-preview-tray" class="preview-tray"></div>
                 <div class="coach-input-row">
                   <input type="file" id="chat-file-input" multiple accept="application/pdf,image/*" style="display:none;" onchange="handleFilesSelected(event)" />
-                  <button type="button" class="icon-circle-btn" onclick="document.getElementById('chat-file-input').click()" title="Attach Images or PDFs">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                  <button type="button" class="icon-sq-btn" onclick="document.getElementById('chat-file-input').click()" title="Attach Images or PDFs">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
                     </svg>
                   </button>
                   <input type="text" id="chat-message-input" class="coach-text-input" placeholder="Ask about your PSX holdings, cash deployment, or attach a KTrade screenshot..." onkeydown="if(event.key==='Enter') sendChatMessage()" />
-                  <button type="button" id="chat-send-btn" class="btn-lime" onclick="sendChatMessage()">Send</button>
+                  <button type="button" id="chat-send-btn" class="arch-btn-accent" onclick="sendChatMessage()">Send</button>
                 </div>
               </div>
             </div>
 
-            <div class="bento-card" style="display:flex;flex-direction:column;gap:14px;">
+            <div class="bento-card" style="display:flex;flex-direction:column;gap:12px;">
               <div>
-                <div class="card-title">Suggested Prompts</div>
-                <div class="card-subtitle">One-click portfolio diagnostics</div>
+                <div class="card-title">Quick Portfolio Prompts</div>
+                <div class="card-subtitle">One-click quant diagnostics</div>
               </div>
-              <button class="target-item" style="text-align:left;" onclick="runQuickPrompt('Where should I deploy my Rs. 4,357.38 available cash across my current 9 KTrade holdings based on DCF Margin of Safety?')">
+              <button class="target-item" style="text-align:left;" onclick="runQuickPrompt('Where should I deploy my available KTrade cash across my current PSX holdings based on DCF Margin of Safety?')">
                 <div style="font-weight:700;font-size:13px;color:var(--lime);margin-bottom:4px;">Deploy Available Cash</div>
-                <div style="font-size:12px;color:var(--muted);">Rank best margin-of-safety additions for Rs. 4,357.38</div>
+                <div style="font-size:12px;color:var(--muted);">Rank best margin-of-safety additions</div>
               </button>
-              <button class="target-item" style="text-align:left;" onclick="runQuickPrompt('Audit all 9 of my PSX positions (SYS, FFC, OGDC, MARI, HUBC, LUCK, EFERT, MEBL, FABL) for sector concentration and downside stop-loss risk.')">
+              <button class="target-item" style="text-align:left;" onclick="runQuickPrompt('Audit all of my PSX positions for sector concentration and downside stop-loss risk.')">
                 <div style="font-weight:700;font-size:13px;color:var(--text);margin-bottom:4px;">Risk &amp; Sector Audit</div>
                 <div style="font-size:12px;color:var(--muted);">Check Fertilizer/Energy weights &amp; stop distances</div>
               </button>
@@ -1796,6 +1673,8 @@
     </div>
   </div>
 
+  <datalist id="held-tickers-datalist"></datalist>
+
   <!-- Floating Bar Chart Tooltip -->
   <div id="chart-tooltip" class="floating-tooltip"></div>
 
@@ -1807,9 +1686,44 @@
           <div class="card-title" id="detail-modal-title">Details</div>
           <div class="card-subtitle" id="detail-modal-sub">Breakdown</div>
         </div>
-        <button class="icon-circle-btn" style="width:32px;height:32px;" onclick="closeModal('detail-modal')">×</button>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('detail-modal')">×</button>
       </div>
       <div id="detail-modal-body" style="font-size:13.5px;color:var(--text-secondary);line-height:1.65;"></div>
+    </div>
+  </div>
+
+  <!-- Edit Position Modal (Shares & Avg Buy Price) -->
+  <div id="pos-edit-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('pos-edit-modal')">
+    <div class="modal-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title" id="pos-edit-modal-title">Edit Position Cost Basis</div>
+          <div class="card-subtitle">Updates KTrade custody shares &amp; average buy cost immediately</div>
+        </div>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('pos-edit-modal')">×</button>
+      </div>
+      <form onsubmit="submitEditPositionForm(event)">
+        <div class="form-grid">
+          <div class="form-field full">
+            <label>PSX Ticker</label>
+            <input class="form-input" id="edit-pos-ticker" list="held-tickers-datalist" placeholder="e.g. SYS, HUBC, FFC" required />
+          </div>
+          <div class="form-field">
+            <label>Shares Held</label>
+            <input class="form-input tabular" type="number" step="any" id="edit-pos-shares" required oninput="updateEditPosPreview()" />
+          </div>
+          <div class="form-field">
+            <label>Average Buy Cost (PKR / Share)</label>
+            <input class="form-input tabular" type="number" step="any" id="edit-pos-avg" required oninput="updateEditPosPreview()" />
+          </div>
+          <div class="form-field full">
+            <div class="calc-preview-box tabular" id="edit-pos-preview">Cost Basis: Rs. 0.00</div>
+          </div>
+          <div class="form-field full" style="margin-top:4px;">
+            <button type="submit" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Save Position</button>
+          </div>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -1821,18 +1735,18 @@
           <div class="card-title">Log KTrade Execution or Cash</div>
           <div class="card-subtitle">Updates custody holdings &amp; capital ledger immediately</div>
         </div>
-        <button class="icon-circle-btn" style="width:32px;height:32px;" onclick="closeModal('tx-modal')">×</button>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('tx-modal')">×</button>
       </div>
       <div class="seg-pills" style="margin-bottom:14px;">
-        <button class="seg-btn active" id="tx-tab-trade" onclick="switchTxModalMode('trade')">Equity Trade</button>
-        <button class="seg-btn" id="tx-tab-cash" onclick="switchTxModalMode('cash')">Cash Deposit / Withdrawal</button>
+        <button class="seg-btn active" type="button" id="tx-tab-trade" onclick="switchTxModalMode('trade')">Equity Trade</button>
+        <button class="seg-btn" type="button" id="tx-tab-cash" onclick="switchTxModalMode('cash')">Cash Deposit / Withdrawal</button>
       </div>
 
       <form id="form-log-trade" onsubmit="submitTradeForm(event)">
         <div class="form-grid">
           <div class="form-field">
             <label>PSX Ticker</label>
-            <input class="form-input" id="trade-ticker" placeholder="e.g. SYS, FFC" required />
+            <input class="form-input" id="trade-ticker" list="held-tickers-datalist" placeholder="e.g. SYS, FFC" required />
           </div>
           <div class="form-field">
             <label>Side</label>
@@ -1843,22 +1757,22 @@
           </div>
           <div class="form-field">
             <label>Shares Quantity</label>
-            <input class="form-input" type="number" step="any" id="trade-qty" placeholder="10" required />
+            <input class="form-input tabular" type="number" step="any" id="trade-qty" placeholder="10" required />
           </div>
           <div class="form-field">
             <label>Execution Price (PKR)</label>
-            <input class="form-input" type="number" step="any" id="trade-price" placeholder="109.15" required />
+            <input class="form-input tabular" type="number" step="any" id="trade-price" placeholder="109.15" required />
           </div>
           <div class="form-field">
             <label>Brokerage Fees &amp; Tax (PKR)</label>
-            <input class="form-input" type="number" step="any" id="trade-fees" value="0" />
+            <input class="form-input tabular" type="number" step="any" id="trade-fees" value="0" />
           </div>
           <div class="form-field">
             <label>Notes</label>
             <input class="form-input" id="trade-notes" placeholder="Optional thesis note" />
           </div>
-          <div class="form-field full" style="margin-top:6px;">
-            <button type="submit" class="btn-lime" style="justify-content:center;width:100%;">Save Trade Execution</button>
+          <div class="form-field full" style="margin-top:4px;">
+            <button type="submit" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Save Trade Execution</button>
           </div>
         </div>
       </form>
@@ -1875,63 +1789,78 @@
           </div>
           <div class="form-field full">
             <label>Amount (PKR)</label>
-            <input class="form-input" type="number" step="any" id="cash-amount" placeholder="5000" required />
+            <input class="form-input tabular" type="number" step="any" id="cash-amount" placeholder="5000" required />
           </div>
           <div class="form-field full">
             <label>Reference Note</label>
             <input class="form-input" id="cash-note" placeholder="e.g. Monthly KTrade top-up" />
           </div>
-          <div class="form-field full" style="margin-top:6px;">
-            <button type="submit" class="btn-lime" style="justify-content:center;width:100%;">Record Capital Entry</button>
+          <div class="form-field full" style="margin-top:4px;">
+            <button type="submit" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Record Capital Entry</button>
           </div>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- Log Dividend Modal -->
+  <!-- 3-Mode Dividend Calculator Modal -->
   <div id="div-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('div-modal')">
     <div class="modal-card">
       <div class="card-header">
         <div>
           <div class="card-title">Log PSX Dividend</div>
-          <div class="card-subtitle">Automatically calculates 15% Filer WHT &amp; net bank payout</div>
+          <div class="card-subtitle">Enter Total Net Received, Total Gross, or Per-Share DPS</div>
         </div>
-        <button class="icon-circle-btn" style="width:32px;height:32px;" onclick="closeModal('div-modal')">×</button>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('div-modal')">×</button>
       </div>
-      <form onsubmit="submitDividendForm(event)">
+
+      <div class="seg-pills" style="width:100%;display:grid;grid-template-columns:repeat(3,1fr);margin-bottom:10px;">
+        <button type="button" class="seg-btn active" data-div-mode="net" onclick="setDividendInputMode('net')">Total Net (Bank)</button>
+        <button type="button" class="seg-btn" data-div-mode="gross" onclick="setDividendInputMode('gross')">Total Gross</button>
+        <button type="button" class="seg-btn" data-div-mode="dps" onclick="setDividendInputMode('dps')">Per-Share DPS</button>
+      </div>
+
+      <form id="form-log-dividend" onsubmit="submitDividendForm(event)">
         <div class="form-grid">
           <div class="form-field">
-            <label>Ticker</label>
-            <input class="form-input" id="div-ticker" placeholder="EFERT" required />
+            <label>Ticker (auto-maps HUBCO → HUBC)</label>
+            <input class="form-input" id="div-ticker" list="held-tickers-datalist" placeholder="e.g. HUBC, EFERT, FFC" required oninput="onDividendTickerInput(this.value)" />
           </div>
           <div class="form-field">
             <label>Shares Entitled</label>
-            <input class="form-input" type="number" step="any" id="div-shares" placeholder="14" required />
+            <input class="form-input tabular" type="number" step="any" id="div-shares" placeholder="Auto-filled" required oninput="recalcDividendPreview()" />
           </div>
           <div class="form-field">
-            <label>Gross DPS (PKR / Share)</label>
-            <input class="form-input" type="number" step="any" id="div-dps" placeholder="4.00" required />
+            <label id="div-amount-label">Total Net Received in Bank (PKR)</label>
+            <input class="form-input tabular" type="number" step="any" id="div-primary-val" placeholder="e.g. 122" required oninput="recalcDividendPreview()" />
           </div>
           <div class="form-field">
-            <label>WHT Rate (%)</label>
-            <input class="form-input" type="number" step="any" id="div-tax" value="15" />
+            <label>WHT Tax Rate (%)</label>
+            <input class="form-input tabular" type="number" step="any" id="div-tax" value="15" oninput="recalcDividendPreview()" />
           </div>
           <div class="form-field">
-            <label>Ex-Dividend Date</label>
+            <label>Ex / Payment Date</label>
             <input class="form-input" type="date" id="div-ex-date" />
           </div>
           <div class="form-field">
             <label>Status</label>
             <select class="form-input" id="div-status">
-              <option value="ANNOUNCED">ANNOUNCED</option>
-              <option value="ENTITLED">ENTITLED</option>
               <option value="CREDITED_TO_BANK" selected>CREDITED_TO_BANK</option>
               <option value="SENT_TO_KTRADE">SENT_TO_KTRADE</option>
+              <option value="ENTITLED">ENTITLED</option>
+              <option value="ANNOUNCED">ANNOUNCED</option>
             </select>
           </div>
-          <div class="form-field full" style="margin-top:6px;">
-            <button type="submit" class="btn-lime" style="justify-content:center;width:100%;">Save Dividend Record</button>
+          <div class="form-field full">
+            <div class="calc-preview-box tabular" id="div-calc-preview">
+              <span>Gross: <strong>Rs. 0.00</strong></span>
+              <span>WHT (15%): <strong>Rs. 0.00</strong></span>
+              <span>Net Payout: <strong style="color:var(--lime);">Rs. 0.00</strong></span>
+              <span>DPS: <strong>Rs. 0.00/sh</strong></span>
+            </div>
+          </div>
+          <div class="form-field full" style="margin-top:4px;">
+            <button type="submit" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Save Dividend Record</button>
           </div>
         </div>
       </form>
@@ -1943,7 +1872,7 @@
     <div class="modal-card">
       <div class="card-header">
         <div class="card-title">Quick Search</div>
-        <button class="icon-circle-btn" style="width:32px;height:32px;" onclick="closeModal('search-modal')">×</button>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('search-modal')">×</button>
       </div>
       <input class="form-input" style="width:100%;margin-bottom:14px;" id="global-search-input" placeholder="Search ticker (SYS, FFC, MARI...), sector, or signal..." oninput="renderSearchResults(this.value)" />
       <div id="global-search-results" class="activity-list"></div>
@@ -1953,21 +1882,37 @@
   <div id="toast" class="toast"></div>
   <script>
     const DONUT_COLORS = ['#7CE751', '#4ADE80', '#22C55E', '#16A34A', '#15803D', '#3A4D44'];
+    const TICKER_ALIASES = {
+      HUBCO: 'HUBC',
+      MEEZAN: 'MEBL',
+      FAUJI: 'FFC',
+      SYSTEMS: 'SYS',
+      LUCKY: 'LUCK',
+      FAYSAL: 'FABL'
+    };
 
     const APP_STATE = {
       activeTab: 'overview',
       barChartMode: 'market_value',
+      divInputMode: 'net',
       overview: null,
       feed: [],
       trades: [],
       capital: [],
       dividends: [],
-      divMetrics: {},
       intelligence: null,
       algoState: null,
       attachedFiles: [],
-      chatLoaded: false
+      chatLoaded: false,
+      pollingBusy: false
     };
+
+    function normalizeSym(raw) {
+      let s = String(raw || '').trim().toUpperCase();
+      if (s.endsWith('.KA')) s = s.slice(0, -3).trim();
+      s = s.replace(/\s+(XD|XB|XR|NC|WU|SPOT)$/, '').replace(/(XD|XB|XR|NC)$/, '');
+      return TICKER_ALIASES[s] || s;
+    }
 
     function getAuthKey() {
       const urlParams = new URLSearchParams(window.location.search);
@@ -2036,7 +1981,7 @@
       t.textContent = msg;
       t.style.display = 'block';
       clearTimeout(window.__toastTimer);
-      window.__toastTimer = setTimeout(() => { t.style.display = 'none'; }, 3400);
+      window.__toastTimer = setTimeout(() => { t.style.display = 'none'; }, 3600);
     }
 
     function updateGreeting() {
@@ -2079,15 +2024,15 @@
     function openAuthKeyModal(isUnauthorized = false) {
       const current = getAuthKey();
       openDetailModal(
-        isUnauthorized ? 'Authentication Required' : 'Runtime & Access Key',
-        'Optional DASHBOARD_KEY header for protected deployments',
+        isUnauthorized ? 'Authentication Required' : 'Live Feed Telemetry & Access Key',
+        'Geo-Proof 3-Tier PSX Live Engine + Optional DASHBOARD_KEY',
         `
           <div style="display:flex;flex-direction:column;gap:12px;">
-            <p style="color:var(--muted);font-size:12.5px;">If your server has <code>DASHBOARD_KEY</code> enabled, store it locally in your browser below. You can also verify the live PSX scraper directly.</p>
+            <p style="color:var(--muted);font-size:12.5px;">Live prices auto-poll every 30 seconds in your browser and every 60 seconds during PSX market hours on the server.</p>
             <input id="auth-key-input" class="form-input" type="password" placeholder="Enter DASHBOARD_KEY (leave blank if public)" value="${escapeHtml(current)}" />
             <div style="display:flex;gap:10px;margin-top:4px;">
-              <button class="btn-lime" style="flex:1;justify-content:center;" onclick="saveAuthKey()">Save &amp; Reload</button>
-              <button class="btn-secondary" onclick="runPsxDiagnosticTest()">Test PSX Scraper</button>
+              <button class="arch-btn-accent" style="flex:1;justify-content:center;" onclick="saveAuthKey()">Save Key</button>
+              <button class="arch-btn" onclick="runPsxDiagnosticTest()">Run 9-Stock Live Test</button>
             </div>
             <div id="psx-diag-result" style="font-size:12px;color:var(--text-secondary);"></div>
           </div>
@@ -2105,12 +2050,12 @@
 
     async function runPsxDiagnosticTest() {
       const box = document.getElementById('psx-diag-result');
-      if (box) box.textContent = 'Testing live PSX bulk market-watch scraper...';
+      if (box) box.textContent = 'Testing Geo-Proof 3-Tier PSX Live Engine...';
       try {
         const res = await fetch('/api/test/psx-scraper');
         const data = await res.json();
         if (box) {
-          box.innerHTML = `<div style="padding:10px;border-radius:12px;background:var(--bg);border:1px solid var(--border);margin-top:6px;">
+          box.innerHTML = `<div style="padding:10px;border-radius:10px;background:var(--bg);border:1px solid var(--border);margin-top:6px;">
             <strong style="color:var(--lime);">Status: ${escapeHtml(data.status)}</strong> · ${escapeHtml(data.holdings_passed)}/${escapeHtml(data.holdings_tested)} tickers in ${escapeHtml(data.latency_ms)}ms
           </div>`;
         }
@@ -2120,23 +2065,73 @@
       }
     }
 
-    /* Overview Data & Rendering */
+    /* Zero-SSH Git Pull Button */
+    async function triggerGitPullUpdate() {
+      const btn = document.getElementById('btn-git-pull');
+      if (btn) btn.style.opacity = '0.65';
+      showToast('Checking origin/main for updates...');
+      try {
+        const res = await apiFetch('/api/dashboard/git-pull', { method: 'POST' });
+        const data = await res.json();
+        if (data.updated) {
+          showToast(`Updated to ${data.commit || 'latest'} (${(data.changed_files || []).length} files). Reloading UI...`);
+          setTimeout(() => window.location.reload(), 1500);
+        } else if (data.status === 'up_to_date') {
+          showToast(`Already on latest commit (${data.commit || 'HEAD'}).`);
+        } else {
+          showToast('Sync status: ' + (data.detail || data.status));
+        }
+      } catch (err) {
+        showToast('Git sync error: ' + err.message);
+      } finally {
+        if (btn) btn.style.opacity = '1';
+      }
+    }
+
+    /* Overview & Silent 30s Live Polling */
     async function loadOverviewData(refresh = false) {
       try {
         const [ovRes, feedRes] = await Promise.all([
           apiFetch('/api/dashboard/overview' + (refresh ? '?refresh=true' : '')),
-          apiFetch('/api/dashboard/feed?limit=12')
+          apiFetch('/api/dashboard/feed?limit=15')
         ]);
         const ovData = await ovRes.json();
         const feedData = await feedRes.json();
 
         APP_STATE.overview = ovData;
         APP_STATE.feed = feedData.agent_feed || [];
+        populateTickersDatalist();
         renderOverview();
         renderPositionsTable();
       } catch (err) {
         console.error('Overview load error:', err);
       }
+    }
+
+    async function pollLivePricesSilently() {
+      if (APP_STATE.pollingBusy || document.hidden) return;
+      APP_STATE.pollingBusy = true;
+      try {
+        const ovRes = await apiFetch('/api/dashboard/overview?refresh=true');
+        if (ovRes.ok) {
+          APP_STATE.overview = await ovRes.json();
+          renderOverview();
+          renderPositionsTable();
+        }
+      } catch (_) {
+        // Silent retry next cycle
+      } finally {
+        APP_STATE.pollingBusy = false;
+      }
+    }
+
+    function populateTickersDatalist() {
+      const dl = document.getElementById('held-tickers-datalist');
+      const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
+      if (!dl) return;
+      dl.innerHTML = holdings.map(h =>
+        `<option value="${escapeHtml(h.ticker)}">${escapeHtml(h.sector)} · ${h.shares} shs</option>`
+      ).join('');
     }
 
     function renderOverview() {
@@ -2147,28 +2142,28 @@
 
       const netWorth = Number(kpis.total_net_worth || 0);
       const custodyVal = Number(kpis.portfolio_market_value || 0);
-      const costBasis = Number(kpis.portfolio_cost_basis || 0);
       const cashVal = Number(kpis.ktrade_available_cash || 0);
+      const dayChg = Number(kpis.day_change_pkr || 0);
+      const dayChgPct = Number(kpis.day_change_pct || 0);
       const uPnl = Number(kpis.unrealized_pnl || 0);
       const uPnlPct = Number(kpis.unrealized_pnl_pct || 0);
       const divBank = Number(kpis.net_dividends_in_bank || 0);
       const freshCap = Number(kpis.fresh_capital_invested || 0);
       const trueRoi = Number(kpis.true_roi_pct || 0);
 
-      // Live chip
-      const mode = kpis.price_mode || 'LIVE';
-      document.getElementById('live-status-text').textContent = mode === 'LIVE' ? 'LIVE · PSX' : 'SYNCED · PSX';
+      const nowStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      document.getElementById('live-status-text').textContent = `LIVE · ${nowStr}`;
 
       // Row 1 KPIs
       document.getElementById('kpi-net-worth').textContent = fmtPKR(netWorth);
       const nwSub = document.getElementById('kpi-net-worth-sub');
       nwSub.textContent = (trueRoi >= 0 ? '↗ ' : '↘ ') + fmtPct(trueRoi) + ' vs Rs. ' + freshCap.toLocaleString('en-PK') + ' capital';
-      nwSub.className = 'kpi-trend ' + (trueRoi >= 0 ? '' : 'negative');
-      document.getElementById('kpi-net-worth-hover').textContent = `${fmtPKR(custodyVal)} custody + ${fmtPKR(cashVal)} KTrade cash`;
+      nwSub.className = 'kpi-trend tabular ' + (trueRoi >= 0 ? '' : 'negative');
 
       document.getElementById('kpi-custody-val').textContent = fmtPKR(custodyVal);
-      document.getElementById('kpi-custody-sub').textContent = `${holdings.length} Active PSX Holdings`;
-      document.getElementById('kpi-custody-hover').textContent = `Cost Basis: ${fmtPKR(costBasis)} · KMI-30 Shariah Book`;
+      const custSub = document.getElementById('kpi-custody-sub');
+      custSub.textContent = `Day: ${fmtPKR(dayChg, true)} (${fmtPct(dayChgPct)}) · ${holdings.length} Stocks`;
+      custSub.className = 'kpi-trend tabular ' + (dayChg >= 0 ? '' : 'negative');
 
       document.getElementById('kpi-cash-val').textContent = fmtPKR(cashVal);
       const cashRatio = netWorth > 0 ? ((cashVal / netWorth) * 100).toFixed(1) : '0.0';
@@ -2177,9 +2172,8 @@
       const combinedPnlAndDiv = uPnl + divBank;
       document.getElementById('kpi-pnl-val').textContent = fmtPKR(combinedPnlAndDiv, true);
       const pnlSub = document.getElementById('kpi-pnl-sub');
-      pnlSub.textContent = `${fmtPct(uPnlPct)} return & ${fmtPKR(divBank)} divs`;
-      pnlSub.className = 'kpi-trend ' + (combinedPnlAndDiv >= 0 ? '' : 'negative');
-      document.getElementById('kpi-pnl-hover').textContent = `Unrealized: ${fmtPKR(uPnl, true)} · Collected Divs: ${fmtPKR(divBank)}`;
+      pnlSub.textContent = `${fmtPct(uPnlPct)} P&L & ${fmtPKR(divBank)} divs`;
+      pnlSub.className = 'kpi-trend tabular ' + (combinedPnlAndDiv >= 0 ? '' : 'negative');
 
       // Row 2 Charts
       renderPortfolioBarChart(holdings);
@@ -2189,7 +2183,7 @@
       renderValuationProgress(holdings);
       renderRecentActivity();
 
-      // Row 3 Bottom-Right 2x2 Accounts & Engines
+      // Row 3 Mini Accounts
       document.getElementById('mini-custody-val').textContent = fmtPKR(custodyVal);
       document.getElementById('mini-custody-tag').textContent = `••• ${holdings.length} STOCKS`;
       document.getElementById('mini-cash-val').textContent = fmtPKR(cashVal);
@@ -2210,6 +2204,7 @@
         ['Fresh Working Capital', fmtPKR(kpis.fresh_capital_invested)],
         ['Custody Cost Basis', fmtPKR(kpis.portfolio_cost_basis)],
         ['Custody Market Value', fmtPKR(kpis.portfolio_market_value)],
+        ['Today Day Change', `${fmtPKR(kpis.day_change_pkr, true)} (${fmtPct(kpis.day_change_pct)})`],
         ['KTrade Available Cash', fmtPKR(kpis.ktrade_available_cash)],
         ['Total Net Worth', fmtPKR(kpis.total_net_worth)],
         ['Unrealized P&L', `${fmtPKR(kpis.unrealized_pnl, true)} (${fmtPct(kpis.unrealized_pnl_pct)})`],
@@ -2218,22 +2213,21 @@
       ];
       const titles = {
         net_worth: ['Total Net Worth Breakdown', 'Mark-to-Market KTrade Custody + Uninvested Cash'],
-        custody: ['Custody Market Value Breakdown', 'Live PSX Spot Valuation Across 9 KMI-30 Equities'],
+        custody: ['Custody Market Value Breakdown', 'Live PSX Spot Valuation & Intraday Change'],
         cash: ['Available Cash Breakdown', 'Liquid Buying Power in KTrade Brokerage Ledger'],
         pnl: ['Unrealized P&L & Dividend Return', 'Total Capital Efficiency & Realized Payouts']
       };
       const [t, sub] = titles[kind] || titles.net_worth;
-      const html = `
-        <div style="display:flex;flex-direction:column;gap:10px;">
+      openDetailModal(t, sub, `
+        <div style="display:flex;flex-direction:column;gap:9px;">
           ${rows.map(([label, val]) => `
-            <div style="display:flex;justify-content:space-between;padding:10px 14px;border-radius:12px;background:var(--bg);border:1px solid var(--border);">
+            <div style="display:flex;justify-content:space-between;padding:10px 14px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <span style="color:var(--muted);font-weight:600;">${escapeHtml(label)}</span>
               <span class="tabular" style="font-weight:700;color:var(--text);">${escapeHtml(val)}</span>
             </div>
           `).join('')}
         </div>
-      `;
-      openDetailModal(t, sub, html);
+      `);
     }
 
     function setBarChartMode(mode) {
@@ -2241,8 +2235,7 @@
       document.querySelectorAll('[data-chart-mode]').forEach(b => {
         b.classList.toggle('active', b.dataset.chartMode === mode);
       });
-      const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
-      renderPortfolioBarChart(holdings);
+      renderPortfolioBarChart(APP_STATE.overview?.financial_summary?.holdings || []);
     }
 
     function renderPortfolioBarChart(holdings) {
@@ -2310,8 +2303,7 @@
         </div>
       `;
       tip.style.display = 'block';
-      const pad = 16;
-      const left = Math.min(window.innerWidth - 245, event.clientX + pad);
+      const left = Math.min(window.innerWidth - 245, event.clientX + 16);
       const top = Math.max(12, event.clientY - 120);
       tip.style.left = left + 'px';
       tip.style.top = top + 'px';
@@ -2340,15 +2332,10 @@
       if (rest.length > 0) {
         const restVal = rest.reduce((s, x) => s + Number(x.market_value || 0), 0);
         const restWt = totalCustody > 0 ? (restVal / totalCustody) * 100 : 0;
-        segments.push({
-          label: `+${rest.length} Others`,
-          value: restVal,
-          weight: restWt,
-          color: DONUT_COLORS[5]
-        });
+        segments.push({ label: `+${rest.length} Others`, value: restVal, weight: restWt, color: DONUT_COLORS[5] });
       }
 
-      const cx = 94, cy = 94, r = 70;
+      const cx = 93, cy = 93, r = 69;
       const circum = 2 * Math.PI * r;
       let offsetAcc = 0;
 
@@ -2366,7 +2353,7 @@
                   stroke-dasharray="${dash.toFixed(2)} ${circum.toFixed(2)}"
                   stroke-dashoffset="${dashOffset.toFixed(2)}"
                   transform="rotate(-90 ${cx} ${cy})"
-                  style="cursor:pointer;transition:opacity 0.18s ease;"
+                  style="cursor:pointer;"
                   onmouseenter="setDonutCenter('${escapeHtml(seg.label)}', '${seg.weight.toFixed(1)}%', '${idx === 0 ? 'Top Holding' : 'Allocation'}')"
                   onmouseleave="setDonutCenter('${escapeHtml(segments[0].label)}', '${segments[0].weight.toFixed(1)}%', 'Top Holding')" />
         `;
@@ -2441,31 +2428,53 @@
       }
 
       box.innerHTML = items.map((ev, idx) => {
-        const evType = String(ev.event_type || 'SIGNAL').replace(/_/g, ' ');
-        const ticker = ev.metadata?.ticker || (ev.event_type === 'DESK_MANAGER' ? 'DESK' : 'PSX');
-        const badgeCls = ev.event_type === 'DESK_MANAGER' ? 'badge-lime' : 'badge-emerald';
+        const cat = String(ev.category || ev.event_type || 'SIGNAL').replace(/_/g, ' ');
+        const ticker = ev.metadata?.ticker || (cat.includes('DESK') ? 'DESK' : 'PSX');
+        const badgeCls = cat.includes('DESK') ? 'badge-lime' : 'badge-emerald';
         return `
           <div class="activity-row" onclick="openFeedItemDetail(${idx})">
             <div class="activity-main">
               <div class="ticker-circle">${escapeHtml(String(ticker).slice(0, 4))}</div>
               <div style="min-width:0;">
-                <div class="activity-title">${escapeHtml(ev.title || evType)}</div>
-                <div class="activity-sub">${escapeHtml(evType)} · ${escapeHtml(fmtDateShort(ev.created_at))}</div>
+                <div class="activity-title">${escapeHtml(ev.title || cat)}</div>
+                <div class="activity-sub">${escapeHtml(cat)} · ${escapeHtml(fmtDateShort(ev.created_at))}</div>
               </div>
             </div>
-            <span class="badge ${badgeCls}">${escapeHtml(ev.metadata?.sentiment || ticker)}</span>
+            <div class="row-actions">
+              <span class="badge ${badgeCls}">${escapeHtml(ev.metadata?.sentiment || ticker)}</span>
+              <button type="button" class="row-btn danger" title="Delete alert" onclick="deleteFeedItem(${ev.id}, event)">×</button>
+            </div>
           </div>
         `;
       }).join('');
     }
 
+    async function deleteFeedItem(id, event) {
+      if (event) event.stopPropagation();
+      try {
+        await apiFetch(`/api/dashboard/feed/${id}`, { method: 'DELETE' });
+        APP_STATE.feed = (APP_STATE.feed || []).filter(item => item.id !== id);
+        renderRecentActivity();
+        if (APP_STATE.activeTab === 'intelligence') renderIntelFeedManageList();
+        showToast('Removed signal from activity feed.');
+      } catch (err) {
+        showToast('Delete failed: ' + err.message);
+      }
+    }
+
     function openFeedItemDetail(idx) {
       const ev = APP_STATE.feed?.[idx];
       if (!ev) return;
+      const cat = String(ev.category || ev.event_type || 'AGENT').replace(/_/g, ' ');
       openDetailModal(
         ev.title || 'Signal Analysis',
-        `${String(ev.event_type || 'AGENT').replace(/_/g, ' ')} · ${fmtDateShort(ev.created_at)}`,
-        `<div style="white-space:pre-line;padding:14px;border-radius:14px;background:var(--bg);border:1px solid var(--border);">${escapeHtml(ev.summary || ev.body || 'No extended note.')}</div>`
+        `${cat} · ${fmtDateShort(ev.created_at)}`,
+        `
+          <div style="white-space:pre-line;padding:14px;border-radius:12px;background:var(--bg);border:1px solid var(--border);margin-bottom:12px;">${escapeHtml(ev.content || ev.summary || 'No extended note.')}</div>
+          <div style="display:flex;justify-content:flex-end;">
+            <button class="row-btn danger" onclick="deleteFeedItem(${ev.id}, event); closeModal('detail-modal');">Delete This Alert</button>
+          </div>
+        `
       );
     }
 
@@ -2477,31 +2486,35 @@
         `Verdict: ${h.verdict} · Weight: ${Number(h.weight_pct).toFixed(2)}% of custody`,
         `
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
-            <div style="padding:12px;border-radius:12px;background:var(--bg);border:1px solid var(--border);">
+            <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">Shares &amp; Avg Cost</div>
               <div class="tabular" style="font-weight:700;font-size:15px;margin-top:3px;">${h.shares} @ Rs. ${Number(h.avg_price).toFixed(2)}</div>
             </div>
-            <div style="padding:12px;border-radius:12px;background:var(--bg);border:1px solid var(--border);">
-              <div style="font-size:11.5px;color:var(--muted);">Live Spot &amp; 24h</div>
+            <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
+              <div style="font-size:11.5px;color:var(--muted);">Live Spot &amp; Day</div>
               <div class="tabular" style="font-weight:700;font-size:15px;margin-top:3px;">Rs. ${Number(h.current_price).toFixed(2)} (${fmtPct(h.change_pct)})</div>
             </div>
-            <div style="padding:12px;border-radius:12px;background:var(--bg);border:1px solid var(--border);">
+            <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">DCF Fair Value</div>
               <div class="tabular" style="font-weight:700;font-size:15px;color:var(--lime);margin-top:3px;">Rs. ${Number(h.dcf_fair_value).toFixed(2)} (${fmtPct(h.margin_of_safety_pct)} MoS)</div>
             </div>
-            <div style="padding:12px;border-radius:12px;background:var(--bg);border:1px solid var(--border);">
-              <div style="font-size:11.5px;color:var(--muted);">Stop-Loss Guardrail</div>
-              <div class="tabular" style="font-weight:700;font-size:15px;margin-top:3px;">Rs. ${Number(h.stop_loss).toFixed(2)} (${Number(h.stop_distance_pct).toFixed(1)}% buffer)</div>
+            <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
+              <div style="font-size:11.5px;color:var(--muted);">Unrealized P&amp;L</div>
+              <div class="tabular" style="font-weight:700;font-size:15px;color:${Number(h.unrealized_pnl) >= 0 ? 'var(--lime)' : 'var(--danger)'};margin-top:3px;">${fmtPKR(h.unrealized_pnl, true)} (${fmtPct(h.unrealized_pnl_pct)})</div>
             </div>
           </div>
-          <div style="padding:14px;border-radius:14px;background:var(--bg);border:1px solid var(--border);">
+          <div style="padding:13px;border-radius:11px;background:var(--bg);border:1px solid var(--border);margin-bottom:14px;">
             <div style="font-size:11.5px;font-weight:700;color:var(--lime);margin-bottom:4px;">Active Playbook Rule</div>
             <div style="font-size:13px;color:var(--text-secondary);">${escapeHtml(h.playbook_rule)}</div>
+          </div>
+          <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button class="arch-btn" onclick="closeModal('detail-modal'); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});">Edit Shares / Avg Cost</button>
           </div>
         `
       );
     }
 
+    /* Positions Table + Edit & Delete Controls */
     function renderPositionsTable() {
       const tbody = document.getElementById('positions-tbody');
       const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
@@ -2509,7 +2522,6 @@
 
       tbody.innerHTML = holdings.map((h, idx) => {
         const pnlPos = Number(h.unrealized_pnl) >= 0;
-        const mosPos = Number(h.margin_of_safety_pct) >= 0;
         const vBadge = h.verdict === 'ACCUMULATE' ? 'badge-lime' : (h.verdict === 'HOLD' ? 'badge-emerald' : 'badge-warn');
         return `
           <tr style="cursor:pointer;" onclick="openHoldingDetail(${idx})">
@@ -2526,29 +2538,97 @@
             <td class="tabular">Rs. ${Number(h.avg_price).toFixed(2)}</td>
             <td class="tabular">
               <div style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
-              <div style="font-size:11px;color:${Number(h.change_pct) >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(h.change_pct)}</div>
+              <div style="font-size:11px;color:${Number(h.change_pct) >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(h.change_pct)} (${fmtPKR(h.day_change_pkr, true)})</div>
             </td>
             <td class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
             <td class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
             <td class="tabular" style="font-weight:700;color:${pnlPos ? 'var(--lime)' : 'var(--danger)'};">
               ${fmtPKR(h.unrealized_pnl, true)}<div style="font-size:11px;">${fmtPct(h.unrealized_pnl_pct)}</div>
             </td>
-            <td class="tabular">Rs. ${Number(h.dcf_fair_value).toFixed(2)}</td>
-            <td class="tabular" style="color:${mosPos ? 'var(--emerald)' : 'var(--muted)'};font-weight:600;">${fmtPct(h.margin_of_safety_pct)}</td>
+            <td class="tabular">
+              <div>Rs. ${Number(h.dcf_fair_value).toFixed(2)}</div>
+              <div style="font-size:11px;color:var(--muted);">${fmtPct(h.margin_of_safety_pct)} MoS</div>
+            </td>
             <td><span class="badge ${vBadge}">${escapeHtml(h.verdict)}</span></td>
+            <td onclick="event.stopPropagation();">
+              <div class="row-actions">
+                <button type="button" class="row-btn" onclick="openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price})">Edit</button>
+                <button type="button" class="row-btn danger" title="Delete Position" onclick="deletePosition('${escapeHtml(h.ticker)}')">×</button>
+              </div>
+            </td>
           </tr>
         `;
       }).join('');
     }
 
+    function openEditPositionModal(ticker, shares, avgPrice) {
+      const symInput = document.getElementById('edit-pos-ticker');
+      symInput.value = ticker || '';
+      symInput.readOnly = Boolean(ticker);
+      document.getElementById('pos-edit-modal-title').textContent = ticker
+        ? `Edit ${ticker} Position & Avg Cost`
+        : 'Add or Update Custody Position';
+      document.getElementById('edit-pos-shares').value = shares > 0 ? shares : '';
+      document.getElementById('edit-pos-avg').value = avgPrice > 0 ? avgPrice : '';
+      updateEditPosPreview();
+      document.getElementById('pos-edit-modal').classList.add('open');
+    }
+
+    function updateEditPosPreview() {
+      const shs = parseFloat(document.getElementById('edit-pos-shares').value || '0');
+      const avg = parseFloat(document.getElementById('edit-pos-avg').value || '0');
+      const sym = normalizeSym(document.getElementById('edit-pos-ticker').value);
+      const existing = (APP_STATE.overview?.financial_summary?.holdings || []).find(h => h.ticker === sym);
+      const spot = existing ? Number(existing.current_price || avg) : avg;
+      const cost = shs * avg;
+      const mv = shs * spot;
+      const pnl = mv - cost;
+      document.getElementById('edit-pos-preview').innerHTML = `
+        <span>Cost Basis: <strong>${fmtPKR(cost)}</strong></span>
+        <span>Live Value: <strong>${fmtPKR(mv)}</strong></span>
+        <span>Est. P&amp;L: <strong style="color:${pnl >= 0 ? 'var(--lime)' : 'var(--danger)'};">${fmtPKR(pnl, true)}</strong></span>
+      `;
+    }
+
+    async function submitEditPositionForm(e) {
+      e.preventDefault();
+      const sym = normalizeSym(document.getElementById('edit-pos-ticker').value);
+      const shares = parseFloat(document.getElementById('edit-pos-shares').value);
+      const avg_price = parseFloat(document.getElementById('edit-pos-avg').value);
+      if (!sym) return;
+      try {
+        await apiFetch(`/api/dashboard/positions/${encodeURIComponent(sym)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shares, avg_price })
+        });
+        closeModal('pos-edit-modal');
+        showToast(`Updated ${sym}: ${shares} shares @ Rs. ${avg_price.toFixed(2)}`);
+        await loadOverviewData(false);
+      } catch (err) {
+        showToast('Failed updating position: ' + err.message);
+      }
+    }
+
+    async function deletePosition(ticker) {
+      if (!confirm(`Remove ${ticker} from custody holdings?`)) return;
+      try {
+        await apiFetch(`/api/dashboard/positions/${encodeURIComponent(ticker)}`, { method: 'DELETE' });
+        showToast(`Deleted position ${ticker}.`);
+        await loadOverviewData(false);
+      } catch (err) {
+        showToast('Delete failed: ' + err.message);
+      }
+    }
+
     async function syncLivePrices() {
-      const btn = document.getElementById('btn-sync-prices');
-      if (btn) btn.style.opacity = '0.6';
-      showToast('Syncing live PSX market-watch prices...');
+      const btn = document.getElementById('btn-header-sync-prices');
+      if (btn) btn.style.opacity = '0.65';
+      showToast('Fetching live PSX quotes across all holdings...');
       try {
         await apiFetch('/api/dashboard/trigger-sweep/prices', { method: 'POST' });
         await loadOverviewData(true);
-        showToast('All 9 PSX holdings updated with live quotes.');
+        showToast('Live PSX prices & P&L updated.');
       } catch (err) {
         showToast('Price sync error: ' + err.message);
       } finally {
@@ -2556,7 +2636,7 @@
       }
     }
 
-    /* Transactions & Capital */
+    /* Transactions & Capital + Delete Controls */
     async function loadTransactionsData() {
       try {
         const [trRes, capRes] = await Promise.all([
@@ -2576,21 +2656,49 @@
             <td><span class="badge ${t.side === 'BUY' ? 'badge-lime' : 'badge-warn'}">${escapeHtml(t.side)}</span></td>
             <td class="tabular">${t.quantity}</td>
             <td class="tabular">Rs. ${Number(t.price).toFixed(2)}</td>
-            <td class="tabular" style="font-weight:700;">${fmtPKR(t.net_amount || (t.quantity * t.price))}</td>
+            <td class="tabular" style="font-weight:700;">${fmtPKR(t.net_total || t.net_amount || (t.quantity * t.price))}</td>
+            <td style="text-align:right;">
+              <button type="button" class="row-btn danger" title="Delete trade" onclick="deleteTrade(${t.id})">×</button>
+            </td>
           </tr>
-        `).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No individual trade executions logged yet.</td></tr>';
+        `).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No trade executions logged yet.</td></tr>';
 
         const capBody = document.getElementById('capital-tbody');
         capBody.innerHTML = APP_STATE.capital.length ? APP_STATE.capital.map(c => `
           <tr>
-            <td style="color:var(--muted);font-size:12px;">${escapeHtml(fmtDateShort(c.created_at))}</td>
+            <td style="color:var(--muted);font-size:12px;">${escapeHtml(fmtDateShort(c.tx_date || c.created_at))}</td>
             <td><span class="badge badge-muted">${escapeHtml(String(c.tx_type || '').replace(/_/g, ' '))}</span></td>
             <td class="tabular" style="font-weight:700;">${fmtPKR(c.amount)}</td>
             <td style="color:var(--muted);font-size:12px;">${escapeHtml(c.reference_note || '—')}</td>
+            <td style="text-align:right;">
+              <button type="button" class="row-btn danger" title="Delete entry" onclick="deleteCapital(${c.id})">×</button>
+            </td>
           </tr>
-        `).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">No capital entries found.</td></tr>';
+        `).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No capital entries found.</td></tr>';
       } catch (err) {
         console.error(err);
+      }
+    }
+
+    async function deleteTrade(id) {
+      if (!confirm('Delete this trade execution record?')) return;
+      try {
+        await apiFetch(`/api/dashboard/trades/${id}`, { method: 'DELETE' });
+        showToast('Trade entry deleted.');
+        await Promise.all([loadOverviewData(false), loadTransactionsData()]);
+      } catch (err) {
+        showToast('Delete failed: ' + err.message);
+      }
+    }
+
+    async function deleteCapital(id) {
+      if (!confirm('Delete this capital ledger transaction? Cash balance will recalculate.')) return;
+      try {
+        await apiFetch(`/api/dashboard/capital/${id}`, { method: 'DELETE' });
+        showToast('Capital transaction deleted & cash recalculated.');
+        await Promise.all([loadOverviewData(false), loadTransactionsData()]);
+      } catch (err) {
+        showToast('Delete failed: ' + err.message);
       }
     }
 
@@ -2610,7 +2718,7 @@
     async function submitTradeForm(e) {
       e.preventDefault();
       const payload = {
-        ticker: document.getElementById('trade-ticker').value.trim().toUpperCase(),
+        ticker: normalizeSym(document.getElementById('trade-ticker').value),
         side: document.getElementById('trade-side').value,
         quantity: parseFloat(document.getElementById('trade-qty').value),
         price: parseFloat(document.getElementById('trade-price').value),
@@ -2654,7 +2762,7 @@
       }
     }
 
-    /* Dividends */
+    /* Dividends + 3-Mode Live Calculator + Delete Control */
     async function loadDividendsData() {
       try {
         const res = await apiFetch('/api/dashboard/dividends');
@@ -2684,24 +2792,121 @@
                 ).join('')}
               </select>
             </td>
+            <td>
+              <button type="button" class="row-btn danger" title="Delete dividend" onclick="deleteDividend(${d.id})">Delete</button>
+            </td>
           </tr>
-        `).join('') : '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No dividends logged yet. Click "+ Log Dividend" when a PSX payout is announced.</td></tr>';
+        `).join('') : '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px;">No dividends logged yet. Click "+ Log Dividend" to add a payout.</td></tr>';
       } catch (err) {
         console.error(err);
       }
     }
 
+    async function deleteDividend(id) {
+      if (!confirm('Delete this dividend entry?')) return;
+      try {
+        await apiFetch(`/api/dashboard/dividends/${id}`, { method: 'DELETE' });
+        showToast('Dividend entry deleted.');
+        await Promise.all([loadOverviewData(false), loadDividendsData()]);
+      } catch (err) {
+        showToast('Delete failed: ' + err.message);
+      }
+    }
+
     function openDividendModal() {
+      setDividendInputMode('net');
+      recalcDividendPreview();
       document.getElementById('div-modal').classList.add('open');
+    }
+
+    function setDividendInputMode(mode) {
+      APP_STATE.divInputMode = mode;
+      document.querySelectorAll('[data-div-mode]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.divMode === mode);
+      });
+      const lbl = document.getElementById('div-amount-label');
+      const inp = document.getElementById('div-primary-val');
+      if (mode === 'net') {
+        lbl.textContent = 'Total Net Received in Bank (PKR)';
+        inp.placeholder = 'e.g. 122';
+      } else if (mode === 'gross') {
+        lbl.textContent = 'Total Gross Dividend Amount (PKR)';
+        inp.placeholder = 'e.g. 143.53';
+      } else {
+        lbl.textContent = 'Gross Dividend Per Share — DPS (PKR)';
+        inp.placeholder = 'e.g. 4.00';
+      }
+      recalcDividendPreview();
+    }
+
+    function onDividendTickerInput(rawVal) {
+      const sym = normalizeSym(rawVal);
+      const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
+      const match = holdings.find(h => h.ticker === sym);
+      const sharesInp = document.getElementById('div-shares');
+      if (match && (!sharesInp.value || Number(sharesInp.dataset.autofilled || 0) === 1)) {
+        sharesInp.value = match.shares;
+        sharesInp.dataset.autofilled = '1';
+      }
+      recalcDividendPreview();
+    }
+
+    function computeDividendBreakdown() {
+      const shares = Math.max(0, parseFloat(document.getElementById('div-shares')?.value || '0'));
+      const rawVal = Math.max(0, parseFloat(document.getElementById('div-primary-val')?.value || '0'));
+      const taxRate = Math.min(99, Math.max(0, parseFloat(document.getElementById('div-tax')?.value || '15')));
+      const taxFrac = taxRate / 100.0;
+
+      let gross = 0, wht = 0, net = 0, dps = 0;
+      if (APP_STATE.divInputMode === 'net') {
+        net = rawVal;
+        gross = (1 - taxFrac) > 0 ? (net / (1 - taxFrac)) : net;
+        wht = gross - net;
+        dps = shares > 0 ? (gross / shares) : 0;
+      } else if (APP_STATE.divInputMode === 'gross') {
+        gross = rawVal;
+        wht = gross * taxFrac;
+        net = gross - wht;
+        dps = shares > 0 ? (gross / shares) : 0;
+      } else {
+        dps = rawVal;
+        gross = shares * dps;
+        wht = gross * taxFrac;
+        net = gross - wht;
+      }
+      return {
+        shares,
+        taxRate,
+        gross: Number(gross.toFixed(2)),
+        wht: Number(wht.toFixed(2)),
+        net: Number(net.toFixed(2)),
+        dps: Number(dps.toFixed(4))
+      };
+    }
+
+    function recalcDividendPreview() {
+      const c = computeDividendBreakdown();
+      const box = document.getElementById('div-calc-preview');
+      if (!box) return;
+      box.innerHTML = `
+        <span>Gross: <strong>${fmtPKR(c.gross)}</strong></span>
+        <span>WHT (${c.taxRate}%): <strong>${fmtPKR(c.wht)}</strong></span>
+        <span>Net Payout: <strong style="color:var(--lime);">${fmtPKR(c.net)}</strong></span>
+        <span>DPS: <strong>Rs. ${c.dps.toFixed(2)}/sh</strong></span>
+      `;
     }
 
     async function submitDividendForm(e) {
       e.preventDefault();
+      const ticker = normalizeSym(document.getElementById('div-ticker').value);
+      const calc = computeDividendBreakdown();
       const payload = {
-        ticker: document.getElementById('div-ticker').value.trim().toUpperCase(),
-        shares_held: parseFloat(document.getElementById('div-shares').value),
-        dps_gross: parseFloat(document.getElementById('div-dps').value),
-        tax_rate_pct: parseFloat(document.getElementById('div-tax').value || '15'),
+        ticker,
+        shares_held: calc.shares,
+        dps_gross: calc.dps,
+        gross_amount: calc.gross,
+        net_amount: calc.net,
+        tax_rate_pct: calc.taxRate,
         ex_date: document.getElementById('div-ex-date').value || null,
         status: document.getElementById('div-status').value
       };
@@ -2713,7 +2918,8 @@
         });
         closeModal('div-modal');
         e.target.reset();
-        showToast(`Logged ${payload.ticker} dividend.`);
+        document.getElementById('div-tax').value = '15';
+        showToast(`Saved ${ticker} dividend: Net ${fmtPKR(calc.net)} (Gross ${fmtPKR(calc.gross)}).`);
         await Promise.all([loadOverviewData(false), loadDividendsData()]);
       } catch (err) {
         showToast('Failed saving dividend: ' + err.message);
@@ -2735,6 +2941,24 @@
     }
 
     /* Intelligence */
+    function renderIntelFeedManageList() {
+      const box = document.getElementById('intel-feed-manage-list');
+      if (!box) return;
+      const items = (APP_STATE.feed || []).slice(0, 8);
+      box.innerHTML = items.length ? items.map((ev, idx) => `
+        <div class="activity-row" onclick="openFeedItemDetail(${idx})">
+          <div class="activity-main">
+            <div class="ticker-circle">${escapeHtml(String(ev.metadata?.ticker || 'PSX').slice(0, 4))}</div>
+            <div style="min-width:0;">
+              <div class="activity-title">${escapeHtml(ev.title || ev.category)}</div>
+              <div class="activity-sub">${escapeHtml(fmtDateShort(ev.created_at))}</div>
+            </div>
+          </div>
+          <button type="button" class="row-btn danger" onclick="deleteFeedItem(${ev.id}, event)">×</button>
+        </div>
+      `).join('') : '<div style="color:var(--muted);">No feed items.</div>';
+    }
+
     async function loadIntelligenceData() {
       try {
         const [intelRes, algoRes] = await Promise.all([
@@ -2757,6 +2981,8 @@
             wr != null ? `Win Rate ${Number(wr).toFixed(0)}%` : 'Bayesian Engine Active';
         }
 
+        renderIntelFeedManageList();
+
         const pbList = document.getElementById('intel-playbook-list');
         const rules = intel.active_playbook || [];
         pbList.innerHTML = rules.slice(0, 6).map(r => {
@@ -2773,37 +2999,22 @@
         }).join('') || '<div style="color:var(--muted);">No playbook rules stored yet.</div>';
 
         const sigList = document.getElementById('intel-signals-list');
-        const reports = [...(intel.institutional_reports || []), ...(intel.messages || []).slice(0, 5)];
-        sigList.innerHTML = reports.slice(0, 6).map(item => {
-          const title = item.subject || item.sender || 'WhatsApp KTrade Feed';
-          const body = item.summary || item.body || '';
-          const tag = item.ticker || item.sentiment || 'SIGNAL';
-          return `
-            <div class="activity-row" onclick="openDetailModal('${escapeHtml(title)}', '${escapeHtml(fmtDateShort(item.created_at))}', '<div style=\\'white-space:pre-line;\\'>${escapeHtml(body)}</div>')">
-              <div class="activity-main">
-                <div class="ticker-circle">${escapeHtml(String(tag).slice(0, 4))}</div>
-                <div style="min-width:0;">
-                  <div class="activity-title">${escapeHtml(title)}</div>
-                  <div class="activity-sub">${escapeHtml(body.slice(0, 75))}</div>
-                </div>
-              </div>
-            </div>
-          `;
-        }).join('') || '<div style="color:var(--muted);">No recent institutional or WhatsApp signals.</div>';
-
-        const mentorList = document.getElementById('intel-mentor-list');
-        const notes = intel.mentor_knowledge || [];
-        mentorList.innerHTML = notes.slice(0, 6).map(n => `
-          <div class="activity-row" onclick="openDetailModal('${escapeHtml(n.source_type || 'Mentor Lesson')}', '${escapeHtml(fmtDateShort(n.created_at))}', '<div style=\\'white-space:pre-line;\\'>${escapeHtml(n.content)}</div>')">
+        const combined = [
+          ...(intel.institutional_reports || []).map(x => ({ title: x.subject || x.source, body: x.summary || '', tag: x.ticker || 'RPT', ts: x.created_at })),
+          ...(intel.messages || []).slice(0, 5).map(x => ({ title: x.sender || 'WhatsApp Feed', body: x.body || '', tag: 'WA', ts: x.created_at })),
+          ...(intel.mentor_knowledge || []).slice(0, 4).map(x => ({ title: x.source_type || 'Mentor Lesson', body: x.content || '', tag: 'EDU', ts: x.created_at }))
+        ];
+        sigList.innerHTML = combined.slice(0, 7).map(item => `
+          <div class="activity-row" onclick="openDetailModal('${escapeHtml(item.title)}', '${escapeHtml(fmtDateShort(item.ts))}', '<div style=\\'white-space:pre-line;\\'>${escapeHtml(item.body)}</div>')">
             <div class="activity-main">
-              <div class="ticker-circle">EDU</div>
+              <div class="ticker-circle">${escapeHtml(String(item.tag).slice(0, 4))}</div>
               <div style="min-width:0;">
-                <div class="activity-title">${escapeHtml(n.source_type || 'Mentor Principle')}</div>
-                <div class="activity-sub">${escapeHtml(String(n.content || '').slice(0, 80))}</div>
+                <div class="activity-title">${escapeHtml(item.title)}</div>
+                <div class="activity-sub">${escapeHtml(String(item.body).slice(0, 80))}</div>
               </div>
             </div>
           </div>
-        `).join('') || '<div style="color:var(--muted);">Mentor vault ready.</div>';
+        `).join('') || '<div style="color:var(--muted);">No recent institutional or WhatsApp signals.</div>';
       } catch (err) {
         console.error(err);
       }
@@ -2892,7 +3103,7 @@
         box.innerHTML = '';
         const hist = data.history || [];
         if (!hist.length) {
-          appendChatBubble('assistant', 'Assalam-o-Alaikum Saad! Your 9-stock KTrade portfolio is synced. Ask me about intrinsic DCF upside, cash deployment, or upload a KTrade screenshot or PDF report.');
+          appendChatBubble('assistant', 'Assalam-o-Alaikum Saad! Your KTrade portfolio is synced with live PSX prices. Ask me about DCF upside, cash deployment, or upload a KTrade screenshot or PDF report.');
         } else {
           hist.forEach(m => appendChatBubble(m.role, m.content));
         }
@@ -2964,7 +3175,7 @@
       const matches = holdings.filter(h =>
         !term || h.ticker.includes(term) || String(h.sector || '').toUpperCase().includes(term)
       );
-      box.innerHTML = matches.map((h, idx) => `
+      box.innerHTML = matches.map(h => `
         <div class="activity-row" onclick="closeModal('search-modal'); openHoldingDetail(${holdings.indexOf(h)});">
           <div class="activity-main">
             <div class="ticker-circle">${escapeHtml(h.ticker.slice(0, 4))}</div>
@@ -2985,6 +3196,8 @@
 
     document.addEventListener('DOMContentLoaded', () => {
       bootDashboard(false);
+      // Silent 30-second real-time price & P&L polling loop
+      setInterval(pollLivePricesSilently, 30000);
     });
   </script>
 </body>
