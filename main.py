@@ -50,6 +50,7 @@ import re
 import datetime
 import importlib
 import shutil
+import signal
 
 if os.name != "nt":
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -795,23 +796,30 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
             reloaded_modules: List[str] = []
             reload_order = [
                 "utils",
+                "model_router",
                 "market_data_scraper",
+                "psx_watchdog",
+                "news_scraper",
+                "youtube_scraper",
+                "business_books_engine",
                 "portfolio_manager",
                 "valuation_engine",
                 "learning_engine",
                 "central_brain",
                 "chat_copilot",
-                "news_scraper",
                 "schedulers",
                 "agent",
             ]
             for mod_name in reload_order:
-                if mod_name in sys.modules:
-                    try:
+                try:
+                    if mod_name in sys.modules:
                         importlib.reload(sys.modules[mod_name])
                         reloaded_modules.append(mod_name)
-                    except Exception as rel_err:
-                        print(f"⚠️ [Hot Reload] Could not reload {mod_name}: {rel_err}", flush=True)
+                    else:
+                        mod = importlib.import_module(mod_name)
+                        reloaded_modules.append(mod_name)
+                except Exception as rel_err:
+                    print(f"⚠️ [Hot Reload] Could not reload {mod_name}: {rel_err}", flush=True)
 
             # Invalidate in-memory caches
             global _OVERVIEW_CKPT_CACHE, _OVERVIEW_BRIDGE_CACHE
@@ -836,19 +844,33 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
             }
 
         res = await asyncio.to_thread(_sync_worker)
-        if (
-            res.get("updated")
-            and "main.py" in (res.get("changed_files") or [])
-            and os.getenv("CLOUD_ENV", "").strip().lower() == "true"
-        ):
-            async def _delayed_execv():
-                await asyncio.sleep(1.2)
-                print("🔄 [Zero-SSH Deploy] main.py updated — restarting process cleanly via os.execv...", flush=True)
-                cleanup_node_process()
-                os.execv(sys.executable, [sys.executable] + sys.argv)
 
-            asyncio.create_task(_delayed_execv())
-            res["restarting_main"] = True
+        # Trigger clean Uvicorn worker reload / container restart
+        async def _delayed_clean_restart():
+            # Allow the HTTP response 0.6s to flush cleanly to the client/browser
+            await asyncio.sleep(0.6)
+            if os.getenv("TESTING") == "true" or os.getenv("SKIP_PROCESS_EXIT_FOR_TEST") == "true":
+                print("ℹ️ [Worker Reload] Test environment detected — skipping process exit.", flush=True)
+                return
+            print("🔄 [Worker Reload] Triggering clean Uvicorn worker reload for 100% fresh code...", flush=True)
+            try:
+                cleanup_node_process()
+            except Exception:
+                pass
+            # 1) Try SIGHUP if supported (standard Unix/Linux Uvicorn worker reload signal)
+            if hasattr(signal, "SIGHUP"):
+                try:
+                    os.kill(os.getpid(), signal.SIGHUP)
+                    return
+                except Exception as sig_err:
+                    print(f"⚠️ [Worker Reload] SIGHUP signal error ({sig_err}), falling back to os._exit(0)...", flush=True)
+            # 2) Fallback to os._exit(0) so Docker's `restart: unless-stopped` policy restarts in ~2s
+            os._exit(0)
+
+        if trigger_source == "dashboard_button" or res.get("updated"):
+            asyncio.create_task(_delayed_clean_restart())
+            res["reloading_worker"] = True
+
         return res
 
 @app.post("/api/dashboard/git-pull")
