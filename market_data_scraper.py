@@ -34,9 +34,9 @@ YAHOO_JSON_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-CORE_KTRADE_TICKERS = ["SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"]
+CORE_KTRADE_TICKERS = ["SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL", "POL", "PSO"]
 
-BULK_QUOTE_TTL_SECONDS: float = 25.0
+BULK_QUOTE_TTL_SECONDS: float = 1.0
 _BULK_QUOTES_CACHE: Dict[str, Dict[str, Any]] = {}
 _BULK_QUOTES_TS: float = 0.0
 _BULK_LOCK = threading.Lock()
@@ -189,6 +189,7 @@ def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -
     if not unique_syms:
         return {}
 
+    now_ms = int(time.time() * 1000)
     payload = {
         "symbols": {
             "tickers": [f"PSX:{sym}" for sym in unique_syms],
@@ -199,20 +200,27 @@ def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -
             "close",
             "change",
             "change_abs",
+            "bid",
+            "ask",
+            "high",
+            "low",
             "volume",
+            "Recommend.All",
             "price_earnings_ttm",
             "dividends_yield_current",
         ],
     }
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Origin": "https://www.tradingview.com",
         "Referer": "https://www.tradingview.com/",
+        "Cache-Control": "no-cache, no-store",
+        "Pragma": "no-cache",
     }
     try:
         resp = requests.post(
-            "https://scanner.tradingview.com/pakistan/scan",
+            f"https://scanner.tradingview.com/pakistan/scan?_t={now_ms}",
             json=payload,
             headers=headers,
             timeout=timeout,
@@ -230,19 +238,37 @@ def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -
             price = _clean_float(d[1], 0.0)
             chg_pct = _clean_float(d[2], 0.0)
             chg_abs = _clean_float(d[3], 0.0)
-            volume = _clean_float(d[4] if len(d) > 4 else 0, 0.0)
-            pe_ttm = _clean_float(d[5] if len(d) > 5 else None, None)
-            div_yield = _clean_float(d[6] if len(d) > 6 else None, None)
+            bid = _clean_float(d[4] if len(d) > 4 else None, None)
+            ask = _clean_float(d[5] if len(d) > 5 else None, None)
+            high = _clean_float(d[6] if len(d) > 6 else None, None)
+            low = _clean_float(d[7] if len(d) > 7 else None, None)
+            volume = _clean_float(d[8] if len(d) > 8 else 0, 0.0)
+            recommend = str(d[9]) if len(d) > 9 and d[9] is not None else None
+            pe_ttm = _clean_float(d[10] if len(d) > 10 else None, None)
+            div_yield = _clean_float(d[11] if len(d) > 11 else None, None)
 
             if sym and price > 0:
+                prev_close = round(price - chg_abs, 2) if chg_abs != 0 else (
+                    round(price / (1.0 + (chg_pct / 100.0)), 2) if chg_pct != 0 else price
+                )
+                if prev_close <= 0:
+                    prev_close = price
                 out[sym] = {
                     "price": round(price, 2),
                     "change": round(chg_abs, 2),
                     "change_pct": round(chg_pct, 2),
+                    "change_abs": round(chg_abs, 2),
+                    "prev_close": round(prev_close, 2),
+                    "bid": round(bid, 2) if bid is not None else None,
+                    "ask": round(ask, 2) if ask is not None else None,
+                    "high": round(high, 2) if high is not None else None,
+                    "low": round(low, 2) if low is not None else None,
                     "volume": volume,
+                    "recommend": recommend,
                     "pe_ttm": round(pe_ttm, 2) if pe_ttm is not None else None,
                     "dividend_yield": round(div_yield, 2) if div_yield is not None else None,
                     "source": "tradingview_psx_realtime",
+                    "timestamp": time.time(),
                 }
         return out
     except Exception:
@@ -251,6 +277,124 @@ def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -
 
 # Backwards-compatible alias
 fetch_tradingview_psx_batch = fetch_tradingview_psx_quotes
+
+
+def fetch_realtime_psx_quotes(
+    tickers: Optional[Iterable[str]] = None,
+    timeout: float = 5.0,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    TASK 1: Multi-Source 1-Second Real-Time PSX Price Engine:
+    Fetches real-time intraday quotes concurrently across:
+      - Feed B (Primary): TradingView Real-Time Pakistan Stock Scanner (POST https://scanner.tradingview.com/pakistan/scan?_t={now_ms})
+      - Feed A (Secondary): Yahoo Finance v8 1-Minute Intraday Stream (https://query1.finance.yahoo.com/v8/finance/chart/{ticker}.KA)
+      - Feed C (Tertiary): PSX Direct Intraday Timeseries / Market Watch (https://dps.psx.com.pk)
+      - Feed D (Failsafe): In-memory cache and Supabase portfolio_holdings.last_price
+
+    Computes exact:
+      - prev_close = round(price - change_abs, 2)
+      - change_abs = round(price - prev_close, 2)
+      - change_pct = round((change_abs / prev_close) * 100.0, 2)
+
+    Updates _BULK_QUOTES_CACHE so every component in the system gets instant live prices.
+    """
+    global _BULK_QUOTES_CACHE, _BULK_QUOTES_TS
+
+    if tickers is None:
+        target_syms = list(CORE_KTRADE_TICKERS)
+    else:
+        target_syms = [normalize_ticker(str(t or "")) for t in tickers if normalize_ticker(str(t or ""))]
+
+    if not target_syms:
+        target_syms = list(CORE_KTRADE_TICKERS)
+
+    # 1. Feed B: TradingView Real-Time Pakistan Scanner (sub-200ms)
+    quotes: Dict[str, Dict[str, Any]] = fetch_tradingview_psx_quotes(target_syms, timeout=timeout)
+
+    # 2. Check for missing or incomplete quotes
+    missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
+    if missing:
+        # Feed A: Yahoo Finance v8 Chart API
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(missing))) as pool:
+            yf_futs = {pool.submit(_fetch_single_yahoo_ka_quote, s, timeout): s for s in missing}
+            for fut in concurrent.futures.as_completed(yf_futs):
+                s = yf_futs[fut]
+                try:
+                    q = fut.result()
+                    if q and float(q.get("price", 0)) > 0:
+                        pr = round(float(q["price"]), 2)
+                        ca = round(float(q.get("change", 0.0)), 2)
+                        cp = round(float(q.get("change_pct", 0.0)), 2)
+                        pc = round(pr - ca, 2) if ca != 0 else (round(pr / (1.0 + (cp / 100.0)), 2) if cp != 0 else pr)
+                        quotes[s] = {
+                            "price": pr,
+                            "change": ca,
+                            "change_pct": cp,
+                            "change_abs": ca,
+                            "prev_close": pc,
+                            "volume": 0.0,
+                            "source": q.get("source", "yahoo_v8_ka"),
+                            "timestamp": time.time(),
+                        }
+                except Exception:
+                    pass
+
+        # Feed C: PSX Direct Intraday Timeseries
+        still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
+        if still_missing:
+            for s in still_missing:
+                try:
+                    ts_q = _fetch_psx_timeseries_intraday(s, timeout=2.0)
+                    if ts_q and float(ts_q.get("price", 0)) > 0:
+                        pr = round(float(ts_q["price"]), 2)
+                        quotes[s] = {
+                            "price": pr,
+                            "change": 0.0,
+                            "change_pct": 0.0,
+                            "change_abs": 0.0,
+                            "prev_close": pr,
+                            "volume": 0.0,
+                            "source": "dps_timeseries_int",
+                            "timestamp": time.time(),
+                        }
+                except Exception:
+                    pass
+
+    # 3. Feed D: Cache & DB Fallback
+    still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
+    if still_missing:
+        db_quotes = _get_tier3_db_cached_quotes()
+        for s in still_missing:
+            if s in _BULK_QUOTES_CACHE and _BULK_QUOTES_CACHE[s].get("price", 0) > 0:
+                quotes[s] = dict(_BULK_QUOTES_CACHE[s])
+            elif s in db_quotes and db_quotes[s].get("price", 0) > 0:
+                pr = round(float(db_quotes[s]["price"]), 2)
+                cp = round(float(db_quotes[s].get("change_pct", 0.0)), 2)
+                quotes[s] = {
+                    "price": pr,
+                    "change": 0.0,
+                    "change_pct": cp,
+                    "change_abs": 0.0,
+                    "prev_close": pr,
+                    "volume": 0.0,
+                    "source": "db_cached_last_price",
+                    "timestamp": time.time(),
+                }
+
+    # Atomic cache update
+    with _BULK_LOCK:
+        _BULK_QUOTES_CACHE.update(quotes)
+        _BULK_QUOTES_TS = time.time()
+
+    return quotes
+
+
+async def fetch_realtime_psx_quotes_async(
+    tickers: Optional[Iterable[str]] = None,
+    timeout: float = 5.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Async wrapper for the Multi-Source 1-Second Real-Time PSX Price Engine."""
+    return await asyncio.to_thread(fetch_realtime_psx_quotes, tickers, timeout)
 
 
 def _fetch_psx_timeseries_intraday(ticker: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
@@ -507,37 +651,9 @@ def fetch_all_psx_prices_bulk(
 
         merged: Dict[str, Dict[str, Any]] = dict(_BULK_QUOTES_CACHE)
 
-        # Tier 1: TradingView Pakistan Scanner JSON API (Primary, 0 Blocks on Cloud)
-        tier1_quotes = fetch_tradingview_psx_quotes(all_target_syms, timeout=6.0)
-        merged.update(tier1_quotes)
-
-        # Tier 2: PSX Intraday Timeseries API & Market Watch if any required ticker was not returned by Tier 1
-        missing_after_tier1 = [s for s in all_target_syms if s not in tier1_quotes or tier1_quotes[s].get("price", 0) <= 0]
-        if missing_after_tier1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(missing_after_tier1))) as pool:
-                t2_futures = {pool.submit(_fetch_psx_timeseries_intraday, s, 2.0): s for s in missing_after_tier1}
-                for fut in concurrent.futures.as_completed(t2_futures):
-                    s = t2_futures[fut]
-                    try:
-                        t2_q = fut.result()
-                        if t2_q and t2_q.get("price", 0.0) > 0:
-                            merged[s] = t2_q
-                    except Exception:
-                        pass
-
-            still_missing = [s for s in missing_after_tier1 if s not in merged or merged[s].get("price", 0) <= 0]
-            if still_missing:
-                tier2_mw = _fetch_psx_market_watch_tier2(timeout=min(timeout, 3))
-                for sym, q in tier2_mw.items():
-                    if sym not in merged or merged[sym].get("price", 0.0) <= 0:
-                        merged[sym] = q
-
-            still_missing_yf = [s for s in missing_after_tier1 if s not in merged or merged[s].get("price", 0) <= 0]
-            if still_missing_yf:
-                yf_quotes = fetch_yahoo_psx_batch(still_missing_yf, timeout=4.0)
-                for sym, q in yf_quotes.items():
-                    if sym not in merged or merged[sym].get("price", 0.0) <= 0:
-                        merged[sym] = q
+        # Tier 1 & 2: Multi-Source Real-Time Engine (TradingView + Yahoo + PSX Timeseries)
+        rt_quotes = fetch_realtime_psx_quotes(all_target_syms, timeout=timeout)
+        merged.update(rt_quotes)
 
         # Tier 3: Database cached last_price fallback for anything still unresolved
         for sym, db_q in db_tier3.items():

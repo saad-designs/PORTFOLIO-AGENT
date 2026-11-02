@@ -340,6 +340,16 @@
       box-shadow: none;
     }
 
+    .tick-flash-up {
+      background-color: rgba(52, 211, 153, 0.22) !important;
+      transition: background-color 0.6s ease;
+    }
+
+    .tick-flash-down {
+      background-color: rgba(248, 113, 113, 0.22) !important;
+      transition: background-color 0.6s ease;
+    }
+
     .heartbeat-state {
       font-size: 11px;
       font-weight: 700;
@@ -3154,22 +3164,190 @@
       }
     }
 
-    async function pollLivePricesSilently() {
-      if (APP_STATE.pollingBusy || document.hidden) return;
-      APP_STATE.pollingBusy = true;
+    let _tickInFlight = false;
+
+    async function pollLiveTickEverySecond() {
+      if (_tickInFlight || document.hidden) return;
+      _tickInFlight = true;
       try {
-        const ovRes = await apiFetch('/api/dashboard/overview?refresh=true');
-        if (ovRes.ok) {
-          APP_STATE.overview = await ovRes.json();
-          renderOverview();
-          renderPositionsTable();
+        const res = await apiFetch('/api/live-prices/tick');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || !data.totals) return;
+
+        // 1. Top Heartbeat Badge Update
+        const dotEl = document.getElementById('market-status-dot');
+        const stateEl = document.getElementById('market-status-state');
+        const detailEl = document.getElementById('market-status-details');
+
+        if (dotEl) {
+          dotEl.className = 'heartbeat-dot ' + (data.market_open ? 'open-live' : 'closed-afterhours');
+        }
+        if (stateEl) {
+          stateEl.textContent = data.market_open ? 'PSX LIVE STREAM' : 'PSX POST-CLOSE';
+        }
+        if (detailEl) {
+          let timeStr = '';
+          try {
+            const d = new Date(data.timestamp);
+            timeStr = d.toLocaleTimeString('en-US', { hour12: false, timeZone: 'Asia/Karachi' });
+          } catch (_) {
+            timeStr = new Date().toLocaleTimeString('en-US', { hour12: false });
+          }
+          detailEl.innerHTML = `1s REAL-TIME · Tick #${data.tick_seq || 0} (${timeStr} PKT)`;
+        }
+
+        // 2. Update KPI Cards in-place
+        const nwEl = document.getElementById('kpi-net-worth');
+        if (nwEl) nwEl.textContent = fmtPKR(data.totals.total_net_worth);
+        const nwSub = document.getElementById('kpi-net-worth-sub');
+        if (nwSub) nwSub.textContent = `Custody ${fmtPKR(data.totals.portfolio_custody_value)} + Cash ${fmtPKR(data.totals.ktrade_cash_balance)}`;
+
+        const custEl = document.getElementById('kpi-custody-val');
+        if (custEl) custEl.textContent = fmtPKR(data.totals.portfolio_custody_value);
+        const custSub = document.getElementById('kpi-custody-sub');
+        if (custSub) custSub.textContent = `Invested Cost (Inv): ${fmtPKR(data.totals.invested_cost)}`;
+
+        const cashEl = document.getElementById('kpi-cash-val');
+        if (cashEl) cashEl.textContent = fmtPKR(data.totals.ktrade_cash_balance);
+
+        const pnlValEl = document.getElementById('kpi-pnl-val');
+        const pnlSub = document.getElementById('kpi-pnl-sub');
+        if (pnlValEl) {
+          const uPnl = Number(data.totals.unrealized_pnl || 0);
+          const uPct = Number(data.totals.unrealized_pnl_pct || 0);
+          pnlValEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPct)})`;
+          pnlValEl.style.color = uPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
+        }
+        if (pnlSub) {
+          const dPnl = Number(data.totals.day_pnl || 0);
+          const dPct = Number(data.totals.day_pnl_pct || 0);
+          pnlSub.textContent = `Day P&L: ${fmtPKR(dPnl, true)} (${fmtPct(dPct)})`;
+          pnlSub.className = 'kpi-trend tabular ' + (dPnl >= 0 ? '' : 'negative');
+        }
+
+        // Mini Accounts
+        const miniCust = document.getElementById('mini-custody-val');
+        if (miniCust) miniCust.textContent = fmtPKR(data.totals.portfolio_custody_value);
+        const miniCash = document.getElementById('mini-cash-val');
+        if (miniCash) miniCash.textContent = fmtPKR(data.totals.ktrade_cash_balance);
+
+        // 3. Update Positions Table Rows in-place with Flash Effects
+        const tbody = document.getElementById('positions-tbody');
+        const holdingsMap = data.holdings || {};
+
+        if (tbody) {
+          for (const [sym, h] of Object.entries(holdingsMap)) {
+            const tr = tbody.querySelector(`tr[data-ticker="${sym}"]`);
+            if (!tr) continue;
+
+            const oldPrice = Number(tr.dataset.lastPrice || 0);
+            tr.dataset.lastPrice = h.price;
+
+            const spotCell = tr.querySelector('[data-col="spot"]');
+            if (spotCell) {
+              const priceDiv = spotCell.querySelector('.pos-spot-price');
+              if (priceDiv) priceDiv.textContent = `Rs. ${Number(h.price).toFixed(2)}`;
+              const chgDiv = spotCell.querySelector('.pos-day-chg');
+              if (chgDiv) {
+                const isPos = Number(h.change_pct) >= 0;
+                chgDiv.textContent = `${fmtPct(h.change_pct)} (${fmtPKR(h.day_pnl, true)})`;
+                chgDiv.style.color = isPos ? 'var(--emerald)' : 'var(--danger)';
+              }
+
+              if (oldPrice > 0 && Math.abs(h.price - oldPrice) > 0.001) {
+                const flashClass = h.price > oldPrice ? 'tick-flash-up' : 'tick-flash-down';
+                spotCell.classList.remove('tick-flash-up', 'tick-flash-down');
+                void spotCell.offsetWidth;
+                spotCell.classList.add(flashClass);
+                setTimeout(() => spotCell.classList.remove(flashClass), 600);
+              }
+            }
+
+            const mvCell = tr.querySelector('[data-col="mv"]');
+            if (mvCell) mvCell.textContent = fmtPKR(h.market_value);
+
+            const wtCell = tr.querySelector('[data-col="weight"]');
+            if (wtCell && data.totals.portfolio_custody_value > 0) {
+              wtCell.textContent = (h.market_value / data.totals.portfolio_custody_value * 100).toFixed(1) + '%';
+            }
+
+            const pnlCell = tr.querySelector('[data-col="pnl"]');
+            if (pnlCell) {
+              const isPos = Number(h.unrealized_pnl) >= 0;
+              pnlCell.innerHTML = `
+                <div style="font-weight:700;color:${isPos ? 'var(--accent-lime)' : 'var(--danger)'};">
+                  ${fmtPKR(h.unrealized_pnl, true)}
+                </div>
+                <div style="font-size:11px;color:${isPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
+                  ${fmtPct(h.unrealized_pnl_pct)}
+                </div>
+              `;
+            }
+          }
+
+          // Positions Summary Footer
+          const posMv = document.getElementById('pos-sum-mv');
+          const posCb = document.getElementById('pos-sum-cb');
+          const posPnl = document.getElementById('pos-sum-pnl');
+          const posDay = document.getElementById('pos-sum-day');
+          if (posMv) posMv.textContent = fmtPKR(data.totals.portfolio_custody_value);
+          if (posCb) posCb.textContent = fmtPKR(data.totals.invested_cost);
+          if (posPnl) {
+            const uPnl = Number(data.totals.unrealized_pnl || 0);
+            const uPct = Number(data.totals.unrealized_pnl_pct || 0);
+            posPnl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPct)})`;
+            posPnl.style.color = uPnl >= 0 ? 'var(--lime)' : 'var(--danger)';
+          }
+          if (posDay) {
+            const dPnl = Number(data.totals.day_pnl || 0);
+            const dPct = Number(data.totals.day_pnl_pct || 0);
+            posDay.textContent = `${fmtPKR(dPnl, true)} (${fmtPct(dPct)})`;
+            posDay.style.color = dPnl >= 0 ? 'var(--emerald)' : 'var(--danger)';
+          }
+        }
+
+        // 4. Update APP_STATE holdings and KPIs so charts & modals stay in sync
+        if (APP_STATE.overview && APP_STATE.overview.financial_summary) {
+          const fs = APP_STATE.overview.financial_summary;
+          if (!fs.financial_kpis) fs.financial_kpis = {};
+          fs.financial_kpis.total_net_worth = data.totals.total_net_worth;
+          fs.financial_kpis.portfolio_market_value = data.totals.portfolio_custody_value;
+          fs.financial_kpis.portfolio_custody_value = data.totals.portfolio_custody_value;
+          fs.financial_kpis.portfolio_cost_basis = data.totals.invested_cost;
+          fs.financial_kpis.ktrade_available_cash = data.totals.ktrade_cash_balance;
+          fs.financial_kpis.ktrade_cash_balance = data.totals.ktrade_cash_balance;
+          fs.financial_kpis.unrealized_pnl = data.totals.unrealized_pnl;
+          fs.financial_kpis.unrealized_pnl_pct = data.totals.unrealized_pnl_pct;
+          fs.financial_kpis.day_change_pkr = data.totals.day_pnl;
+          fs.financial_kpis.day_change_pct = data.totals.day_pnl_pct;
+
+          if (Array.isArray(fs.holdings)) {
+            for (const h of fs.holdings) {
+              const live = holdingsMap[h.ticker];
+              if (live) {
+                h.current_price = live.price;
+                h.market_value = live.market_value;
+                h.unrealized_pnl = live.unrealized_pnl;
+                h.unrealized_pnl_pct = live.unrealized_pnl_pct;
+                h.change_pct = live.change_pct;
+                h.change_abs = live.change_abs;
+                h.day_change_pkr = live.day_pnl;
+                h.weight_pct = data.totals.portfolio_custody_value > 0
+                  ? Number((live.market_value / data.totals.portfolio_custody_value * 100).toFixed(1))
+                  : h.weight_pct;
+              }
+            }
+          }
         }
       } catch (_) {
-        // Silent retry next cycle
+        // Silent failover to next second
       } finally {
-        APP_STATE.pollingBusy = false;
+        _tickInFlight = false;
       }
     }
+
+    const pollLivePricesSilently = pollLiveTickEverySecond;
 
     function populateTickersDatalist() {
       const dl = document.getElementById('held-tickers-datalist');
@@ -3209,17 +3387,15 @@
       } else {
         let isOpen = false;
         if (day === 5) {
-          // Friday: 9:15-12:00 (555-720) and 14:30-16:30 (870-990)
           isOpen = (timeInMins >= 555 && timeInMins <= 720) || (timeInMins >= 870 && timeInMins <= 990);
         } else {
-          // Mon-Thu: 9:30-15:30 (570-930)
           isOpen = (timeInMins >= 570 && timeInMins <= 930);
         }
 
         if (isOpen) {
-          stateText = 'PSX OPEN (LIVE TICKING)';
+          stateText = 'PSX LIVE STREAM';
           dotClass = 'open-live';
-          detailPrefix = 'SPOT FEED ACTIVE';
+          detailPrefix = '1s REAL-TIME';
         } else {
           stateText = 'PSX CLOSED';
           dotClass = 'closed-afterhours';
@@ -3234,18 +3410,13 @@
         stateEl.textContent = stateText;
       }
       if (detailEl) {
-        detailEl.innerHTML = `${detailPrefix} · Poll in <strong id="market-countdown-num">${_marketCountdownSec}</strong>s`;
+        detailEl.innerHTML = `${detailPrefix} · Live Tick`;
       }
     }
 
-    // Tick heartbeat countdown every second
+    // Tick heartbeat & live prices every second
     setInterval(() => {
-      _marketCountdownSec--;
-      if (_marketCountdownSec <= 0) {
-        _marketCountdownSec = 30;
-        pollLivePricesSilently();
-      }
-      updatePsxMarketHeartbeat();
+      pollLiveTickEverySecond();
     }, 1000);
 
     async function confirmResetKtradeBaseline() {
@@ -3874,7 +4045,7 @@
         `;
 
         return `
-          <tr style="cursor:pointer;" onclick="openHoldingDetail(${idx})">
+          <tr data-ticker="${escapeHtml(h.ticker)}" data-last-price="${Number(h.current_price)}" style="cursor:pointer;" onclick="openHoldingDetail(${idx})">
             <td data-label="Asset">
               <div class="ticker-badge-row">
                 <div class="ticker-circle">${escapeHtml(h.ticker.slice(0, 4))}</div>
@@ -3887,13 +4058,13 @@
             <td data-label="Shares" class="tabular" style="font-weight:600;">${h.shares}</td>
             <td data-label="Avg Buy Cost" class="tabular" title="Click to edit average buy cost" onclick="event.stopPropagation(); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});" style="cursor:pointer;text-decoration:underline;text-decoration-color:#2A3631;color:#7CE751;">Rs. ${Number(h.avg_price).toFixed(2)}</td>
             <td data-label="Invested (Inv)" class="tabular" style="font-weight:600;">${fmtPKR(invCost)}</td>
-            <td data-label="Live Spot & Day" class="tabular">
-              <div style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
-              <div style="font-size:11px;color:${dayPct >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(dayPct)} (${fmtPKR(dayPnl, true)})</div>
+            <td data-label="Live Spot & Day" data-col="spot" class="tabular">
+              <div class="pos-spot-price" style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
+              <div class="pos-day-chg" style="font-size:11px;color:${dayPct >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(dayPct)} (${fmtPKR(dayPnl, true)})</div>
             </td>
-            <td data-label="Market Value" class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
-            <td data-label="Weight" class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
-            <td data-label="Unrealized P&L" class="tabular">
+            <td data-label="Market Value" data-col="mv" class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
+            <td data-label="Weight" data-col="weight" class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
+            <td data-label="Unrealized P&L" data-col="pnl" class="tabular">
               ${pnlDisplayHtml}
             </td>
             <td data-label="DCF Fair Value" class="tabular">
@@ -4922,8 +5093,8 @@
 
     document.addEventListener('DOMContentLoaded', () => {
       bootDashboard(false);
-      // Silent 30-second real-time price & P&L polling loop
-      setInterval(pollLivePricesSilently, 30000);
+      // 60-second background refresh for news, feeds, corporate announcements
+      setInterval(() => { loadOverviewData(false); }, 60000);
     });
   </script>
 </body>

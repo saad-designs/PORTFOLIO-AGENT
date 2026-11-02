@@ -2580,7 +2580,7 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     }
 
 
-def get_complete_financial_summary(use_cached_prices: bool = False, force_live: bool = False) -> dict:
+def get_complete_financial_summary(use_cached_prices: bool = False, force_live: bool = True) -> dict:
     """
     Computes complete PSX investment summary, capital accounting, and mark-to-market valuations.
     - Single source of truth: capital_ledger (cash + working capital), portfolio_holdings, dividend_ledger.
