@@ -110,7 +110,7 @@ def fetch_latest_psx_announcements() -> List[Dict[str, Any]]:
     return fresh if fresh else raw_announcements[:5]
 
 
-def run_psx_announcements_sweep(force_sample: bool = True) -> Dict[str, Any]:
+def run_psx_announcements_sweep(force_sample: bool = True, timeout: float = 2.0) -> Dict[str, Any]:
     """
     Executes live multi-source PSX announcements sweep:
     - Source 1: Direct PSX DPS HTML scrape.
@@ -127,10 +127,17 @@ def run_psx_announcements_sweep(force_sample: bool = True) -> Dict[str, Any]:
     # --- Source 1: Direct PSX DPS Scrape ---
     url = "https://dps.psx.com.pk/announcements"
     try:
-        from market_data_scraper import fetch_psx_data_robust_sync
-        html_data = fetch_psx_data_robust_sync(url, is_json=False)
-        if html_data:
-            soup = BeautifulSoup(html_data, 'html.parser')
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Referer": "https://dps.psx.com.pk/",
+            },
+            verify=False,
+            timeout=min(1.0, timeout)
+        )
+        if resp.status_code == 200 and resp.text:
+            soup = BeautifulSoup(resp.text, 'html.parser')
             for row in soup.find_all('tr'):
                 cols = row.find_all('td')
                 if len(cols) >= 4:
@@ -171,7 +178,7 @@ def run_psx_announcements_sweep(force_sample: bool = True) -> Dict[str, Any]:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             }
-            resp = requests.get(rss_url, headers=headers, timeout=4)
+            resp = requests.get(rss_url, headers=headers, timeout=min(1.5, timeout))
             if resp.status_code == 200:
                 root = ET.fromstring(resp.content)
                 channel = root.find("channel")

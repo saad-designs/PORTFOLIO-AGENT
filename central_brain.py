@@ -84,12 +84,13 @@ def gather_central_brain_state(quick_mode: bool = True) -> Dict[str, Any]:
     - Structured macro signals from brain_macro_signals table.
     - Live TradingView / PSX spot quotes.
     """
-    summary = get_complete_financial_summary(use_cached_prices=quick_mode)
+    summary = get_complete_financial_summary(use_cached_prices=quick_mode, force_live=(not quick_mode))
     holdings = summary.get("holdings", [])
     kpis = summary.get("financial_kpis", {})
 
     all_tickers = list(dict.fromkeys(CORE_CANDIDATE_UNIVERSE + [h["ticker"] for h in holdings]))
-    live_quotes = fetch_all_psx_prices_bulk(force_refresh=(not quick_mode), target_tickers=all_tickers)
+    from market_data_scraper import fetch_realtime_psx_quotes
+    live_quotes = fetch_realtime_psx_quotes(all_tickers, timeout=2.0)
 
     watchlist_targets: Dict[str, Dict[str, Any]] = {}
     institutional_reports: List[Dict[str, Any]] = []

@@ -13,6 +13,11 @@ import requests
 import urllib3
 from bs4 import BeautifulSoup
 from utils import normalize_ticker
+try:
+    from psx_chromium_monitor import fetch_chromium_psx_quotes
+except ImportError:
+    def fetch_chromium_psx_quotes(tickers=None, timeout=1.0):
+        return {}
 
 # Suppress insecure request warnings for PSX Data Portal SSL certificates (Ubuntu ARM64 Docker)
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
@@ -308,10 +313,26 @@ def fetch_realtime_psx_quotes(
     if not target_syms:
         target_syms = list(CORE_KTRADE_TICKERS)
 
-    # 1. Feed B: TradingView Real-Time Pakistan Scanner (sub-200ms)
-    quotes: Dict[str, Dict[str, Any]] = fetch_tradingview_psx_quotes(target_syms, timeout=timeout)
+    quotes: Dict[str, Dict[str, Any]] = {}
 
-    # 2. Check for missing or incomplete quotes
+    # 1. Source 1 (Primary): Persistent 1-Tab Headless Chromium PSX Stream (sub-5ms when warm)
+    try:
+        chrom_quotes = fetch_chromium_psx_quotes(target_syms, timeout=min(timeout, 1.0))
+        for s, q in chrom_quotes.items():
+            if float(q.get("price") or 0.0) > 0:
+                quotes[s] = dict(q)
+    except Exception:
+        pass
+
+    # 2. Source 2 (Instant Fallback): TradingView Real-Time Pakistan Scanner (sub-200ms)
+    missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
+    if missing:
+        tv_quotes = fetch_tradingview_psx_quotes(missing, timeout=timeout)
+        for s, q in tv_quotes.items():
+            if float(q.get("price") or 0.0) > 0:
+                quotes[s] = dict(q)
+
+    # 3. Source 3: Yahoo Finance v8 Chart API & Direct Timeseries
     missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if missing:
         # Feed A: Yahoo Finance v8 Chart API

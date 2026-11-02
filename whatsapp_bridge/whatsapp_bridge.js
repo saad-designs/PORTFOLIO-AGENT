@@ -29,6 +29,16 @@ const qrcode = require('qrcode-terminal');
 const axios = require('axios');
 const FormData = require('form-data');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+let puppeteer = null;
+try {
+    puppeteer = require('puppeteer');
+} catch (e) {
+    try {
+        puppeteer = require('whatsapp-web.js/node_modules/puppeteer');
+    } catch (_) {}
+}
 
 const app = express();
 app.use(express.json());
@@ -360,6 +370,50 @@ app.get('/qr', (req, res) => {
     }
 });
 
+// --- PSX LIVE CHROMIUM ENDPOINTS ---
+app.get(['/psx-live-quotes', '/api/psx/live-quotes'], (req, res) => {
+    res.json({
+        status: 'ok',
+        source: 'chromium_psx_live',
+        count: Object.keys(latestPsxQuotes).length,
+        timestamp: latestPsxTimestamp,
+        quotes: latestPsxQuotes
+    });
+});
+
+app.get('/api/psx/status', (req, res) => {
+    const isHealthy = Boolean(latestPsxTimestamp && (Date.now() - latestPsxTimestamp < 20000) && Object.keys(latestPsxQuotes).length > 0);
+    res.json({
+        status: isHealthy ? 'healthy' : 'degraded',
+        healthy: isHealthy,
+        source: 'chromium_psx_live',
+        count: Object.keys(latestPsxQuotes).length,
+        last_update_ms_ago: latestPsxTimestamp ? (Date.now() - latestPsxTimestamp) : null,
+        error: psxMonitorError
+    });
+});
+
+app.get('/api/psx/timeseries/:ticker', async (req, res) => {
+    const ticker = (req.params.ticker || '').toUpperCase();
+    if (!ticker) return res.status(400).json({ error: 'Ticker required' });
+    if (!psxPage || psxPage.isClosed()) {
+        return res.status(503).json({ error: 'PSX Chromium page not ready' });
+    }
+    try {
+        const data = await psxPage.evaluate(async (sym) => {
+            try {
+                const r = await fetch(`https://dps.psx.com.pk/timeseries/int/${sym}`, { cache: 'no-store' });
+                return await r.json();
+            } catch (e) {
+                return { error: e.message };
+            }
+        }, ticker);
+        return res.json(data);
+    } catch (err) {
+        return res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
 // List all group chats with their serialized @g.us IDs (diagnostic)
 app.get('/chats', async (req, res) => {
     try {
@@ -585,9 +639,238 @@ app.post('/api/catchup', async (req, res) => {
     res.json({ status: 'ok', replayed: processedCount });
 });
 
+// --- PERSISTENT 1-TAB HEADLESS CHROMIUM PSX LIVE MONITOR ---
+let psxBrowser = null;
+let psxPage = null;
+let latestPsxQuotes = {};
+let latestPsxTimestamp = 0;
+let isPsxMonitorBooting = false;
+let psxMonitorError = null;
+let psxPollTimer = null;
+let psxCycleCounter = 0;
+
+function getChromeExecutable() {
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    const candidates = [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe') : null
+    ];
+    for (const p of candidates) {
+        if (p && fs.existsSync(p)) return p;
+    }
+    return undefined;
+}
+
+const SCRIP_TO_SYMBOL = {
+    'Systems Limited': 'SYS',
+    'Fauji Fert': 'FFC',
+    'Fauji Fertilizer': 'FFC',
+    'Oil & Gas Dev': 'OGDC',
+    'Oil and Gas Development': 'OGDC',
+    'Mari Energies Ltd.': 'MARI',
+    'Mari Petroleum': 'MARI',
+    'Hub Power Co.': 'HUBC',
+    'Hub Power Co.XD': 'HUBC',
+    'Hub Power': 'HUBC',
+    'Lucky Cement': 'LUCK',
+    'Engro FertertXD': 'EFERT',
+    'Engro Fertilizer': 'EFERT',
+    'Engro Fert': 'EFERT',
+    'Meezan Bank Ltd': 'MEBL',
+    'Meezan Bank': 'MEBL',
+    'Faysal Bank': 'FABL',
+    'Faysal Bank Ltd': 'FABL',
+    'Pakistan Petroleum': 'PPL',
+    'Pak Oilfields': 'POL',
+    'Pakistan State Oil': 'PSO',
+    'United Bank': 'UBL',
+    'MCB Bank': 'MCB',
+    'Habib Bank': 'HBL',
+    'Bank AL Habib': 'BAHL',
+    'TRG Pakistan': 'TRG',
+    'Engro Corp': 'ENGRO',
+    'Engro Corporation': 'ENGRO',
+    'D.G. Khan Cement': 'DGKC',
+    'Maple Leaf': 'MLCF',
+    'Cherat Cement': 'CHCC',
+    'Fauji Cement': 'FCCL',
+    'Unity Foods': 'UNITY',
+    'Pakistan Refinery': 'PRL',
+    'Attock Refinery': 'ATRL',
+    'National Refinery': 'NRL',
+    'Pak Elektron': 'PAEL',
+    'WorldCall Telecom': 'WTL',
+    'Telecard': 'TELE',
+    'Lotte Chemical': 'LOTCHEM',
+    'Cnergyico PK': 'CNERGY'
+};
+
+async function extractPsxMarketQuotes() {
+    if (!psxPage || psxPage.isClosed()) return;
+    try {
+        psxCycleCounter++;
+        const result = await psxPage.evaluate((scripMap) => {
+            const rows = document.querySelectorAll('tr');
+            const bySymbol = {};
+            let count = 0;
+            for (let i = 0; i < rows.length; i++) {
+                const cells = rows[i].querySelectorAll('td');
+                if (cells.length >= 8) {
+                    const scrip = cells[0].textContent.trim();
+                    const ldcp = parseFloat(cells[1].textContent.trim().replace(/,/g, '')) || 0;
+                    const open = parseFloat(cells[2].textContent.trim().replace(/,/g, '')) || 0;
+                    const high = parseFloat(cells[3].textContent.trim().replace(/,/g, '')) || 0;
+                    const low = parseFloat(cells[4].textContent.trim().replace(/,/g, '')) || 0;
+                    const current = parseFloat(cells[5].textContent.trim().replace(/,/g, '')) || 0;
+                    const change = parseFloat(cells[6].textContent.trim().replace(/,/g, '')) || 0;
+                    const volume = parseInt(cells[7].textContent.trim().replace(/,/g, '')) || 0;
+
+                    if (scrip && current > 0) {
+                        count++;
+                        const change_pct = ldcp > 0 ? ((change / ldcp) * 100) : 0;
+                        const quote = {
+                            scrip,
+                            price: Math.round(current * 100) / 100,
+                            ldcp: Math.round(ldcp * 100) / 100,
+                            prev_close: Math.round(ldcp * 100) / 100,
+                            open: Math.round(open * 100) / 100,
+                            high: Math.round(high * 100) / 100,
+                            low: Math.round(low * 100) / 100,
+                            change: Math.round(change * 100) / 100,
+                            change_pct: Math.round(change_pct * 100) / 100,
+                            volume: volume,
+                            source: 'chromium_psx_live',
+                            timestamp: Date.now() / 1000
+                        };
+
+                        bySymbol[scrip.toUpperCase()] = quote;
+                        const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
+                        if (scripMap[scrip]) {
+                            bySymbol[scripMap[scrip]] = quote;
+                        } else if (scripMap[cleanScrip]) {
+                            bySymbol[scripMap[cleanScrip]] = quote;
+                        }
+
+                        const parts = scrip.split('-');
+                        if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
+                            const baseSym = parts[0].toUpperCase();
+                            if (!bySymbol[baseSym]) {
+                                bySymbol[baseSym] = quote;
+                            }
+                        }
+                    }
+                }
+            }
+            return { bySymbol, count };
+        }, SCRIP_TO_SYMBOL);
+
+        if (result && result.bySymbol && result.count > 0) {
+            latestPsxQuotes = Object.assign(latestPsxQuotes, result.bySymbol);
+            latestPsxTimestamp = Date.now();
+            psxMonitorError = null;
+        }
+
+        if (psxCycleCounter % 3 === 0) {
+            await psxPage.evaluate(async () => {
+                try {
+                    const resp = await fetch('https://www.psx.com.pk/market-summary/', { cache: 'no-store' });
+                    if (resp.ok) {
+                        const text = await resp.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(text, 'text/html');
+                        const newRows = doc.querySelectorAll('tr');
+                        if (newRows && newRows.length > 50) {
+                            const target = document.querySelector('body');
+                            if (target && doc.body) {
+                                target.innerHTML = doc.body.innerHTML;
+                            }
+                        }
+                    }
+                } catch (_) {}
+            });
+        }
+    } catch (err) {
+        psxMonitorError = err.message || String(err);
+    }
+}
+
+async function initPsxChromiumMonitor() {
+    if (isPsxMonitorBooting || (psxPage && !psxPage.isClosed())) {
+        return;
+    }
+    if (!puppeteer) {
+        console.warn('⚠️ [PSX Monitor] Puppeteer is not available; skipping Chromium monitor.');
+        return;
+    }
+    isPsxMonitorBooting = true;
+    try {
+        const execPath = getChromeExecutable();
+        console.log(`🌐 [PSX Monitor] Launching persistent 1-Tab Headless Chromium (exec: ${execPath || 'default'})...`);
+        psxBrowser = await puppeteer.launch({
+            executablePath: execPath,
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--single-process',
+                '--renderer-process-limit=1',
+                '--js-flags=--max-old-space-size=96'
+            ]
+        });
+
+        psxPage = await psxBrowser.newPage();
+        await psxPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+        await psxPage.setViewport({ width: 1280, height: 800 });
+
+        console.log('🌐 [PSX Monitor] Navigating to PSX market stream (https://www.psx.com.pk/market-summary/)...');
+        await psxPage.goto('https://www.psx.com.pk/market-summary/', {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000
+        });
+
+        await extractPsxMarketQuotes();
+        console.log(`✅ [PSX Monitor] Connected! Loaded ${Object.keys(latestPsxQuotes).length} stock quotes.`);
+
+        if (psxPollTimer) clearInterval(psxPollTimer);
+        psxPollTimer = setInterval(extractPsxMarketQuotes, 2000);
+    } catch (err) {
+        psxMonitorError = err.message || String(err);
+        console.warn(`⚠️ [PSX Monitor] Boot failed: ${psxMonitorError}. Will retry in 10s...`);
+        setTimeout(() => {
+            isPsxMonitorBooting = false;
+            initPsxChromiumMonitor().catch(() => {});
+        }, 10000);
+    } finally {
+        isPsxMonitorBooting = false;
+    }
+}
+
+const cleanupPsx = async () => {
+    if (psxPollTimer) clearInterval(psxPollTimer);
+    if (psxBrowser) {
+        try { await psxBrowser.close(); } catch (_) {}
+    }
+};
+process.on('exit', cleanupPsx);
+process.on('SIGINT', cleanupPsx);
+process.on('SIGTERM', cleanupPsx);
+
 // START EXPRESS STRICTLY ON LOOPBACK (127.0.0.1:3000) SO CLOUD PORT SCANNERS IGNORE IT
 app.listen(BRIDGE_PORT, '127.0.0.1', () => {
     console.log(`⚙️  [WhatsApp Bridge] Local API listening on 127.0.0.1:${BRIDGE_PORT}. Waiting for Chrome...`);
+    initPsxChromiumMonitor().catch((err) => {
+        console.warn('⚠️ [PSX Monitor] Initial launch error:', err.message || err);
+    });
 });
 
 async function safeInitializeClient(reason = 'startup') {

@@ -246,19 +246,22 @@ def run_business_books_and_law_sweep() -> Dict[str, Any]:
     inserted_rules = 0
 
     try:
-        # 1. Sync rules into active_playbook
-        for p in MASTER_PRINCIPLES_CATALOG:
-            cur.execute("""
-                SELECT id FROM active_playbook 
-                WHERE source = %s AND rule = %s;
-            """, (p["author"], p["rule_text"]))
-            if not cur.fetchone():
+        # 1. Sync rules into active_playbook (single batch roundtrip)
+        cur.execute("SELECT source, rule FROM active_playbook;")
+        existing_rules = {(r[0], r[1]) for r in cur.fetchall()}
+        new_rules = [
+            (p["author"], p["rule_text"], p["confidence"], p["category"])
+            for p in MASTER_PRINCIPLES_CATALOG
+            if (p["author"], p["rule_text"]) not in existing_rules
+        ]
+        if new_rules:
+            for author, rule_text, conf, cat in new_rules:
                 cur.execute("""
                     INSERT INTO active_playbook (source, rule, confidence_weight, regime_tag, created_at)
                     VALUES (%s, %s, %s, %s, NOW());
-                """, (p["author"], p["rule_text"], p["confidence"], p["category"]))
+                """, (author, rule_text, conf, cat))
                 inserted_rules += 1
-        conn.commit()
+            conn.commit()
 
         # 2. Fetch current holdings
         cur.execute("""

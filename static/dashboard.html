@@ -205,6 +205,44 @@
       flex-wrap: wrap;
     }
 
+    .header-utility-strip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      height: 34px;
+      max-width: 100%;
+    }
+    .header-utility-strip::-webkit-scrollbar {
+      display: none;
+    }
+    .header-utility-strip .arch-btn {
+      flex-shrink: 0;
+      white-space: nowrap;
+      height: 32px;
+      padding: 0 12px;
+      font-size: 12px;
+    }
+
+    .modal-head {
+      display: flex !important;
+      flex-direction: row !important;
+      justify-content: space-between !important;
+      align-items: center !important;
+      width: 100% !important;
+      gap: 12px !important;
+    }
+    .modal-card {
+      max-height: calc(100dvh - 84px) !important;
+      overflow-y: auto !important;
+    }
+    .diag-latency, .diag-badge, .latency-badge {
+      white-space: nowrap !important;
+    }
+
     /* Flat Architectural Action Pills */
     .arch-btn {
       display: inline-flex;
@@ -1585,13 +1623,29 @@
       .bento-card {
         padding: 16px 16px;
       }
+      .kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 10px !important;
+      }
       .kpi-card {
-        padding: 16px 16px;
+        padding: 12px !important;
+        min-height: auto !important;
+      }
+      .kpi-val,
+      .kpi-value {
+        font-size: clamp(0.95rem, 4.1vw, 1.2rem) !important;
       }
       .card-header {
         flex-direction: column;
         align-items: flex-start;
         gap: 8px;
+      }
+      .card-header.modal-head,
+      .modal-head {
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 12px !important;
       }
       .seg-pills {
         width: 100%;
@@ -1612,11 +1666,19 @@
         min-width: 650px;
       }
       .quick-actions {
-        width: 100%;
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 8px !important;
+        width: 100% !important;
       }
-      .quick-actions button {
-        flex: 1;
-        justify-content: center;
+      .quick-actions button,
+      .quick-actions .arch-btn,
+      .quick-actions .arch-btn-accent {
+        width: 100% !important;
+        justify-content: center !important;
+        white-space: nowrap !important;
+        text-overflow: ellipsis !important;
+        overflow: hidden !important;
       }
     }
 
@@ -1631,7 +1693,8 @@
         max-width: 100%;
         border-bottom-left-radius: 0;
         border-bottom-right-radius: 0;
-        max-height: 85dvh;
+        max-height: calc(100dvh - 84px) !important;
+        overflow-y: auto !important;
         padding: 20px 16px calc(24px + env(safe-area-inset-bottom, 0px));
       }
       .form-grid {
@@ -1653,11 +1716,8 @@
       }
     }
 
-    /* < 440px: 1-Column KPI cards on very narrow devices */
+    /* < 440px: Retain 2x2 KPI grid and responsive header actions */
     @media (max-width: 440px) {
-      .kpi-grid {
-        grid-template-columns: 1fr;
-      }
       .header-actions {
         width: 100%;
         justify-content: space-between;
@@ -1692,29 +1752,31 @@
       </nav>
 
       <div class="header-actions">
-        <button class="arch-btn" id="btn-header-sync-prices" onclick="syncLivePrices()" title="Refresh Live PSX Quotes via TradingView">
-          <span>Sync Live Prices</span>
-        </button>
+        <div class="header-utility-strip" aria-label="Quick Actions Strip">
+          <button class="arch-btn" id="btn-header-sync-prices" onclick="syncLivePrices()" title="Refresh Live PSX Quotes via Chromium / TradingView">
+            <span>Sync Live Prices</span>
+          </button>
 
-        <button class="arch-btn" id="btn-header-deploy-capital" onclick="scrollToCentralBrain()" title="Deploy Capital via Central Director Brain">
-          <span>Deploy Capital</span>
-        </button>
+          <button class="arch-btn" id="btn-header-deploy-capital" onclick="scrollToCentralBrain()" title="Deploy Capital via Central Director Brain">
+            <span>Deploy Capital</span>
+          </button>
 
-        <button class="arch-btn" id="btn-header-verify-system" onclick="openSystemVerifyModal()" title="Run System & Feeder Verification Suite">
-          <span>Test System</span>
-        </button>
+          <button class="arch-btn" id="btn-header-verify-system" onclick="openSystemVerifyModal()" title="Run System & Feeder Verification Suite">
+            <span>Test System</span>
+          </button>
 
-        <button class="arch-btn" id="btn-git-pull" onclick="triggerGitPullUpdate()" title="Zero-SSH Git Pull from origin/main">
-          <span>Sync Update</span>
-        </button>
+          <button class="arch-btn" id="btn-git-pull" onclick="triggerGitPullUpdate()" title="Zero-SSH Git Pull from origin/main">
+            <span>Sync Update</span>
+          </button>
 
-        <button class="arch-btn" onclick="openTxModal('trade')">
-          <span>+ Log Trade</span>
-        </button>
+          <button class="arch-btn" onclick="openTxModal('trade')">
+            <span>+ Log Trade</span>
+          </button>
 
-        <button class="arch-btn" id="btn-reset-baseline" onclick="confirmResetKtradeBaseline()" title="Reset portfolio database to verified KTrade baseline (Rs. 4,357.38 Cash / Rs. 47,089.75 Custody)">
-          <span>Reset Baseline</span>
-        </button>
+          <button class="arch-btn" id="btn-reset-baseline" onclick="confirmResetKtradeBaseline()" title="Reset portfolio database to verified KTrade baseline (Rs. 4,357.38 Cash / Rs. 47,089.75 Custody)">
+            <span>Reset Baseline</span>
+          </button>
+        </div>
 
         <button class="icon-sq-btn" onclick="openSearchModal()" title="Quick Search">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -2635,7 +2697,7 @@
   <!-- Universal Detail / Breakdown Modal -->
   <div id="detail-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('detail-modal')">
     <div class="modal-card">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div>
           <div class="card-title" id="detail-modal-title">Details</div>
           <div class="card-subtitle" id="detail-modal-sub">Breakdown</div>
@@ -2649,7 +2711,7 @@
   <!-- Edit Position Modal (Shares & Avg Buy Price) -->
   <div id="pos-edit-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('pos-edit-modal')">
     <div class="modal-card">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div>
           <div class="card-title" id="pos-edit-modal-title">Edit Position Cost Basis</div>
           <div class="card-subtitle">Updates KTrade custody shares &amp; average buy cost immediately</div>
@@ -2684,7 +2746,7 @@
   <!-- Bulk Set Historical Buy Prices Modal -->
   <div id="bulk-cost-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('bulk-cost-modal')">
     <div class="modal-card" style="max-width: 680px;">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div>
           <div class="card-title">Set Historical Buy Prices (All Holdings)</div>
           <div class="card-subtitle">Calibrate your actual purchase prices for all 9 stocks to compute true Unrealized P&amp;L</div>
@@ -2704,7 +2766,7 @@
   <!-- Log Trade / Cash Modal -->
   <div id="tx-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('tx-modal')">
     <div class="modal-card">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div>
           <div class="card-title">Log KTrade Execution or Cash</div>
           <div class="card-subtitle">Updates custody holdings &amp; capital ledger immediately</div>
@@ -2780,7 +2842,7 @@
   <!-- 3-Mode Dividend Calculator Modal -->
   <div id="div-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('div-modal')">
     <div class="modal-card">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div>
           <div class="card-title" id="div-modal-title">Log PSX Dividend</div>
           <div class="card-subtitle">Enter Total Net Received, Total Gross, or Per-Share DPS</div>
@@ -2844,7 +2906,7 @@
   <!-- System & Feeder Verification Suite Modal -->
   <div id="system-verify-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('system-verify-modal')">
     <div class="modal-card" style="max-width: 680px;">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div>
           <div class="card-title">System &amp; Feeder Verification Suite</div>
           <div class="card-subtitle">Real-time PASS/FAIL diagnostics across all 6 core sub-systems</div>
@@ -2885,7 +2947,7 @@
   <!-- Search Modal -->
   <div id="search-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('search-modal')">
     <div class="modal-card">
-      <div class="card-header">
+      <div class="card-header modal-head">
         <div class="card-title">Quick Search</div>
         <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('search-modal')">×</button>
       </div>
@@ -3180,11 +3242,12 @@
         const stateEl = document.getElementById('market-status-state');
         const detailEl = document.getElementById('market-status-details');
 
+        const isChromium = (data.source === 'chromium_psx_live');
         if (dotEl) {
           dotEl.className = 'heartbeat-dot ' + (data.market_open ? 'open-live' : 'closed-afterhours');
         }
         if (stateEl) {
-          stateEl.textContent = data.market_open ? 'PSX LIVE STREAM' : 'PSX POST-CLOSE';
+          stateEl.textContent = data.market_open ? (isChromium ? 'PSX LIVE CHROMIUM' : 'PSX LIVE STREAM') : 'PSX POST-CLOSE';
         }
         if (detailEl) {
           let timeStr = '';
@@ -3194,7 +3257,8 @@
           } catch (_) {
             timeStr = new Date().toLocaleTimeString('en-US', { hour12: false });
           }
-          detailEl.innerHTML = `1s REAL-TIME · Tick #${data.tick_seq || 0} (${timeStr} PKT)`;
+          const streamLabel = isChromium ? '1s STREAM' : 'STREAM';
+          detailEl.innerHTML = `${isChromium ? 'PSX LIVE CHROMIUM' : 'PSX LIVE'} &middot; ${streamLabel} &middot; Tick #${data.tick_seq || 0} (${timeStr} PKT)`;
         }
 
         // 2. Update KPI Cards in-place
