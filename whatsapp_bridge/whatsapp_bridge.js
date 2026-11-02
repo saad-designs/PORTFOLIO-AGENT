@@ -648,6 +648,7 @@ let isPsxMonitorBooting = false;
 let psxMonitorError = null;
 let psxPollTimer = null;
 let psxCycleCounter = 0;
+let isExtractingPsx = false;
 
 function getChromeExecutable() {
     if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
@@ -711,9 +712,30 @@ const SCRIP_TO_SYMBOL = {
 };
 
 async function extractPsxMarketQuotes() {
-    if (!psxPage || psxPage.isClosed()) return;
+    if (!psxPage || psxPage.isClosed() || isExtractingPsx) return;
+    isExtractingPsx = true;
     try {
         psxCycleCounter++;
+
+        // Actively fetch fresh market summary over the network on every 2s cycle without cache
+        await psxPage.evaluate(async () => {
+            try {
+                const resp = await fetch('https://www.psx.com.pk/market-summary/', { cache: 'no-store' });
+                if (resp.ok) {
+                    const text = await resp.text();
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(text, 'text/html');
+                    const newRows = doc.querySelectorAll('tr');
+                    if (newRows && newRows.length > 50) {
+                        const target = document.querySelector('body');
+                        if (target && doc.body) {
+                            target.innerHTML = doc.body.innerHTML;
+                        }
+                    }
+                }
+            } catch (_) {}
+        });
+
         const result = await psxPage.evaluate((scripMap) => {
             const rows = document.querySelectorAll('tr');
             const bySymbol = {};
@@ -774,28 +796,10 @@ async function extractPsxMarketQuotes() {
             latestPsxTimestamp = Date.now();
             psxMonitorError = null;
         }
-
-        if (psxCycleCounter % 3 === 0) {
-            await psxPage.evaluate(async () => {
-                try {
-                    const resp = await fetch('https://www.psx.com.pk/market-summary/', { cache: 'no-store' });
-                    if (resp.ok) {
-                        const text = await resp.text();
-                        const parser = new DOMParser();
-                        const doc = parser.parseFromString(text, 'text/html');
-                        const newRows = doc.querySelectorAll('tr');
-                        if (newRows && newRows.length > 50) {
-                            const target = document.querySelector('body');
-                            if (target && doc.body) {
-                                target.innerHTML = doc.body.innerHTML;
-                            }
-                        }
-                    }
-                } catch (_) {}
-            });
-        }
     } catch (err) {
         psxMonitorError = err.message || String(err);
+    } finally {
+        isExtractingPsx = false;
     }
 }
 

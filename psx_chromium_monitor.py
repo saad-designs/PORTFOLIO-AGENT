@@ -124,3 +124,4 @@ def fetch_chromium_psx_timeseries(ticker: str, timeout: float = 2.0) -> Optional
     except Exception:
         pass
     return None
+

@@ -145,7 +145,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ingestion import sweep_rss_feeds, sweep_youtube_transcripts, process_whatsapp_media_payload, process_whatsapp_text_payload
 from scheduler_config import scheduler
 import aiohttp
-from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_checkpoint, update_checkpoint
+from portfolio_manager import get_whatsapp_checkpoint, update_whatsapp_checkpoint, get_checkpoint, update_checkpoint, is_psx_market_open
 from model_router import is_financial_or_signal_text
 
 # Whitelisted KTrade group IDs
@@ -420,6 +420,76 @@ _LAST_DB_SYNC_TS: float = 0.0
 _PRICE_HISTORY_MAP: Dict[str, List[float]] = {k: [v["last_price"]] for k, v in KTRADE_BASELINE_HOLDINGS.items()}
 
 
+def init_default_live_portfolio_state() -> Dict[str, Any]:
+    """Pre-populates LIVE_PORTFOLIO_STATE with all 9 KTrade custody holdings and baseline numbers on boot."""
+    global LIVE_PORTFOLIO_STATE, _TICK_SEQ
+    pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+    pkt_now = datetime.datetime.now(pkt_tz)
+    market_open = is_psx_market_open(pkt_now)
+
+    total_custody = 0.0
+    total_inv = 0.0
+    holdings_out = {}
+    for sym, meta in KTRADE_BASELINE_HOLDINGS.items():
+        shs = float(meta["shares"])
+        inv = float(meta["invested_cost"])
+        avg_d = float(meta["avg_display"])
+        lp = float(meta["last_price"])
+        mv = round(shs * lp, 2)
+        u_pnl = round(mv - inv, 2)
+        u_pct = round((u_pnl / inv) * 100.0, 2) if inv > 0 else 0.0
+        total_custody += mv
+        total_inv += inv
+        holdings_out[sym] = {
+            "ticker": sym,
+            "shares": shs,
+            "price": lp,
+            "change_pct": 0.0,
+            "change_abs": 0.0,
+            "prev_close": lp,
+            "market_value": mv,
+            "invested_cost": inv,
+            "avg_display": avg_d,
+            "unrealized_pnl": u_pnl,
+            "unrealized_pnl_pct": u_pct,
+            "day_pnl": 0.0,
+            "volume": 0.0,
+            "pe_ttm": None,
+            "dividend_yield": None,
+            "source": "baseline_seed",
+            "sparkline": [lp],
+        }
+
+    total_custody = round(total_custody, 2)
+    total_inv = round(total_inv, 2)
+    u_tot = round(total_custody - total_inv, 2)
+    u_pct_tot = round((u_tot / total_inv) * 100.0, 2) if total_inv > 0 else 0.0
+    _TICK_SEQ = max(1, _TICK_SEQ)
+    LIVE_PORTFOLIO_STATE = {
+        "source": "chromium_psx_live",
+        "timestamp": pkt_now.isoformat(),
+        "market_open": market_open,
+        "tick_seq": _TICK_SEQ,
+        "latency_ms": 0.1,
+        "totals": {
+            "total_net_worth": round(total_custody + KTRADE_LOCKED_CASH, 2),
+            "portfolio_custody_value": total_custody,
+            "invested_cost": total_inv,
+            "ktrade_cash_balance": KTRADE_LOCKED_CASH,
+            "unrealized_pnl": u_tot,
+            "unrealized_pnl_pct": u_pct_tot,
+            "day_pnl": 0.0,
+            "day_pnl_pct": 0.0,
+        },
+        "holdings": holdings_out,
+    }
+    return LIVE_PORTFOLIO_STATE
+
+
+# Pre-seed on second zero so /api/live-prices/tick never returns empty holdings
+init_default_live_portfolio_state()
+
+
 def refresh_active_holdings_meta():
     """Refreshes active holdings metadata and cash balance from DB into memory."""
     global _ACTIVE_HOLDINGS_META, _ACTIVE_CASH_BALANCE
@@ -535,11 +605,7 @@ async def realtime_psx_price_loop():
 
             pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
             pkt_now = datetime.datetime.now(pkt_tz)
-            is_weekday = pkt_now.weekday() < 5
-            is_market_open = is_weekday and (
-                (pkt_now.hour > 9 or (pkt_now.hour == 9 and pkt_now.minute >= 0))
-                and (pkt_now.hour < 16 or (pkt_now.hour == 16 and pkt_now.minute <= 30))
-            )
+            is_market_open = is_psx_market_open(pkt_now)
 
             total_custody_val = 0.0
             total_invested_cost = 0.0
@@ -766,28 +832,11 @@ async def get_live_prices_tick():
     """
     Ultra-Fast Dedicated 1-Second PSX Price & P&L Tick Endpoint (<20ms).
     Returns real-time mark-to-market totals and per-holding valuations directly from memory.
+    Guaranteed never to return empty holdings: {} or hardcoded market_open.
     """
     global LIVE_PORTFOLIO_STATE
-    if not LIVE_PORTFOLIO_STATE:
-        pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
-        return {
-            "source": "chromium_psx_live",
-            "timestamp": datetime.datetime.now(pkt_tz).isoformat(),
-            "market_open": True,
-            "tick_seq": 0,
-            "latency_ms": 0.1,
-            "totals": {
-                "total_net_worth": 51447.13,
-                "portfolio_custody_value": 47089.75,
-                "invested_cost": 50919.36,
-                "ktrade_cash_balance": 4357.38,
-                "unrealized_pnl": -3829.61,
-                "unrealized_pnl_pct": -7.52,
-                "day_pnl": 0.0,
-                "day_pnl_pct": 0.0,
-            },
-            "holdings": {},
-        }
+    if not LIVE_PORTFOLIO_STATE or not LIVE_PORTFOLIO_STATE.get("holdings"):
+        return init_default_live_portfolio_state()
     return LIVE_PORTFOLIO_STATE
 
 @app.get("/api/test/psx-scraper")

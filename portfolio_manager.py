@@ -57,6 +57,39 @@ except Exception as sb_err:
 
 import aiohttp
 import json
+import datetime
+from typing import Optional
+
+
+def is_psx_market_open(dt: Optional[datetime.datetime] = None) -> bool:
+    """
+    Returns True ONLY during active Pakistan Stock Exchange (PSX) trading sessions:
+    - Monday to Thursday: 09:30 to 15:30 PKT (UTC+5)
+    - Friday Session 1:   09:30 to 12:30 PKT
+    - Friday Session 2:   14:30 to 16:30 PKT
+    - Nights, early mornings, weekends: False.
+    """
+    pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+    if dt is None:
+        dt = datetime.datetime.now(pkt_tz)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=pkt_tz)
+    else:
+        dt = dt.astimezone(pkt_tz)
+
+    weekday = dt.weekday()
+    if weekday > 4:
+        return False
+
+    time_min = dt.hour * 60 + dt.minute
+
+    if weekday in (0, 1, 2, 3):  # Mon - Thu
+        return 570 <= time_min <= 930
+    elif weekday == 4:  # Friday
+        return (570 <= time_min <= 750) or (870 <= time_min <= 990)
+
+    return False
+
 
 DISCORD_BRIEFS_WEBHOOK = os.getenv("DISCORD_BRIEFS_WEBHOOK")
 
@@ -153,7 +186,7 @@ def _get_or_init_pg_pool(conn_str: str):
     with _PG_POOL_LOCK:
         if _PG_POOL is None:
             from psycopg2 import pool as pg_pool
-            _PG_POOL = pg_pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=conn_str)
+            _PG_POOL = pg_pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=conn_str, connect_timeout=5)
     return _PG_POOL
 
 
@@ -181,7 +214,7 @@ def get_db_connection(db_url=None):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            return psycopg2.connect(conn_str)
+            return psycopg2.connect(conn_str, connect_timeout=5)
         except psycopg2.OperationalError as e:
             if attempt < max_retries - 1:
                 _time.sleep(1)
