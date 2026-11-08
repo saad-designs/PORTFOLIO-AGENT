@@ -58,7 +58,24 @@ except Exception as sb_err:
 import aiohttp
 import json
 import datetime
-from typing import Optional
+from typing import Optional, Any, List, Dict
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Recursively converts UUID, Decimal, datetime, date, and set objects into JSON-safe primitives."""
+    import uuid
+    from decimal import Decimal
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {str(k): sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(v) for v in obj]
+    return obj
 
 
 def is_psx_market_open(dt: Optional[datetime.datetime] = None) -> bool:
@@ -729,6 +746,7 @@ def add_pending_signal(source: str, payload: dict) -> bool:
     """Inserts a pending signal into the Supabase pending_signals table."""
     try:
         import json
+        clean_payload = sanitize_for_json(payload)
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -736,7 +754,7 @@ def add_pending_signal(source: str, payload: dict) -> bool:
             INSERT INTO pending_signals (source, signal_payload)
             VALUES (%s, %s)
             """,
-            (source, json.dumps(payload))
+            (source, json.dumps(clean_payload, default=str))
         )
         conn.commit()
         cursor.close()
@@ -3137,10 +3155,12 @@ def publish_agent_event(category: str, title: str, content: str, metadata: dict 
     Categories: 'DESK_MANAGER', 'KTRADE_WHATSAPP', 'YOUTUBE_MENTOR', 'MACRO_NEWS', 'SYSTEM_ALERT'
     """
     try:
-        enriched_meta = dict(metadata) if isinstance(metadata, dict) else {}
+        raw_meta = dict(metadata) if isinstance(metadata, dict) else {}
+        enriched_meta = sanitize_for_json(raw_meta)
         try:
             from learning_engine import enrich_event_teaching_metadata
             enriched_meta = enrich_event_teaching_metadata(category, title, content, enriched_meta)
+            enriched_meta = sanitize_for_json(enriched_meta)
         except Exception as enrich_err:
             print(f"⚠️ [Agent Feed] Teaching metadata enrich fallback: {enrich_err}")
 
@@ -3150,7 +3170,7 @@ def publish_agent_event(category: str, title: str, content: str, metadata: dict 
             INSERT INTO agent_feed (category, title, content, metadata, created_at)
             VALUES (%s, %s, %s, %s, NOW())
             RETURNING id;
-        """, (category, title, content, json.dumps(enriched_meta)))
+        """, (category, title, content, json.dumps(enriched_meta, default=str)))
         row = cur.fetchone()
         conn.commit()
         cur.close()
@@ -3218,7 +3238,7 @@ def save_chat_message(role: str, content: str, actions_taken: list = None) -> in
             INSERT INTO chat_messages (role, content, actions_taken, created_at)
             VALUES (%s, %s, %s, NOW())
             RETURNING id;
-        """, (role, content, json.dumps(actions_taken)))
+        """, (role, content, json.dumps(sanitize_for_json(actions_taken), default=str)))
         row = cur.fetchone()
         conn.commit()
         msg_id = row[0] if row else None

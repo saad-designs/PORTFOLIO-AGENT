@@ -276,8 +276,8 @@ def _tier1_native_gemini(video_id: str, title: str = "", mentor_name: str = "Men
                 # Check for 503 UNAVAILABLE
                 if "503" in err_str or "unavailable" in err_str:
                     if attempt < max_attempts - 1:
-                        print(f"⏳ [Tier 1] 503 UNAVAILABLE on {model_name}. Sleeping 5s before retry (attempt {attempt+2}/{max_attempts})...")
-                        time.sleep(5)
+                        print(f"⏳ [Tier 1] 503 UNAVAILABLE on {model_name}. Sleeping 2s before retry (attempt {attempt+2}/{max_attempts})...")
+                        time.sleep(2)
                         continue
                 
                 record_model_error(model_name, e)

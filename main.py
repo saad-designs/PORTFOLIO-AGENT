@@ -453,6 +453,7 @@ _ACTIVE_CASH_BALANCE: float = KTRADE_LOCKED_CASH
 LIVE_PORTFOLIO_STATE: Dict[str, Any] = {}
 _TICK_SEQ: int = 0
 _LAST_DB_SYNC_TS: float = 0.0
+_LATEST_QUOTES: Dict[str, Dict[str, Any]] = {}
 _PRICE_HISTORY_MAP: Dict[str, List[float]] = {k: [v["last_price"]] for k, v in KTRADE_BASELINE_HOLDINGS.items()}
 
 
@@ -616,37 +617,24 @@ async def _sync_live_prices_to_db(quotes: Dict[str, Dict[str, Any]]):
     await asyncio.to_thread(_do_sync)
 
 
-async def realtime_psx_price_loop():
+async def fast_1s_heartbeat_loop():
     """
-    Continuous 1.5-second background loop:
-    1. Concurrently fetches live quotes via fetch_realtime_psx_quotes()
-    2. Calculates live mark-to-market totals and individual holding P&Ls
-    3. Updates in-memory LIVE_PORTFOLIO_STATE (<1ms response time)
-    4. Persists spot prices to Supabase every 15 seconds in background
+    Unconditional 1.0-second in-memory heartbeat loop running 24/7:
+    - Increments _TICK_SEQ += 1 unconditionally every 1.0 second.
+    - Recalculates mark-to-market totals and individual holding P&Ls from _LATEST_QUOTES.
+    - Zero blocking network I/O, guaranteed <1ms response time.
     """
-    global LIVE_PORTFOLIO_STATE, _TICK_SEQ, _LAST_DB_SYNC_TS, _PRICE_HISTORY_MAP
-    from market_data_scraper import fetch_realtime_psx_quotes
-
+    global LIVE_PORTFOLIO_STATE, _TICK_SEQ, _PRICE_HISTORY_MAP
     await asyncio.sleep(0.5)
-    print("🚀 [PSX Real-Time Engine] 1-Second Price Loop initialized.", flush=True)
+    print("🚀 [PSX Heartbeat Engine] Fast 1-Second Heartbeat loop initialized.", flush=True)
 
     while True:
         try:
+            t0 = time.perf_counter()
             _TICK_SEQ += 1
             pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
             pkt_now = datetime.datetime.now(pkt_tz)
             is_market_open = is_psx_market_open(pkt_now)
-
-            target_tickers = list(_ACTIVE_HOLDINGS_META.keys()) if _ACTIVE_HOLDINGS_META else [
-                "SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"
-            ]
-
-            t0 = time.perf_counter()
-            try:
-                quotes = await asyncio.to_thread(fetch_realtime_psx_quotes, target_tickers, 3.0)
-            except Exception as q_err:
-                print(f"⚠️ [Realtime Price Fetch Error] {q_err}", flush=True)
-                quotes = {}
 
             total_custody_val = 0.0
             total_invested_cost = 0.0
@@ -660,7 +648,7 @@ async def realtime_psx_price_loop():
                 inv_cost = float(meta.get("invested_cost", 0.0))
                 avg_disp = float(meta.get("avg_display") or (inv_cost / shs if shs > 0 else 0.0))
 
-                q = quotes.get(sym, {})
+                q = _LATEST_QUOTES.get(sym, {})
                 price = float(q.get("price") or meta.get("last_price") or avg_disp)
                 chg_abs = float(q.get("change_abs") or q.get("change") or 0.0)
                 chg_pct = float(q.get("change_pct") or 0.0)
@@ -711,14 +699,14 @@ async def realtime_psx_price_loop():
             prev_custody_val = total_custody_val - total_day_pnl
             total_day_pnl_pct = round((total_day_pnl / prev_custody_val) * 100.0, 2) if prev_custody_val > 0 else 0.0
 
-            dominant_source = "chromium_psx_live" if any(q.get("source") == "chromium_psx_live" for q in quotes.values()) else ("tradingview_psx_live" if any("tradingview" in str(q.get("source")) for q in quotes.values()) else "realtime_feed")
+            dominant_source = "chromium_psx_live" if any(q.get("source") == "chromium_psx_live" for q in _LATEST_QUOTES.values()) else ("tradingview_psx_live" if any("tradingview" in str(q.get("source")) for q in _LATEST_QUOTES.values()) else "realtime_feed")
 
             LIVE_PORTFOLIO_STATE = {
                 "source": dominant_source,
                 "timestamp": pkt_now.isoformat(),
                 "market_open": is_market_open,
                 "tick_seq": _TICK_SEQ,
-                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
                 "totals": {
                     "total_net_worth": total_net_worth,
                     "portfolio_custody_value": total_custody_val,
@@ -731,27 +719,58 @@ async def realtime_psx_price_loop():
                 },
                 "holdings": holdings_out,
             }
-
-            now_ts = time.time()
-            if (now_ts - _LAST_DB_SYNC_TS) >= 15.0 and quotes:
-                _LAST_DB_SYNC_TS = now_ts
-                asyncio.create_task(_sync_live_prices_to_db(quotes))
-
-        except Exception as loop_err:
-            print(f"⚠️ [Realtime Price Loop Error] {loop_err}", flush=True)
+        except Exception as heartbeat_err:
+            print(f"⚠️ [Fast Heartbeat Loop Error] {heartbeat_err}", flush=True)
             if LIVE_PORTFOLIO_STATE:
                 pkt_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
                 LIVE_PORTFOLIO_STATE["timestamp"] = pkt_now.isoformat()
                 LIVE_PORTFOLIO_STATE["tick_seq"] = _TICK_SEQ
 
+        await asyncio.sleep(1.0)
+
+
+async def background_quote_fetcher_loop():
+    """
+    Background worker loop fetching live quotes every 1.5s via fetch_realtime_psx_quotes().
+    Updates shared _LATEST_QUOTES cache and syncs spot prices to database every 15 seconds.
+    Completely decoupled from fast_1s_heartbeat_loop so network pauses never freeze tick_seq.
+    """
+    global _LATEST_QUOTES, _LAST_DB_SYNC_TS
+    from market_data_scraper import fetch_realtime_psx_quotes
+
+    await asyncio.sleep(1.0)
+    print("🚀 [PSX Quote Fetcher] Background Quote Fetcher loop initialized.", flush=True)
+
+    while True:
+        try:
+            target_tickers = list(_ACTIVE_HOLDINGS_META.keys()) if _ACTIVE_HOLDINGS_META else [
+                "SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"
+            ]
+            quotes = await asyncio.to_thread(fetch_realtime_psx_quotes, target_tickers, 3.0)
+            if quotes and isinstance(quotes, dict):
+                _LATEST_QUOTES.update(quotes)
+
+                now_ts = time.time()
+                if (now_ts - _LAST_DB_SYNC_TS) >= 15.0:
+                    _LAST_DB_SYNC_TS = now_ts
+                    asyncio.create_task(_sync_live_prices_to_db(quotes))
+        except Exception as q_err:
+            print(f"⚠️ [Background Quote Fetcher Error] {q_err}", flush=True)
+
         await asyncio.sleep(1.5)
+
+
+# Alias for backwards compatibility
+realtime_psx_price_loop = fast_1s_heartbeat_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Start real-time PSX price loop immediately and retain reference in app.state to prevent GC
-    app.state.price_loop_task = asyncio.create_task(realtime_psx_price_loop())
-    print("🚀 [Lifespan] Assigned app.state.price_loop_task.", flush=True)
+    # 1. Start fast 1-second heartbeat loop and background quote fetcher task
+    app.state.heartbeat_task = asyncio.create_task(fast_1s_heartbeat_loop())
+    app.state.quote_fetcher_task = asyncio.create_task(background_quote_fetcher_loop())
+    app.state.price_loop_task = app.state.heartbeat_task
+    print("🚀 [Lifespan] Assigned app.state.heartbeat_task and app.state.quote_fetcher_task.", flush=True)
 
     # Startup: schema migrations, closed-loop learning tables, and real KTrade custody verification
     try:

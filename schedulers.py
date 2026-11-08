@@ -210,8 +210,8 @@ async def _run_youtube_sweep_inner():
                 if "**Partner's Verdict" in text or "!rule" in text or "!target" in text:
                     formatted_text = text
                 else:
-                    print("DIAGNOSTIC: Sleeping for 65 seconds to clear Gemini RPM and Token limits...")
-                    await asyncio.sleep(65)
+                    print("DIAGNOSTIC: Sleeping for 3 seconds...")
+                    await asyncio.sleep(3)
                     prompt = SWEEP_FORMAT_PROMPT.format(mentor_name=mentor) + f"\n\nTranscript from {mentor}:\n{text[:15000]}"
                     formatted_text = await generate_with_fallback(client, [prompt], task=TASK_FAST_INGESTION)
                 
@@ -1210,7 +1210,7 @@ NEVER use Markdown pipe tables (| col | col |) because Discord cannot render the
             category='DESK_MANAGER',
             title="👔 Desk Manager Daily Synthesis",
             content=final_verdict,
-            metadata={"signal_ids": signal_ids}
+            metadata={"signal_ids": [str(sid) for sid in signal_ids]}
         )
             
         # 5. Mark as processed

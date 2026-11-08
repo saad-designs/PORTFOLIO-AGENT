@@ -448,14 +448,14 @@ app.get(['/psx-live-quotes', '/api/psx/live-quotes'], (req, res) => {
 
 app.get('/api/psx/status', (req, res) => {
     const quoteCount = Object.keys(latestPsxQuotes).length;
-    const isHealthy = Boolean(latestPsxTimestamp && (Date.now() - latestPsxTimestamp < 60000) && quoteCount > 0);
+    const isHealthy = Boolean(latestPsxTimestamp && (Date.now() - latestPsxTimestamp < 120000) && quoteCount > 0);
     res.status(200).json({
         status: isHealthy ? 'healthy' : (quoteCount > 0 ? 'stale' : 'booting'),
         healthy: isHealthy,
         source: 'chromium_psx_live',
         count: quoteCount,
         last_update_ms_ago: latestPsxTimestamp ? (Date.now() - latestPsxTimestamp) : null,
-        error: psxMonitorError
+        error: isHealthy ? null : psxMonitorError
     });
 });
 
@@ -760,6 +760,58 @@ const SCRIP_TO_SYMBOL = {
     'Cnergyico PK': 'CNERGY'
 };
 
+function parseMarketSummaryHtml(html) {
+    if (!html || typeof html !== 'string') return { bySymbol: {}, count: 0 };
+    const rows = html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+    const bySymbol = {};
+    let count = 0;
+    for (const r of rows) {
+        let tds = (r.match(/<td[\s\S]*?<\/td>/gi) || []).map(t => t.replace(/<[^>]+>/g, '').trim());
+        if (tds.length >= 9 && tds[0] === '') tds = tds.slice(1);
+        if (tds.length >= 8 && tds[0] && tds[0] !== 'SCRIP') {
+            const scrip = tds[0];
+            const ldcp = parseFloat(tds[1].replace(/,/g, '')) || 0;
+            const open = parseFloat(tds[2].replace(/,/g, '')) || 0;
+            const high = parseFloat(tds[3].replace(/,/g, '')) || 0;
+            const low = parseFloat(tds[4].replace(/,/g, '')) || 0;
+            const current = parseFloat(tds[5].replace(/,/g, '')) || 0;
+            const change = parseFloat(tds[6].replace(/,/g, '')) || 0;
+            const volume = parseInt(tds[7].replace(/,/g, '')) || 0;
+
+            if (current > 0) {
+                count++;
+                const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
+                const quote = {
+                    scrip,
+                    price: Math.round(current * 100) / 100,
+                    ldcp: Math.round(ldcp * 100) / 100,
+                    prev_close: Math.round(ldcp * 100) / 100,
+                    open: Math.round(open * 100) / 100,
+                    high: Math.round(high * 100) / 100,
+                    low: Math.round(low * 100) / 100,
+                    change: Math.round(change * 100) / 100,
+                    change_abs: Math.round(change * 100) / 100,
+                    change_pct: change_pct,
+                    volume: volume,
+                    source: 'chromium_psx_live',
+                    timestamp: Date.now() / 1000
+                };
+                bySymbol[scrip.toUpperCase()] = quote;
+                const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
+                if (SCRIP_TO_SYMBOL[scrip]) bySymbol[SCRIP_TO_SYMBOL[scrip]] = quote;
+                else if (SCRIP_TO_SYMBOL[cleanScrip]) bySymbol[SCRIP_TO_SYMBOL[cleanScrip]] = quote;
+
+                const parts = scrip.split('-');
+                if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
+                    const baseSym = parts[0].toUpperCase();
+                    if (!bySymbol[baseSym]) bySymbol[baseSym] = quote;
+                }
+            }
+        }
+    }
+    return { bySymbol, count };
+}
+
 function fetchPsxMarketSummaryDirect() {
     return new Promise((resolve) => {
         const options = {
@@ -782,53 +834,7 @@ function fetchPsxMarketSummaryDirect() {
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
                 try {
-                    const rows = data.match(/<tr[\s\S]*?<\/tr>/gi) || [];
-                    const bySymbol = {};
-                    let count = 0;
-                    for (const r of rows) {
-                        let tds = (r.match(/<td[\s\S]*?<\/td>/gi) || []).map(t => t.replace(/<[^>]+>/g, '').trim());
-                        if (tds.length >= 9 && tds[0] === '') tds = tds.slice(1);
-                        if (tds.length >= 8 && tds[0] && tds[0] !== 'SCRIP') {
-                            const scrip = tds[0];
-                            const ldcp = parseFloat(tds[1].replace(/,/g, '')) || 0;
-                            const open = parseFloat(tds[2].replace(/,/g, '')) || 0;
-                            const high = parseFloat(tds[3].replace(/,/g, '')) || 0;
-                            const low = parseFloat(tds[4].replace(/,/g, '')) || 0;
-                            const current = parseFloat(tds[5].replace(/,/g, '')) || 0;
-                            const change = parseFloat(tds[6].replace(/,/g, '')) || 0;
-                            const volume = parseInt(tds[7].replace(/,/g, '')) || 0;
-
-                            if (current > 0) {
-                                count++;
-                                const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
-                                const quote = {
-                                    scrip,
-                                    price: Math.round(current * 100) / 100,
-                                    ldcp: Math.round(ldcp * 100) / 100,
-                                    prev_close: Math.round(ldcp * 100) / 100,
-                                    open: Math.round(open * 100) / 100,
-                                    high: Math.round(high * 100) / 100,
-                                    low: Math.round(low * 100) / 100,
-                                    change: Math.round(change * 100) / 100,
-                                    change_abs: Math.round(change * 100) / 100,
-                                    change_pct: change_pct,
-                                    volume: volume,
-                                    source: 'chromium_psx_live',
-                                    timestamp: Date.now() / 1000
-                                };
-                                bySymbol[scrip.toUpperCase()] = quote;
-                                const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
-                                if (SCRIP_TO_SYMBOL[scrip]) bySymbol[SCRIP_TO_SYMBOL[scrip]] = quote;
-                                else if (SCRIP_TO_SYMBOL[cleanScrip]) bySymbol[SCRIP_TO_SYMBOL[cleanScrip]] = quote;
-
-                                const parts = scrip.split('-');
-                                if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
-                                    const baseSym = parts[0].toUpperCase();
-                                    if (!bySymbol[baseSym]) bySymbol[baseSym] = quote;
-                                }
-                            }
-                        }
-                    }
+                    const { bySymbol, count } = parseMarketSummaryHtml(data);
                     if (count > 0) {
                         latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
                         latestPsxTimestamp = Date.now();
@@ -836,13 +842,17 @@ function fetchPsxMarketSummaryDirect() {
                         return resolve(true);
                     }
                 } catch (e) {
-                    psxMonitorError = e.message;
+                    if (Object.keys(latestPsxQuotes).length === 0) {
+                        psxMonitorError = e.message;
+                    }
                 }
                 resolve(false);
             });
         });
         req.on('error', (err) => {
-            psxMonitorError = err.message;
+            if (Object.keys(latestPsxQuotes).length === 0) {
+                psxMonitorError = err.message;
+            }
             resolve(false);
         });
         req.end();
@@ -855,98 +865,31 @@ async function extractPsxMarketQuotes() {
     try {
         psxCycleCounter++;
 
-        // 1. Try Puppeteer evaluation if page is active
+        // 1. Direct Node fetch - 100% immune to browser navigation or execution context destruction
+        await fetchPsxMarketSummaryDirect();
+
+        // 2. Also check if Chromium page has updated HTML content, without in-page evaluate() fetch
         if (psxPage && !psxPage.isClosed()) {
-            await psxPage.evaluate(async () => {
-                try {
-                    const resp = await fetch('https://www.psx.com.pk/market-summary/', { cache: 'no-store' });
-                    if (resp.ok) {
-                        const text = await resp.text();
-                        const parser = new DOMParser();
-                        const doc = parser.parseFromString(text, 'text/html');
-                        const newRows = doc.querySelectorAll('tr');
-                        if (newRows && newRows.length > 50) {
-                            const target = document.querySelector('body');
-                            if (target && doc.body) {
-                                target.innerHTML = doc.body.innerHTML;
-                            }
-                        }
-                    }
-                } catch (_) {}
-            });
-
-            const result = await psxPage.evaluate((scripMap) => {
-                const rows = document.querySelectorAll('tr');
-                const bySymbol = {};
-                let count = 0;
-                for (let i = 0; i < rows.length; i++) {
-                    let cells = Array.from(rows[i].querySelectorAll('td'));
-                    if (cells.length >= 9 && cells[0].textContent.trim() === '') {
-                        cells = cells.slice(1);
-                    }
-                    if (cells.length >= 8) {
-                        const scrip = cells[0].textContent.trim();
-                        if (!scrip || scrip === 'SCRIP') continue;
-                        const ldcp = parseFloat(cells[1].textContent.trim().replace(/,/g, '')) || 0;
-                        const open = parseFloat(cells[2].textContent.trim().replace(/,/g, '')) || 0;
-                        const high = parseFloat(cells[3].textContent.trim().replace(/,/g, '')) || 0;
-                        const low = parseFloat(cells[4].textContent.trim().replace(/,/g, '')) || 0;
-                        const current = parseFloat(cells[5].textContent.trim().replace(/,/g, '')) || 0;
-                        const change = parseFloat(cells[6].textContent.trim().replace(/,/g, '')) || 0;
-                        const volume = parseInt(cells[7].textContent.trim().replace(/,/g, '')) || 0;
-
-                        if (current > 0) {
-                            count++;
-                            const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
-                            const quote = {
-                                scrip,
-                                price: Math.round(current * 100) / 100,
-                                ldcp: Math.round(ldcp * 100) / 100,
-                                prev_close: Math.round(ldcp * 100) / 100,
-                                open: Math.round(open * 100) / 100,
-                                high: Math.round(high * 100) / 100,
-                                low: Math.round(low * 100) / 100,
-                                change: Math.round(change * 100) / 100,
-                                change_abs: Math.round(change * 100) / 100,
-                                change_pct: change_pct,
-                                volume: volume,
-                                source: 'chromium_psx_live',
-                                timestamp: Date.now() / 1000
-                            };
-
-                            bySymbol[scrip.toUpperCase()] = quote;
-                            const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
-                            if (scripMap[scrip]) {
-                                bySymbol[scripMap[scrip]] = quote;
-                            } else if (scripMap[cleanScrip]) {
-                                bySymbol[scripMap[cleanScrip]] = quote;
-                            }
-
-                            const parts = scrip.split('-');
-                            if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
-                                const baseSym = parts[0].toUpperCase();
-                                if (!bySymbol[baseSym]) {
-                                    bySymbol[baseSym] = quote;
-                                }
-                            }
-                        }
+            try {
+                const html = await psxPage.content();
+                const { bySymbol, count } = parseMarketSummaryHtml(html);
+                if (count > 0) {
+                    latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
+                    latestPsxTimestamp = Date.now();
+                    psxMonitorError = null;
+                }
+            } catch (pageErr) {
+                // Navigation destruction or page reload - catch silently and do not leak to status if quotes loaded
+                const errMsg = pageErr && pageErr.message ? pageErr.message : String(pageErr);
+                if (!errMsg.includes('Execution context was destroyed') && !errMsg.includes('Navigation')) {
+                    if (Object.keys(latestPsxQuotes).length === 0) {
+                        psxMonitorError = errMsg;
                     }
                 }
-                return { bySymbol, count };
-            }, SCRIP_TO_SYMBOL);
-
-            if (result && result.bySymbol && result.count > 0) {
-                latestPsxQuotes = Object.assign(latestPsxQuotes, result.bySymbol);
-                latestPsxTimestamp = Date.now();
-                psxMonitorError = null;
-                return;
             }
         }
-
-        // 2. Direct HTTP fallback if Chromium is loading or yielded empty
-        await fetchPsxMarketSummaryDirect();
     } catch (err) {
-        psxMonitorError = err.message || String(err);
+        // Fallback silently without throwing unhandled exceptions
         try {
             await fetchPsxMarketSummaryDirect();
         } catch (_) {}
@@ -1000,8 +943,8 @@ async function initPsxChromiumMonitor() {
         await psxPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
         await psxPage.setViewport({ width: 1280, height: 800 });
 
-        console.log('🌐 [PSX Monitor] Navigating to PSX market stream (https://www.psx.com.pk/market-summary/)...');
-        await psxPage.goto('https://www.psx.com.pk/market-summary/', {
+        console.log('🌐 [PSX Monitor] Navigating to PSX market stream (https://dps.psx.com.pk/)...');
+        await psxPage.goto('https://dps.psx.com.pk/', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
         });
