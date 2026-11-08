@@ -31,6 +31,73 @@ const FormData = require('form-data');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const { execSync } = require('child_process');
+const os = require('os');
+
+// Recursive cleanup of stale Chromium lock files (.wwebjs_auth and /tmp)
+// Uses shell find on Linux to delete broken symlinks where fs.existsSync returns false
+function cleanStaleChromiumLocks(dirPath, depth = 0) {
+    if (depth > 5) return;
+    if (process.platform !== 'win32' && depth === 0) {
+        try {
+            execSync('find /app -name "Singleton*" -delete 2>/dev/null || true', { stdio: 'ignore' });
+            execSync('find /tmp -name "Singleton*" -delete 2>/dev/null || true', { stdio: 'ignore' });
+            execSync('find /app -name "lockfile" -delete 2>/dev/null || true', { stdio: 'ignore' });
+            execSync('find /tmp -name "psx_chrome_profile" -exec rm -rf {} + 2>/dev/null || true', { stdio: 'ignore' });
+        } catch (_) {}
+    }
+    if (!dirPath) return;
+    try {
+        let entries = [];
+        try {
+            entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        } catch (_) {
+            return;
+        }
+        for (const entry of entries) {
+            const fullPath = path.join(dirPath, entry.name);
+            const name = entry.name.toLowerCase();
+            if (name.startsWith('singleton') || name === 'lockfile') {
+                try {
+                    fs.rmSync(fullPath, { force: true, recursive: true });
+                    console.log(`🧹 [Chromium Lock Cleaner] Removed stale lock/symlink: ${fullPath}`);
+                } catch (e) {
+                    try { fs.unlinkSync(fullPath); } catch (_) {}
+                }
+            } else if (entry.isDirectory() && !name.startsWith('.') && name !== 'node_modules') {
+                cleanStaleChromiumLocks(fullPath, depth + 1);
+            }
+        }
+    } catch (err) {
+        // Ignore errors during directory traversal
+    }
+}
+
+// Clean stale locks immediately on process launch
+try {
+    cleanStaleChromiumLocks(path.resolve(__dirname, '.wwebjs_auth'));
+    if (process.platform !== 'win32') {
+        cleanStaleChromiumLocks('/tmp');
+    }
+} catch (_) {}
+
+function getChromeExecutable() {
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    const candidates = [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe') : null
+    ];
+    for (const p of candidates) {
+        if (p && fs.existsSync(p)) return p;
+    }
+    return undefined;
+}
 let puppeteer = null;
 try {
     puppeteer = require('puppeteer');
@@ -196,18 +263,15 @@ function createWhatsAppClient() {
         authTimeoutMs: 180000,
         puppeteer: {
             headless: true, // Silent background operation
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+            executablePath: getChromeExecutable() || undefined,
             args: [
+                '--headless=new',
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
                 '--disable-gpu',
-                '--single-process',
-                '--renderer-process-limit=1',
-                '--js-flags=--max-old-space-size=96'
+                '--no-zygote',
+                '--ozone-platform=headless'
             ],
             protocolTimeout: 300000 // Forces browser to wait for WhatsApp to load
         }
@@ -334,11 +398,12 @@ async function forwardMessageToPython(msg, chatName, chatId) {
 
 // Health check endpoint
 app.get('/ping', (req, res) => {
-    if (isClientReady) {
-        res.json({ status: 'pong', message: 'WhatsApp Bridge is live and ready.' });
-    } else {
-        res.status(503).json({ status: 'starting', message: 'Chromium is still booting...' });
-    }
+    res.status(200).json({
+        status: isClientReady ? 'pong' : 'starting',
+        ready: isClientReady,
+        message: isClientReady ? 'WhatsApp Bridge is live and ready.' : 'Bridge is running, client initializing...',
+        uptime_s: Math.round(process.uptime())
+    });
 });
 
 // Live QR code status endpoint for cloud browser rendering
@@ -382,12 +447,13 @@ app.get(['/psx-live-quotes', '/api/psx/live-quotes'], (req, res) => {
 });
 
 app.get('/api/psx/status', (req, res) => {
-    const isHealthy = Boolean(latestPsxTimestamp && (Date.now() - latestPsxTimestamp < 20000) && Object.keys(latestPsxQuotes).length > 0);
-    res.json({
-        status: isHealthy ? 'healthy' : 'degraded',
+    const quoteCount = Object.keys(latestPsxQuotes).length;
+    const isHealthy = Boolean(latestPsxTimestamp && (Date.now() - latestPsxTimestamp < 60000) && quoteCount > 0);
+    res.status(200).json({
+        status: isHealthy ? 'healthy' : (quoteCount > 0 ? 'stale' : 'booting'),
         healthy: isHealthy,
         source: 'chromium_psx_live',
-        count: Object.keys(latestPsxQuotes).length,
+        count: quoteCount,
         last_update_ms_ago: latestPsxTimestamp ? (Date.now() - latestPsxTimestamp) : null,
         error: psxMonitorError
     });
@@ -650,23 +716,6 @@ let psxPollTimer = null;
 let psxCycleCounter = 0;
 let isExtractingPsx = false;
 
-function getChromeExecutable() {
-    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
-        return process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-    const candidates = [
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe') : null
-    ];
-    for (const p of candidates) {
-        if (p && fs.existsSync(p)) return p;
-    }
-    return undefined;
-}
-
 const SCRIP_TO_SYMBOL = {
     'Systems Limited': 'SYS',
     'Fauji Fert': 'FFC',
@@ -711,93 +760,196 @@ const SCRIP_TO_SYMBOL = {
     'Cnergyico PK': 'CNERGY'
 };
 
+function fetchPsxMarketSummaryDirect() {
+    return new Promise((resolve) => {
+        const options = {
+            hostname: 'www.psx.com.pk',
+            port: 443,
+            path: '/market-summary/',
+            method: 'GET',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            },
+            timeout: 8000
+        };
+        const req = https.request(options, (res) => {
+            if (res.statusCode !== 200) {
+                res.resume();
+                return resolve(false);
+            }
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const rows = data.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+                    const bySymbol = {};
+                    let count = 0;
+                    for (const r of rows) {
+                        let tds = (r.match(/<td[\s\S]*?<\/td>/gi) || []).map(t => t.replace(/<[^>]+>/g, '').trim());
+                        if (tds.length >= 9 && tds[0] === '') tds = tds.slice(1);
+                        if (tds.length >= 8 && tds[0] && tds[0] !== 'SCRIP') {
+                            const scrip = tds[0];
+                            const ldcp = parseFloat(tds[1].replace(/,/g, '')) || 0;
+                            const open = parseFloat(tds[2].replace(/,/g, '')) || 0;
+                            const high = parseFloat(tds[3].replace(/,/g, '')) || 0;
+                            const low = parseFloat(tds[4].replace(/,/g, '')) || 0;
+                            const current = parseFloat(tds[5].replace(/,/g, '')) || 0;
+                            const change = parseFloat(tds[6].replace(/,/g, '')) || 0;
+                            const volume = parseInt(tds[7].replace(/,/g, '')) || 0;
+
+                            if (current > 0) {
+                                count++;
+                                const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
+                                const quote = {
+                                    scrip,
+                                    price: Math.round(current * 100) / 100,
+                                    ldcp: Math.round(ldcp * 100) / 100,
+                                    prev_close: Math.round(ldcp * 100) / 100,
+                                    open: Math.round(open * 100) / 100,
+                                    high: Math.round(high * 100) / 100,
+                                    low: Math.round(low * 100) / 100,
+                                    change: Math.round(change * 100) / 100,
+                                    change_abs: Math.round(change * 100) / 100,
+                                    change_pct: change_pct,
+                                    volume: volume,
+                                    source: 'chromium_psx_live',
+                                    timestamp: Date.now() / 1000
+                                };
+                                bySymbol[scrip.toUpperCase()] = quote;
+                                const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
+                                if (SCRIP_TO_SYMBOL[scrip]) bySymbol[SCRIP_TO_SYMBOL[scrip]] = quote;
+                                else if (SCRIP_TO_SYMBOL[cleanScrip]) bySymbol[SCRIP_TO_SYMBOL[cleanScrip]] = quote;
+
+                                const parts = scrip.split('-');
+                                if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
+                                    const baseSym = parts[0].toUpperCase();
+                                    if (!bySymbol[baseSym]) bySymbol[baseSym] = quote;
+                                }
+                            }
+                        }
+                    }
+                    if (count > 0) {
+                        latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
+                        latestPsxTimestamp = Date.now();
+                        psxMonitorError = null;
+                        return resolve(true);
+                    }
+                } catch (e) {
+                    psxMonitorError = e.message;
+                }
+                resolve(false);
+            });
+        });
+        req.on('error', (err) => {
+            psxMonitorError = err.message;
+            resolve(false);
+        });
+        req.end();
+    });
+}
+
 async function extractPsxMarketQuotes() {
-    if (!psxPage || psxPage.isClosed() || isExtractingPsx) return;
+    if (isExtractingPsx) return;
     isExtractingPsx = true;
     try {
         psxCycleCounter++;
 
-        // Actively fetch fresh market summary over the network on every 2s cycle without cache
-        await psxPage.evaluate(async () => {
-            try {
-                const resp = await fetch('https://www.psx.com.pk/market-summary/', { cache: 'no-store' });
-                if (resp.ok) {
-                    const text = await resp.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(text, 'text/html');
-                    const newRows = doc.querySelectorAll('tr');
-                    if (newRows && newRows.length > 50) {
-                        const target = document.querySelector('body');
-                        if (target && doc.body) {
-                            target.innerHTML = doc.body.innerHTML;
+        // 1. Try Puppeteer evaluation if page is active
+        if (psxPage && !psxPage.isClosed()) {
+            await psxPage.evaluate(async () => {
+                try {
+                    const resp = await fetch('https://www.psx.com.pk/market-summary/', { cache: 'no-store' });
+                    if (resp.ok) {
+                        const text = await resp.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(text, 'text/html');
+                        const newRows = doc.querySelectorAll('tr');
+                        if (newRows && newRows.length > 50) {
+                            const target = document.querySelector('body');
+                            if (target && doc.body) {
+                                target.innerHTML = doc.body.innerHTML;
+                            }
                         }
                     }
-                }
-            } catch (_) {}
-        });
+                } catch (_) {}
+            });
 
-        const result = await psxPage.evaluate((scripMap) => {
-            const rows = document.querySelectorAll('tr');
-            const bySymbol = {};
-            let count = 0;
-            for (let i = 0; i < rows.length; i++) {
-                const cells = rows[i].querySelectorAll('td');
-                if (cells.length >= 8) {
-                    const scrip = cells[0].textContent.trim();
-                    const ldcp = parseFloat(cells[1].textContent.trim().replace(/,/g, '')) || 0;
-                    const open = parseFloat(cells[2].textContent.trim().replace(/,/g, '')) || 0;
-                    const high = parseFloat(cells[3].textContent.trim().replace(/,/g, '')) || 0;
-                    const low = parseFloat(cells[4].textContent.trim().replace(/,/g, '')) || 0;
-                    const current = parseFloat(cells[5].textContent.trim().replace(/,/g, '')) || 0;
-                    const change = parseFloat(cells[6].textContent.trim().replace(/,/g, '')) || 0;
-                    const volume = parseInt(cells[7].textContent.trim().replace(/,/g, '')) || 0;
+            const result = await psxPage.evaluate((scripMap) => {
+                const rows = document.querySelectorAll('tr');
+                const bySymbol = {};
+                let count = 0;
+                for (let i = 0; i < rows.length; i++) {
+                    let cells = Array.from(rows[i].querySelectorAll('td'));
+                    if (cells.length >= 9 && cells[0].textContent.trim() === '') {
+                        cells = cells.slice(1);
+                    }
+                    if (cells.length >= 8) {
+                        const scrip = cells[0].textContent.trim();
+                        if (!scrip || scrip === 'SCRIP') continue;
+                        const ldcp = parseFloat(cells[1].textContent.trim().replace(/,/g, '')) || 0;
+                        const open = parseFloat(cells[2].textContent.trim().replace(/,/g, '')) || 0;
+                        const high = parseFloat(cells[3].textContent.trim().replace(/,/g, '')) || 0;
+                        const low = parseFloat(cells[4].textContent.trim().replace(/,/g, '')) || 0;
+                        const current = parseFloat(cells[5].textContent.trim().replace(/,/g, '')) || 0;
+                        const change = parseFloat(cells[6].textContent.trim().replace(/,/g, '')) || 0;
+                        const volume = parseInt(cells[7].textContent.trim().replace(/,/g, '')) || 0;
 
-                    if (scrip && current > 0) {
-                        count++;
-                        const change_pct = ldcp > 0 ? ((change / ldcp) * 100) : 0;
-                        const quote = {
-                            scrip,
-                            price: Math.round(current * 100) / 100,
-                            ldcp: Math.round(ldcp * 100) / 100,
-                            prev_close: Math.round(ldcp * 100) / 100,
-                            open: Math.round(open * 100) / 100,
-                            high: Math.round(high * 100) / 100,
-                            low: Math.round(low * 100) / 100,
-                            change: Math.round(change * 100) / 100,
-                            change_pct: Math.round(change_pct * 100) / 100,
-                            volume: volume,
-                            source: 'chromium_psx_live',
-                            timestamp: Date.now() / 1000
-                        };
+                        if (current > 0) {
+                            count++;
+                            const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
+                            const quote = {
+                                scrip,
+                                price: Math.round(current * 100) / 100,
+                                ldcp: Math.round(ldcp * 100) / 100,
+                                prev_close: Math.round(ldcp * 100) / 100,
+                                open: Math.round(open * 100) / 100,
+                                high: Math.round(high * 100) / 100,
+                                low: Math.round(low * 100) / 100,
+                                change: Math.round(change * 100) / 100,
+                                change_abs: Math.round(change * 100) / 100,
+                                change_pct: change_pct,
+                                volume: volume,
+                                source: 'chromium_psx_live',
+                                timestamp: Date.now() / 1000
+                            };
 
-                        bySymbol[scrip.toUpperCase()] = quote;
-                        const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
-                        if (scripMap[scrip]) {
-                            bySymbol[scripMap[scrip]] = quote;
-                        } else if (scripMap[cleanScrip]) {
-                            bySymbol[scripMap[cleanScrip]] = quote;
-                        }
+                            bySymbol[scrip.toUpperCase()] = quote;
+                            const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
+                            if (scripMap[scrip]) {
+                                bySymbol[scripMap[scrip]] = quote;
+                            } else if (scripMap[cleanScrip]) {
+                                bySymbol[scripMap[cleanScrip]] = quote;
+                            }
 
-                        const parts = scrip.split('-');
-                        if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
-                            const baseSym = parts[0].toUpperCase();
-                            if (!bySymbol[baseSym]) {
-                                bySymbol[baseSym] = quote;
+                            const parts = scrip.split('-');
+                            if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
+                                const baseSym = parts[0].toUpperCase();
+                                if (!bySymbol[baseSym]) {
+                                    bySymbol[baseSym] = quote;
+                                }
                             }
                         }
                     }
                 }
-            }
-            return { bySymbol, count };
-        }, SCRIP_TO_SYMBOL);
+                return { bySymbol, count };
+            }, SCRIP_TO_SYMBOL);
 
-        if (result && result.bySymbol && result.count > 0) {
-            latestPsxQuotes = Object.assign(latestPsxQuotes, result.bySymbol);
-            latestPsxTimestamp = Date.now();
-            psxMonitorError = null;
+            if (result && result.bySymbol && result.count > 0) {
+                latestPsxQuotes = Object.assign(latestPsxQuotes, result.bySymbol);
+                latestPsxTimestamp = Date.now();
+                psxMonitorError = null;
+                return;
+            }
         }
+
+        // 2. Direct HTTP fallback if Chromium is loading or yielded empty
+        await fetchPsxMarketSummaryDirect();
     } catch (err) {
         psxMonitorError = err.message || String(err);
+        try {
+            await fetchPsxMarketSummaryDirect();
+        } catch (_) {}
     } finally {
         isExtractingPsx = false;
     }
@@ -808,27 +960,39 @@ async function initPsxChromiumMonitor() {
         return;
     }
     if (!puppeteer) {
-        console.warn('⚠️ [PSX Monitor] Puppeteer is not available; skipping Chromium monitor.');
+        console.warn('⚠️ [PSX Monitor] Puppeteer is not available; continuing with direct network feeds.');
         return;
     }
     isPsxMonitorBooting = true;
     try {
+        const psxProfileDir = process.platform === 'win32'
+            ? path.join(os.tmpdir(), 'psx_chrome_profile')
+            : '/tmp/psx_chrome_profile';
+
+        try {
+            fs.rmSync(psxProfileDir, { recursive: true, force: true });
+        } catch (_) {}
+        try {
+            fs.mkdirSync(psxProfileDir, { recursive: true });
+        } catch (_) {}
+
+        cleanStaleChromiumLocks(path.resolve(__dirname, '.wwebjs_auth'));
+        cleanStaleChromiumLocks(psxProfileDir);
+
         const execPath = getChromeExecutable();
-        console.log(`🌐 [PSX Monitor] Launching persistent 1-Tab Headless Chromium (exec: ${execPath || 'default'})...`);
+        console.log(`🌐 [PSX Monitor] Launching persistent 1-Tab Headless Chromium in separate profile (${psxProfileDir})...`);
         psxBrowser = await puppeteer.launch({
             executablePath: execPath,
-            headless: 'new',
+            headless: true,
+            userDataDir: psxProfileDir,
             args: [
+                '--headless=new',
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
                 '--disable-gpu',
-                '--single-process',
-                '--renderer-process-limit=1',
-                '--js-flags=--max-old-space-size=96'
+                '--no-zygote',
+                '--ozone-platform=headless'
             ]
         });
 
@@ -844,16 +1008,9 @@ async function initPsxChromiumMonitor() {
 
         await extractPsxMarketQuotes();
         console.log(`✅ [PSX Monitor] Connected! Loaded ${Object.keys(latestPsxQuotes).length} stock quotes.`);
-
-        if (psxPollTimer) clearInterval(psxPollTimer);
-        psxPollTimer = setInterval(extractPsxMarketQuotes, 2000);
     } catch (err) {
         psxMonitorError = err.message || String(err);
-        console.warn(`⚠️ [PSX Monitor] Boot failed: ${psxMonitorError}. Will retry in 10s...`);
-        setTimeout(() => {
-            isPsxMonitorBooting = false;
-            initPsxChromiumMonitor().catch(() => {});
-        }, 10000);
+        console.warn(`⚠️ [PSX Monitor] Boot notice: ${psxMonitorError}. Active fallback operational.`);
     } finally {
         isPsxMonitorBooting = false;
     }
@@ -864,16 +1021,40 @@ const cleanupPsx = async () => {
     if (psxBrowser) {
         try { await psxBrowser.close(); } catch (_) {}
     }
+    try {
+        const psxProfileDir = process.platform === 'win32'
+            ? path.join(os.tmpdir(), 'psx_chrome_profile')
+            : '/tmp/psx_chrome_profile';
+        fs.rmSync(psxProfileDir, { recursive: true, force: true });
+    } catch (_) {}
 };
 process.on('exit', cleanupPsx);
 process.on('SIGINT', cleanupPsx);
 process.on('SIGTERM', cleanupPsx);
 
-// START EXPRESS STRICTLY ON LOOPBACK (127.0.0.1:3000) SO CLOUD PORT SCANNERS IGNORE IT
-app.listen(BRIDGE_PORT, '127.0.0.1', () => {
-    console.log(`⚙️  [WhatsApp Bridge] Local API listening on 127.0.0.1:${BRIDGE_PORT}. Waiting for Chrome...`);
+// START EXPRESS IMMEDIATELY ON 0.0.0.0:3000
+app.listen(BRIDGE_PORT, '0.0.0.0', () => {
+    console.log(`⚙️  [WhatsApp Bridge] Local API listening on 0.0.0.0:${BRIDGE_PORT} instantly on startup.`);
+
+    // 1. Immediately fetch direct market summary (<1s) so /psx-live-quotes has all 580+ quotes right away
+    fetchPsxMarketSummaryDirect().then((ok) => {
+        if (ok) {
+            console.log(`✅ [PSX Fast Feed] Pre-populated ${Object.keys(latestPsxQuotes).length} stocks directly in <1s.`);
+        }
+    }).catch(() => {});
+
+    // 2. Poll every 2 seconds
+    if (psxPollTimer) clearInterval(psxPollTimer);
+    psxPollTimer = setInterval(extractPsxMarketQuotes, 2000);
+
+    // 3. Launch Chromium monitor asynchronously without blocking Express
     initPsxChromiumMonitor().catch((err) => {
-        console.warn('⚠️ [PSX Monitor] Initial launch error:', err.message || err);
+        console.warn('⚠️ [PSX Monitor] Initial launch notice:', err.message || err);
+    });
+
+    // 4. Initialize WhatsApp client asynchronously
+    safeInitializeClient('startup').catch((err) => {
+        console.error('⚠️ [WhatsApp Bridge] Startup init error:', err.message || err);
     });
 });
 
@@ -883,6 +1064,7 @@ async function safeInitializeClient(reason = 'startup') {
     }
     isInitializing = true;
     try {
+        cleanStaleChromiumLocks(path.resolve(__dirname, '.wwebjs_auth'));
         if (client) {
             try {
                 await client.destroy();
@@ -905,9 +1087,3 @@ async function safeInitializeClient(reason = 'startup') {
         isInitializing = false;
     }
 }
-
-safeInitializeClient('startup').catch((err) => {
-    console.error('⚠️ [WhatsApp Bridge] Startup init wrapper caught error:', (err && err.message) ? err.message : err);
-    latestQr = 'AUTH_TIMEOUT_RETRYING';
-    scheduleClientRetry('startup_wrapper', 8000);
-});

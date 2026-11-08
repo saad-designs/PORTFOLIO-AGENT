@@ -65,6 +65,41 @@ def is_whatsapp_bridge_enabled() -> bool:
         return False
     return os.getenv("ENABLE_WHATSAPP_BRIDGE", "true").lower() == "true"
 
+def cleanup_stale_chromium_locks():
+    """Removes broken Chromium symlinks (SingletonLock, SingletonCookie, SingletonSocket) before launching bridge."""
+    try:
+        if os.name != "nt":
+            subprocess.run("find /app -name 'Singleton*' -delete 2>/dev/null || true", shell=True, timeout=5)
+            subprocess.run("find /tmp -name 'Singleton*' -delete 2>/dev/null || true", shell=True, timeout=5)
+            subprocess.run("find /app -name 'lockfile' -delete 2>/dev/null || true", shell=True, timeout=5)
+            subprocess.run("find /tmp -name 'psx_chrome_profile' -exec rm -rf {} + 2>/dev/null || true", shell=True, timeout=5)
+    except Exception as e:
+        print(f"⚠️ [Lock Cleanup] Error executing shell find/delete: {e}", flush=True)
+
+    search_dirs = [
+        os.path.join(bridge_dir, ".wwebjs_auth"),
+        "/tmp",
+        "/tmp/psx_chrome_profile",
+        os.getenv("TEMP", ""),
+        os.getenv("TMP", "")
+    ]
+    for sdir in search_dirs:
+        if not sdir or not os.path.isdir(sdir):
+            continue
+        try:
+            for root, dirs, files in os.walk(sdir, topdown=False, followlinks=False):
+                for fname in files:
+                    lower = fname.lower()
+                    if lower.startswith("singleton") or lower == "lockfile":
+                        fpath = os.path.join(root, fname)
+                        try:
+                            os.unlink(fpath)
+                            print(f"🧹 [Python Lock Cleaner] Unlinked stale lock: {fpath}", flush=True)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
 def start_whatsapp_bridge() -> bool:
     """Launches the Node.js WhatsApp Bridge subprocess inside FastAPI startup lifecycle."""
     global node_process
@@ -74,6 +109,7 @@ def start_whatsapp_bridge() -> bool:
     if node_process is not None and node_process.poll() is None:
         return True
     if os.path.exists(bridge_dir):
+        cleanup_stale_chromium_locks()
         print("🚀 Booting Node.js WhatsApp Bridge concurrently in background (127.0.0.1:3000)...", flush=True)
         try:
             node_process = subprocess.Popen(
@@ -591,21 +627,26 @@ async def realtime_psx_price_loop():
     global LIVE_PORTFOLIO_STATE, _TICK_SEQ, _LAST_DB_SYNC_TS, _PRICE_HISTORY_MAP
     from market_data_scraper import fetch_realtime_psx_quotes
 
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.5)
     print("🚀 [PSX Real-Time Engine] 1-Second Price Loop initialized.", flush=True)
 
     while True:
         try:
+            _TICK_SEQ += 1
+            pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+            pkt_now = datetime.datetime.now(pkt_tz)
+            is_market_open = is_psx_market_open(pkt_now)
+
             target_tickers = list(_ACTIVE_HOLDINGS_META.keys()) if _ACTIVE_HOLDINGS_META else [
                 "SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"
             ]
 
             t0 = time.perf_counter()
-            quotes = await asyncio.to_thread(fetch_realtime_psx_quotes, target_tickers, 4.0)
-
-            pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
-            pkt_now = datetime.datetime.now(pkt_tz)
-            is_market_open = is_psx_market_open(pkt_now)
+            try:
+                quotes = await asyncio.to_thread(fetch_realtime_psx_quotes, target_tickers, 3.0)
+            except Exception as q_err:
+                print(f"⚠️ [Realtime Price Fetch Error] {q_err}", flush=True)
+                quotes = {}
 
             total_custody_val = 0.0
             total_invested_cost = 0.0
@@ -670,8 +711,6 @@ async def realtime_psx_price_loop():
             prev_custody_val = total_custody_val - total_day_pnl
             total_day_pnl_pct = round((total_day_pnl / prev_custody_val) * 100.0, 2) if prev_custody_val > 0 else 0.0
 
-            _TICK_SEQ += 1
-
             dominant_source = "chromium_psx_live" if any(q.get("source") == "chromium_psx_live" for q in quotes.values()) else ("tradingview_psx_live" if any("tradingview" in str(q.get("source")) for q in quotes.values()) else "realtime_feed")
 
             LIVE_PORTFOLIO_STATE = {
@@ -694,18 +733,26 @@ async def realtime_psx_price_loop():
             }
 
             now_ts = time.time()
-            if (now_ts - _LAST_DB_SYNC_TS) >= 15.0:
+            if (now_ts - _LAST_DB_SYNC_TS) >= 15.0 and quotes:
                 _LAST_DB_SYNC_TS = now_ts
                 asyncio.create_task(_sync_live_prices_to_db(quotes))
 
         except Exception as loop_err:
             print(f"⚠️ [Realtime Price Loop Error] {loop_err}", flush=True)
+            if LIVE_PORTFOLIO_STATE:
+                pkt_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+                LIVE_PORTFOLIO_STATE["timestamp"] = pkt_now.isoformat()
+                LIVE_PORTFOLIO_STATE["tick_seq"] = _TICK_SEQ
 
         await asyncio.sleep(1.5)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 1. Start real-time PSX price loop immediately and retain reference in app.state to prevent GC
+    app.state.price_loop_task = asyncio.create_task(realtime_psx_price_loop())
+    print("🚀 [Lifespan] Assigned app.state.price_loop_task.", flush=True)
+
     # Startup: schema migrations, closed-loop learning tables, and real KTrade custody verification
     try:
         from portfolio_manager import (
@@ -719,7 +766,6 @@ async def lifespan(app: FastAPI):
         ensure_real_ktrade_portfolio_seeded()
         seed_initial_predictions_if_empty()
         refresh_active_holdings_meta()
-        asyncio.create_task(realtime_psx_price_loop())
 
         async def _initial_price_warm():
             await asyncio.sleep(1.5)
@@ -728,7 +774,7 @@ async def lifespan(app: FastAPI):
             except Exception as warm_err:
                 print(f"⚠️ [Startup Price Warmup] {warm_err}", flush=True)
 
-        asyncio.create_task(_initial_price_warm())
+        app.state.price_warm_task = asyncio.create_task(_initial_price_warm())
     except Exception as db_init_err:
         print(f"⚠️ [Startup] DB Table init error: {db_init_err}", flush=True)
 
@@ -1168,33 +1214,6 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
             }
 
         res = await asyncio.to_thread(_sync_worker)
-
-        # Trigger clean Uvicorn worker reload / container restart
-        async def _delayed_clean_restart():
-            # Allow the HTTP response 0.6s to flush cleanly to the client/browser
-            await asyncio.sleep(0.6)
-            if os.getenv("TESTING") == "true" or os.getenv("SKIP_PROCESS_EXIT_FOR_TEST") == "true":
-                print("ℹ️ [Worker Reload] Test environment detected — skipping process exit.", flush=True)
-                return
-            print("🔄 [Worker Reload] Triggering clean Uvicorn worker reload for 100% fresh code...", flush=True)
-            try:
-                cleanup_node_process()
-            except Exception:
-                pass
-            # 1) Try SIGHUP if supported (standard Unix/Linux Uvicorn worker reload signal)
-            if hasattr(signal, "SIGHUP"):
-                try:
-                    os.kill(os.getpid(), signal.SIGHUP)
-                    return
-                except Exception as sig_err:
-                    print(f"⚠️ [Worker Reload] SIGHUP signal error ({sig_err}), falling back to os._exit(0)...", flush=True)
-            # 2) Fallback to os._exit(0) so Docker's `restart: unless-stopped` policy restarts in ~2s
-            os._exit(0)
-
-        if trigger_source == "dashboard_button" or res.get("updated"):
-            asyncio.create_task(_delayed_clean_restart())
-            res["reloading_worker"] = True
-
         return res
 
 @app.post("/api/dashboard/git-pull")
