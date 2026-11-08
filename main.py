@@ -1440,7 +1440,7 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
             return _OVERVIEW_BRIDGE_CACHE["data"]
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=0.25)) as resp:
+                async with session.get("http://127.0.0.1:3000/qr", timeout=aiohttp.ClientTimeout(total=0.5, sock_connect=0.25)) as resp:
                     if resp.status == 200:
                         b_data = await resp.json()
                         res_tuple = (b_data.get("status", "OFFLINE"), b_data.get("monitored_chats", []), b_data.get("memory_mb"))
@@ -1469,6 +1469,8 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
     return {
         "status": "success",
         "financial_summary": summary,
+        "dividends": summary.get("dividends", []),
+        "total_dividends_received": summary.get("financial_kpis", {}).get("total_dividends_received", 0.0),
         "live_engines_data": live_engines,
         "system_health": {
             "whatsapp_bridge": {
@@ -1910,6 +1912,10 @@ async def get_dashboard_algorithm_state(request: Request):
     return state
 
 @app.get("/api/dashboard/dividends")
+@app.get("/api/dashboard/dividend")
+@app.get("/api/portfolio/dividend")
+@app.get("/api/portfolio/dividends")
+@app.get("/api/dividends")
 async def get_dashboard_dividends(request: Request, limit: int = 100):
     verify_dashboard_auth(request)
     from portfolio_manager import get_all_dividends, get_complete_financial_summary
@@ -1919,55 +1925,99 @@ async def get_dashboard_dividends(request: Request, limit: int = 100):
     )
     kpis = summary.get("financial_kpis", {})
     return {
+        "status": "ok",
         "dividends": divs,
         "metrics": {
             "total_gross_dividends": kpis.get("total_gross_dividends", 0.0),
             "total_wht_tax_paid": kpis.get("total_wht_tax_paid", 0.0),
             "net_dividends_in_bank": kpis.get("net_dividends_in_bank", 0.0),
             "net_dividends_reinvested": kpis.get("net_dividends_reinvested", 0.0),
+            "total_dividends_received": kpis.get("total_dividends_received", 0.0),
             "pending_dividends": kpis.get("pending_dividends", 0.0)
         }
     }
 
 @app.post("/api/dashboard/dividends")
-async def create_dashboard_dividend(payload: DividendCreatePayload, request: Request):
+@app.post("/api/dashboard/dividend")
+@app.post("/api/portfolio/dividend")
+@app.post("/api/portfolio/dividends")
+@app.post("/api/dividends")
+async def create_dashboard_dividend(request: Request):
     verify_dashboard_auth(request)
-    from portfolio_manager import record_dividend
-    entry = await asyncio.to_thread(
-        record_dividend,
-        ticker=payload.ticker,
-        shares_held=payload.shares_held,
-        dps_gross=payload.dps_gross,
-        gross_amount=payload.gross_amount,
-        net_amount=payload.net_amount,
-        tax_rate_pct=payload.tax_rate_pct if payload.tax_rate_pct is not None else 15.00,
-        ex_date=payload.ex_date,
-        payment_date=payload.payment_date,
-        status=payload.status or "CREDITED_TO_BANK",
-        notes=payload.notes
-    )
-    return {"status": "success", "dividend": entry}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    from portfolio_manager import log_dividend, invalidate_financial_summary_cache
+    ticker = body.get("ticker") or body.get("symbol") or body.get("scrip")
+    if not ticker:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Ticker is required."})
+
+    try:
+        entry = await asyncio.to_thread(
+            log_dividend,
+            ticker=str(ticker),
+            shares=body.get("shares") or body.get("shares_held") or body.get("quantity"),
+            dividend_per_share=body.get("dividend_per_share") or body.get("dps_gross") or body.get("dps") or body.get("per_share"),
+            net_amount=body.get("net_amount") or body.get("total_net") or body.get("net_received") or body.get("amount") or body.get("net"),
+            gross_amount=body.get("gross_amount") or body.get("gross"),
+            tax_withheld=body.get("tax_withheld") or body.get("tax_amount") or body.get("wht_amount"),
+            wht_rate_pct=body.get("wht_rate_pct") or body.get("tax_rate_pct") or body.get("tax_rate") or body.get("wht_rate"),
+            payment_date=body.get("payment_date") or body.get("date") or body.get("pay_date"),
+            ex_date=body.get("ex_date") or body.get("book_closure_date"),
+            credited_to=body.get("credited_to") or body.get("status") or body.get("destination") or "bank",
+            notes=body.get("notes") or body.get("comment") or body.get("memo")
+        )
+        invalidate_financial_summary_cache()
+        _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
+        _OVERVIEW_CKPT_CACHE["ts"] = 0.0
+        overview = await get_dashboard_overview(request, refresh=False)
+        return {"status": "ok", "dividend": entry, "overview": overview}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 @app.patch("/api/dashboard/dividends/{id}")
+@app.patch("/api/dashboard/dividend/{id}")
 @app.patch("/api/dashboard/dividends/{id}/status")
+@app.patch("/api/dashboard/dividend/{id}/status")
 async def update_dashboard_dividend(id: int, payload: DividendStatusUpdatePayload, request: Request):
     verify_dashboard_auth(request)
-    from portfolio_manager import update_dividend_status
+    from portfolio_manager import update_dividend_status, invalidate_financial_summary_cache
     updated = await asyncio.to_thread(update_dividend_status, id, payload.status)
+    invalidate_financial_summary_cache()
+    _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
+    _OVERVIEW_CKPT_CACHE["ts"] = 0.0
     return {"status": "success", "dividend": updated}
 
 @app.put("/api/dashboard/dividends/{id}")
+@app.put("/api/dashboard/dividend/{id}")
 async def edit_dashboard_dividend(id: int, payload: DividendCreatePayload, request: Request):
     verify_dashboard_auth(request)
-    from portfolio_manager import update_dividend_entry
+    from portfolio_manager import update_dividend_entry, invalidate_financial_summary_cache
     updated = await asyncio.to_thread(update_dividend_entry, id, payload.dict())
+    invalidate_financial_summary_cache()
+    _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
+    _OVERVIEW_CKPT_CACHE["ts"] = 0.0
     return {"status": "success", "dividend": updated}
 
 @app.delete("/api/dashboard/dividends/{id}")
+@app.delete("/api/dashboard/dividend/{id}")
+@app.delete("/api/portfolio/dividend/{id}")
+@app.delete("/api/portfolio/dividends/{id}")
+@app.delete("/api/dividends/{id}")
 async def delete_dashboard_dividend(id: int, request: Request):
     verify_dashboard_auth(request)
-    from portfolio_manager import delete_dividend_entry
-    return await asyncio.to_thread(delete_dividend_entry, id)
+    from portfolio_manager import delete_dividend_entry, invalidate_financial_summary_cache
+    try:
+        res = await asyncio.to_thread(delete_dividend_entry, id)
+        invalidate_financial_summary_cache()
+        _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
+        _OVERVIEW_CKPT_CACHE["ts"] = 0.0
+        overview = await get_dashboard_overview(request, refresh=False)
+        return {"status": "ok", "deleted": True, "id": id, "overview": overview}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 @app.get("/api/dashboard/capital")
 async def get_dashboard_capital(request: Request, limit: int = 100):

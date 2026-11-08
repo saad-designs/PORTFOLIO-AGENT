@@ -285,22 +285,38 @@ def create_dashboard_and_ledger_tables():
             ALTER TABLE capital_ledger ENABLE ROW LEVEL SECURITY;
         """)
 
-        # 3. dividend_ledger
+        # 3. dividend_ledger & portfolio_dividends
         cur.execute("""
             CREATE TABLE IF NOT EXISTS dividend_ledger (
                 id BIGSERIAL PRIMARY KEY,
                 ticker TEXT NOT NULL,
-                shares_held NUMERIC(14,2) NOT NULL,
+                shares_held NUMERIC(14,2) NOT NULL DEFAULT 0,
                 dps_gross NUMERIC(10,4) DEFAULT 0,
-                gross_amount NUMERIC(14,2) NOT NULL,
+                gross_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
                 tax_rate_pct NUMERIC(5,2) DEFAULT 15.00,
-                tax_withheld NUMERIC(14,2) NOT NULL,
-                net_amount NUMERIC(14,2) NOT NULL,
+                tax_withheld NUMERIC(14,2) NOT NULL DEFAULT 0,
+                net_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'CREDITED_TO_BANK',
                 notes TEXT,
+                ex_date DATE,
+                payment_date DATE,
+                shares NUMERIC(14,2) DEFAULT 0,
+                dividend_per_share NUMERIC(10,4) DEFAULT 0,
+                wht_rate_pct NUMERIC(5,2) DEFAULT 15.00,
+                credited_to TEXT DEFAULT 'bank',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
             ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS notes TEXT;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS ex_date DATE;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS payment_date DATE;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS shares NUMERIC(14,2) DEFAULT 0;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS shares_held NUMERIC(14,2) DEFAULT 0;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS dividend_per_share NUMERIC(10,4) DEFAULT 0;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS dps_gross NUMERIC(10,4) DEFAULT 0;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS wht_rate_pct NUMERIC(5,2) DEFAULT 15.00;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS tax_rate_pct NUMERIC(5,2) DEFAULT 15.00;
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS credited_to TEXT DEFAULT 'bank';
+            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'CREDITED_TO_BANK';
             ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
             ALTER TABLE dividend_ledger ALTER COLUMN dps_gross SET DEFAULT 0;
             ALTER TABLE dividend_ledger ALTER COLUMN status SET DEFAULT 'CREDITED_TO_BANK';
@@ -308,6 +324,36 @@ def create_dashboard_and_ledger_tables():
             CREATE INDEX IF NOT EXISTS idx_dividend_ledger_status ON dividend_ledger (status);
             CREATE INDEX IF NOT EXISTS idx_dividend_ledger_created ON dividend_ledger (created_at DESC);
             ALTER TABLE dividend_ledger ENABLE ROW LEVEL SECURITY;
+
+            CREATE TABLE IF NOT EXISTS portfolio_dividends (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                shares NUMERIC(14,2) NOT NULL DEFAULT 0,
+                dividend_per_share NUMERIC(10,4) DEFAULT 0,
+                gross_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                tax_withheld NUMERIC(14,2) NOT NULL DEFAULT 0,
+                net_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                wht_rate_pct NUMERIC(5,2) DEFAULT 15.00,
+                ex_date DATE,
+                payment_date DATE,
+                credited_to TEXT DEFAULT 'bank',
+                notes TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS shares NUMERIC(14,2) DEFAULT 0;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS dividend_per_share NUMERIC(10,4) DEFAULT 0;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS gross_amount NUMERIC(14,2) DEFAULT 0;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS tax_withheld NUMERIC(14,2) DEFAULT 0;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS net_amount NUMERIC(14,2) DEFAULT 0;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS wht_rate_pct NUMERIC(5,2) DEFAULT 15.00;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS ex_date DATE;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS payment_date DATE;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS credited_to TEXT DEFAULT 'bank';
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS notes TEXT;
+            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+            CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_ticker ON portfolio_dividends (ticker);
+            CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_created ON portfolio_dividends (created_at DESC);
+            ALTER TABLE portfolio_dividends ENABLE ROW LEVEL SECURITY;
         """)
 
         # 4. trade_history
@@ -412,7 +458,7 @@ def create_dashboard_and_ledger_tables():
         """)
 
         # Permissive Policies for Service Role
-        for tbl in ["agent_feed", "capital_ledger", "dividend_ledger", "trade_history", "chat_messages"]:
+        for tbl in ["agent_feed", "capital_ledger", "dividend_ledger", "portfolio_dividends", "trade_history", "chat_messages"]:
             cur.execute(f"""
                 DO $$
                 BEGIN
@@ -1835,120 +1881,199 @@ def record_capital_transaction(tx_type: str, amount: float, notes: str = None, r
         cur.close()
         conn.close()
 
-def record_dividend(
+def log_dividend(
     ticker: str,
-    shares_held: float = None,
-    dps_gross: float = 0.0,
-    gross_amount: float = None,
-    tax_rate_pct: float = 15.00,
-    tax_withheld: float = None,
-    net_amount: float = None,
-    ex_date: str = None,
-    payment_date: str = None,
-    status: str = 'CREDITED_TO_BANK',
-    notes: str = None
+    shares: Optional[float] = None,
+    dividend_per_share: Optional[float] = None,
+    net_amount: Optional[float] = None,
+    gross_amount: Optional[float] = None,
+    tax_withheld: Optional[float] = None,
+    wht_rate_pct: Optional[float] = None,
+    payment_date: Optional[str] = None,
+    ex_date: Optional[str] = None,
+    credited_to: Optional[str] = "bank",
+    notes: Optional[str] = None,
+    shares_held: Optional[float] = None,
+    dps_gross: Optional[float] = None,
+    dps: Optional[float] = None,
+    tax_rate_pct: Optional[float] = None,
+    status: Optional[str] = None,
+    **kwargs
 ) -> dict:
     """
-    Tracks the exact PSX Dividend Lifecycle:
-    ENTITLED (Pending Payout) -> CREDITED_TO_BANK (CDC Dividend Credited into Personal Bank Account) -> SENT_TO_KTRADE (Reinvested in KTrade)
-
-    CRITICAL RULE:
-    A dividend in 'ENTITLED' or 'CREDITED_TO_BANK' does NOT increase KTrade cash.
-    Only when marked 'SENT_TO_KTRADE' does it insert a 'DIVIDEND_SENT_TO_KTRADE' row in capital_ledger and increase KTrade available cash!
+    Standard Dividend Logging Engine.
+    Handles both Net Amount Received in Bank (FBR ATL tax inferred) and DPS modes.
+    Ensures exact gross/tax/net math and supports direct Bank IBAN or KTrade Trading Cash destinations.
     """
     from utils import normalize_ticker
     clean_ticker = normalize_ticker(ticker)
-    
-    # Auto-lookup shares from portfolio_holdings if not provided
-    if shares_held is None or float(shares_held) <= 0:
-        conn_lookup = get_db_connection()
-        cur_lookup = conn_lookup.cursor()
+
+    # 1. Resolve shares held
+    resolved_shares = shares if shares is not None and float(shares) > 0 else (
+        shares_held if shares_held is not None and float(shares_held) > 0 else None
+    )
+    if resolved_shares is None:
         try:
-            cur_lookup.execute("SELECT shares FROM portfolio_holdings WHERE ticker = %s;", (clean_ticker,))
-            res = cur_lookup.fetchone()
-            shares = float(res[0]) if res and res[0] else 0.0
+            conn_lk = get_db_connection()
+            cur_lk = conn_lk.cursor()
+            cur_lk.execute("SELECT shares FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker.upper(),))
+            r = cur_lk.fetchone()
+            if r and r[0] is not None and float(r[0]) > 0:
+                resolved_shares = float(r[0])
+            cur_lk.close()
+            conn_lk.close()
         except Exception:
-            shares = 0.0
-        finally:
-            cur_lookup.close()
-            conn_lookup.close()
-    else:
-        shares = float(shares_held)
+            pass
 
-    dps = float(dps_gross) if dps_gross is not None else 0.0
-    tax_rate = float(tax_rate_pct) if tax_rate_pct is not None else 15.00
-    
-    # Financial math resolution (supports DPS mode, Total Gross mode, or Total Net mode)
-    if gross_amount is None or float(gross_amount) <= 0:
-        if shares > 0 and dps > 0:
-            gross_amount = round(shares * dps, 2)
-        elif net_amount is not None and float(net_amount) > 0:
-            gross_amount = round(float(net_amount) / (1.0 - (tax_rate / 100.0)), 2) if tax_rate < 100 else round(float(net_amount), 2)
+    if resolved_shares is None:
+        base_meta = KTRADE_BASELINE_HOLDINGS.get(clean_ticker.upper(), {})
+        resolved_shares = float(base_meta.get("shares", 0.0))
+
+    shares_val = float(resolved_shares or 0.0)
+
+    # 2. Determine WHT Rate: HUBC (IPP Section 150) = 7.5%, standard equities = 15.0%
+    if wht_rate_pct is not None and float(wht_rate_pct) >= 0:
+        wht_rate = float(wht_rate_pct)
+    elif tax_rate_pct is not None and float(tax_rate_pct) >= 0:
+        wht_rate = float(tax_rate_pct)
+    elif clean_ticker.upper() == "HUBC":
+        wht_rate = 7.50
+    else:
+        wht_rate = 15.00
+
+    tax_frac = wht_rate / 100.0
+
+    # 3. Resolve amounts
+    raw_dps = dividend_per_share if dividend_per_share is not None and float(dividend_per_share) > 0 else (
+        dps_gross if dps_gross is not None and float(dps_gross) > 0 else (
+            dps if dps is not None and float(dps) > 0 else None
+        )
+    )
+    raw_net = net_amount if net_amount is not None and float(net_amount) > 0 else (
+        kwargs.get("total_net") or kwargs.get("net_received") or kwargs.get("amount")
+    )
+    if raw_net is not None:
+        raw_net = float(raw_net)
+
+    if raw_net is not None and raw_net > 0:
+        net_val = round(raw_net, 2)
+        if gross_amount is not None and float(gross_amount) >= net_val:
+            gross_val = round(float(gross_amount), 2)
+            tax_val = round(gross_val - net_val, 2)
         else:
-            gross_amount = 0.0
+            gross_val = round(net_val / (1.0 - tax_frac), 2) if tax_frac < 1.0 else net_val
+            tax_val = round(gross_val - net_val, 2)
+        dps_val = round(gross_val / shares_val, 4) if shares_val > 0 else (round(float(raw_dps), 4) if raw_dps else 0.0)
+    elif raw_dps is not None and float(raw_dps) > 0:
+        dps_val = round(float(raw_dps), 4)
+        gross_val = round(shares_val * dps_val, 2) if gross_amount is None else round(float(gross_amount), 2)
+        tax_val = round(gross_val * tax_frac, 2) if tax_withheld is None else round(float(tax_withheld), 2)
+        net_val = round(gross_val - tax_val, 2)
+    elif gross_amount is not None and float(gross_amount) > 0:
+        gross_val = round(float(gross_amount), 2)
+        tax_val = round(gross_val * tax_frac, 2) if tax_withheld is None else round(float(tax_withheld), 2)
+        net_val = round(gross_val - tax_val, 2)
+        dps_val = round(gross_val / shares_val, 4) if shares_val > 0 else 0.0
     else:
-        gross_amount = round(float(gross_amount), 2)
+        raise ValueError("Please provide either Total Net Received in Bank or Dividend Per Share.")
 
-    if dps <= 0 and shares > 0 and gross_amount > 0:
-        dps = round(gross_amount / shares, 4)
-
-    if tax_withheld is None:
-        if net_amount is not None and float(net_amount) > 0 and gross_amount >= float(net_amount):
-            tax_withheld = round(gross_amount - float(net_amount), 2)
-        else:
-            tax_withheld = round(gross_amount * (tax_rate / 100.0), 2)
+    # 4. Resolve credited_to / status
+    dest = (credited_to or status or "bank").strip().lower()
+    if dest in ("ktrade_cash", "ktrade", "sent_to_ktrade", "broker", "trading_cash"):
+        clean_credited_to = "ktrade_cash"
+        clean_status = "SENT_TO_KTRADE"
+    elif dest in ("entitled",):
+        clean_credited_to = "bank"
+        clean_status = "ENTITLED"
+    elif dest in ("announced",):
+        clean_credited_to = "bank"
+        clean_status = "ANNOUNCED"
     else:
-        tax_withheld = round(float(tax_withheld), 2)
+        clean_credited_to = "bank"
+        clean_status = "CREDITED_TO_BANK"
 
-    if net_amount is None or float(net_amount) <= 0:
-        net_amount = round(gross_amount - tax_withheld, 2)
-    else:
-        net_amount = round(float(net_amount), 2)
-
-    clean_status = status.strip().upper() if status else 'CREDITED_TO_BANK'
-    valid_statuses = {'ENTITLED', 'ANNOUNCED', 'CREDITED_TO_BANK', 'SENT_TO_KTRADE'}
-    if clean_status not in valid_statuses:
-        clean_status = 'CREDITED_TO_BANK'
-
+    # 5. Insert into DB
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             INSERT INTO dividend_ledger (
                 ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
-                tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at
+                tax_withheld, net_amount, ex_date, payment_date, status, notes,
+                shares, dividend_per_share, wht_rate_pct, credited_to, created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             RETURNING id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
                       tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at;
         """, (
-            clean_ticker, shares, dps, gross_amount, tax_rate,
-            tax_withheld, net_amount, ex_date, payment_date, clean_status, notes
+            clean_ticker, shares_val, dps_val, gross_val, wht_rate,
+            tax_val, net_val, ex_date, payment_date, clean_status, notes,
+            shares_val, dps_val, wht_rate, clean_credited_to
         ))
         row = cur.fetchone()
+        div_id = row[0]
+
+        # Also mirror into portfolio_dividends if table exists
+        try:
+            cur.execute("SAVEPOINT sp_port_div;")
+            cur.execute("""
+                INSERT INTO portfolio_dividends (
+                    id, ticker, shares, dividend_per_share, gross_amount,
+                    tax_withheld, net_amount, wht_rate_pct, ex_date, payment_date,
+                    credited_to, notes, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    ticker = EXCLUDED.ticker,
+                    shares = EXCLUDED.shares,
+                    dividend_per_share = EXCLUDED.dividend_per_share,
+                    gross_amount = EXCLUDED.gross_amount,
+                    tax_withheld = EXCLUDED.tax_withheld,
+                    net_amount = EXCLUDED.net_amount,
+                    wht_rate_pct = EXCLUDED.wht_rate_pct,
+                    ex_date = EXCLUDED.ex_date,
+                    payment_date = EXCLUDED.payment_date,
+                    credited_to = EXCLUDED.credited_to,
+                    notes = EXCLUDED.notes;
+            """, (
+                div_id, clean_ticker, shares_val, dps_val, gross_val,
+                tax_val, net_val, wht_rate, ex_date, payment_date,
+                clean_credited_to, notes
+            ))
+            cur.execute("RELEASE SAVEPOINT sp_port_div;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_port_div;")
+
         conn.commit()
         invalidate_financial_summary_cache()
-        
-        # CRITICAL RULE: Only if status is 'SENT_TO_KTRADE', credit capital_ledger immediately!
-        if clean_status == 'SENT_TO_KTRADE':
-            record_capital_transaction(
-                tx_type='DIVIDEND_SENT_TO_KTRADE',
-                amount=net_amount,
-                notes=f"Reinvested Dividend #{row[0]}: {clean_ticker} ({shares} shs @ Rs. {dps})"
-            )
+
+        # If credited to KTrade cash, insert into capital_ledger
+        if clean_credited_to == "ktrade_cash" or clean_status == "SENT_TO_KTRADE":
+            try:
+                record_capital_transaction(
+                    tx_type='DIVIDEND_SENT_TO_KTRADE',
+                    amount=net_val,
+                    reference_note=f"Reinvested Dividend #{div_id}: {clean_ticker} ({shares_val} shs @ Rs. {dps_val})"
+                )
+            except Exception as cap_err:
+                print(f"⚠️ [Capital Ledger Sync] {cap_err}", flush=True)
 
         return {
-            "id": row[0],
-            "ticker": row[1],
-            "shares_held": float(row[2]),
-            "dps_gross": float(row[3]),
-            "gross_amount": float(row[4]),
-            "tax_rate_pct": float(row[5]),
-            "tax_withheld": float(row[6]),
-            "net_amount": float(row[7]),
+            "id": div_id,
+            "ticker": clean_ticker,
+            "shares": shares_val,
+            "shares_held": shares_val,
+            "dividend_per_share": dps_val,
+            "dps_gross": dps_val,
+            "gross_amount": gross_val,
+            "tax_rate_pct": wht_rate,
+            "wht_rate_pct": wht_rate,
+            "tax_withheld": tax_val,
+            "net_amount": net_val,
             "ex_date": str(row[8]) if row[8] else None,
-            "payment_date": str(row[9]) if row[9] else None,
-            "status": row[10],
+            "payment_date": str(row[9]) if row[9] else (payment_date or None),
+            "credited_to": clean_credited_to,
+            "status": clean_status,
             "notes": row[11],
             "created_at": row[12].isoformat() if row[12] else None
         }
@@ -1958,6 +2083,9 @@ def record_dividend(
     finally:
         cur.close()
         conn.close()
+
+# Alias for backwards compatibility
+record_dividend = log_dividend
 
 def transfer_dividend_to_ktrade(dividend_id_or_ticker) -> dict:
     """
@@ -2962,12 +3090,15 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "dividends_sent_to_ktrade": net_div_reinvested,
                 "pending_dividends": pending_div,
                 "dividends_pending": pending_div,
+                "total_dividends_received": round(net_div_bank + net_div_reinvested, 2),
+                "total_net_dividends": round(net_div_bank + net_div_reinvested, 2),
                 "true_total_return": true_total_return,
                 "true_roi_pct": true_roi_pct,
                 "price_mode": "CACHED" if use_cached_prices else "LIVE",
             },
             "holdings": holdings_detail,
             "holdings_count": len(holdings_detail),
+            "dividends": get_all_dividends(50),
         }
         _CACHED_FIN_SUMMARY = {
             **result_payload,
@@ -2979,16 +3110,17 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
         cur.close()
         conn.close()
 
-def get_all_dividends(limit: int = 50) -> list[dict]:
-    """Retrieves all rows from dividend_ledger ordered by created_at DESC."""
+def get_all_dividends(limit: int = 100) -> list[dict]:
+    """Retrieves all rows from dividend_ledger ordered by payment_date DESC, id DESC."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             SELECT id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
-                   tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at
+                   tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at,
+                   COALESCE(credited_to, CASE WHEN status = 'SENT_TO_KTRADE' THEN 'ktrade_cash' ELSE 'bank' END) AS credited_to
             FROM dividend_ledger
-            ORDER BY created_at DESC
+            ORDER BY COALESCE(payment_date, created_at::date) DESC, id DESC
             LIMIT %s;
         """, (limit,))
         rows = cur.fetchall()
@@ -2996,14 +3128,18 @@ def get_all_dividends(limit: int = 50) -> list[dict]:
             {
                 "id": r[0],
                 "ticker": r[1],
+                "shares": float(r[2]),
                 "shares_held": float(r[2]),
+                "dividend_per_share": float(r[3]),
                 "dps_gross": float(r[3]),
                 "gross_amount": float(r[4]),
+                "wht_rate_pct": float(r[5]),
                 "tax_rate_pct": float(r[5]),
                 "tax_withheld": float(r[6]),
                 "net_amount": float(r[7]),
                 "ex_date": str(r[8]) if r[8] else None,
                 "payment_date": str(r[9]) if r[9] else None,
+                "credited_to": r[13],
                 "status": r[10],
                 "notes": r[11],
                 "created_at": r[12].isoformat() if r[12] else None
@@ -3441,14 +3577,21 @@ def delete_portfolio_position(ticker: str) -> dict:
 
 
 def delete_dividend_entry(dividend_id: int) -> dict:
-    """Deletes a dividend row from dividend_ledger and reverses any linked reinvestment ledger entry."""
+    """Deletes a dividend row from dividend_ledger and portfolio_dividends, reversing any linked reinvestment."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id, status FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
+        cur.execute("SELECT id, status, net_amount FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
         existing = cur.fetchone()
         cur.execute("DELETE FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
         deleted = cur.rowcount
+        try:
+            cur.execute("SAVEPOINT sp_del_port_div;")
+            cur.execute("DELETE FROM portfolio_dividends WHERE id = %s;", (int(dividend_id),))
+            cur.execute("RELEASE SAVEPOINT sp_del_port_div;")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_del_port_div;")
+
         if existing and existing[1] == "SENT_TO_KTRADE":
             cur.execute(
                 "DELETE FROM capital_ledger WHERE tx_type = 'DIVIDEND_SENT_TO_KTRADE' AND (notes LIKE %s OR reference_note LIKE %s);",

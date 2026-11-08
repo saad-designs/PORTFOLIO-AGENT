@@ -3020,63 +3020,92 @@
   </div>
 
   <!-- 3-Mode Dividend Calculator Modal -->
-  <div id="div-modal" class="modal-backdrop" onclick="if(event.target===this) closeModal('div-modal')">
+  <div id="modal-dividend" class="modal-backdrop" onclick="if(event.target===this) closeModal('modal-dividend')">
     <div class="modal-card">
       <div class="card-header modal-head">
         <div>
           <div class="card-title" id="div-modal-title">Log PSX Dividend</div>
-          <div class="card-subtitle">Enter Total Net Received, Total Gross, or Per-Share DPS</div>
+          <div class="card-subtitle">Enter Net Received or Per-Share DPS — Auto-calculates FBR WHT Tax &amp; Gross Payout</div>
         </div>
-        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('div-modal')">×</button>
+        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('modal-dividend')">×</button>
       </div>
 
-      <div class="seg-pills" style="width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:10px;">
-        <button type="button" class="seg-btn active" data-div-mode="net" onclick="setDividendInputMode('net')">Total Net (Bank)</button>
-        <button type="button" class="seg-btn" data-div-mode="gross" onclick="setDividendInputMode('gross')">Total Gross</button>
-        <button type="button" class="seg-btn" data-div-mode="dps" onclick="setDividendInputMode('dps')">Per-Share DPS</button>
-      </div>
+      <div id="div-modal-error" style="display:none; color:#F87171; background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.25); padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;"></div>
 
       <form id="form-log-dividend" onsubmit="submitDividendForm(event)">
         <div class="form-grid">
           <div class="form-field">
-            <label>Ticker (auto-maps HUBCO → HUBC)</label>
-            <input class="form-input" id="div-ticker" list="held-tickers-datalist" placeholder="e.g. HUBC, EFERT, FFC" required oninput="onDividendTickerInput(this.value)" />
+            <label>Stock Ticker</label>
+            <select class="form-input" id="div-ticker-select" onchange="onDividendTickerSelect(this.value)">
+              <option value="" disabled selected>-- Select Stock Ticker --</option>
+              <option value="SYS">SYS (Systems Limited — 109 shs)</option>
+              <option value="FFC">FFC (Fauji Fertilizer — 15 shs)</option>
+              <option value="OGDC">OGDC (Oil &amp; Gas Dev — 25 shs)</option>
+              <option value="MARI">MARI (Mari Energies — 12 shs)</option>
+              <option value="HUBC">HUBC (Hub Power Co — 35 shs, 7.5% WHT)</option>
+              <option value="LUCK">LUCK (Lucky Cement — 2 shs)</option>
+              <option value="EFERT">EFERT (Engro Fertilizers — 8 shs)</option>
+              <option value="MEBL">MEBL (Meezan Bank — 2 shs)</option>
+              <option value="FABL">FABL (Faysal Bank — 5 shs)</option>
+              <option value="POL">POL (Pakistan Oilfields)</option>
+              <option value="CUSTOM">Other / Custom Ticker...</option>
+            </select>
+            <input class="form-input" id="div-ticker" placeholder="e.g. HUBC, EFERT, FFC" style="display:none; margin-top:6px;" oninput="onDividendTickerInput(this.value)" />
           </div>
+
           <div class="form-field">
-            <label>Shares Entitled</label>
+            <label>Shares Held / Entitled</label>
             <input class="form-input tabular" type="number" step="any" id="div-shares" placeholder="Auto-filled" required oninput="recalcDividendPreview()" />
           </div>
+
           <div class="form-field">
             <label id="div-amount-label">Total Net Received in Bank (PKR)</label>
-            <input class="form-input tabular" type="number" step="any" id="div-primary-val" placeholder="e.g. 122" required oninput="recalcDividendPreview()" />
+            <input class="form-input tabular" type="number" step="any" id="div-net-amount" placeholder="e.g. 510.00" oninput="onDividendNetInput(this.value)" />
+            <input type="hidden" id="div-primary-val" />
           </div>
+
           <div class="form-field">
-            <label>WHT Tax Rate (%)</label>
+            <label>Dividend Per Share — DPS (PKR)</label>
+            <input class="form-input tabular" type="number" step="any" id="div-dps" placeholder="e.g. 15.75" oninput="onDividendDpsInput(this.value)" />
+          </div>
+
+          <div class="form-field">
+            <label>FBR WHT Tax Rate (%)</label>
             <input class="form-input tabular" type="number" step="any" id="div-tax" value="15" oninput="recalcDividendPreview()" />
           </div>
+
           <div class="form-field">
-            <label>Ex / Payment Date</label>
-            <input class="form-input" type="date" id="div-ex-date" />
+            <label>Payment / Credit Date</label>
+            <input class="form-input" type="date" id="div-payment-date" />
+            <input type="hidden" id="div-ex-date" />
           </div>
-          <div class="form-field">
-            <label>Status</label>
-            <select class="form-input" id="div-status">
-              <option value="CREDITED_TO_BANK" selected>CREDITED_TO_BANK</option>
-              <option value="SENT_TO_KTRADE">SENT_TO_KTRADE</option>
-              <option value="ENTITLED">ENTITLED</option>
-              <option value="ANNOUNCED">ANNOUNCED</option>
+
+          <div class="form-field full">
+            <label>Credited To (Destination)</label>
+            <select class="form-input" id="div-credited-to" onchange="recalcDividendPreview()">
+              <option value="bank" selected>Direct Bank IBAN (CDC Payout - Personal Bank Account)</option>
+              <option value="ktrade_cash">KTrade Cash (Broker Trading Account — Available Cash)</option>
             </select>
+            <input type="hidden" id="div-status" value="CREDITED_TO_BANK" />
           </div>
+
+          <div class="form-field full">
+            <label>Notes / Memo (Optional)</label>
+            <input class="form-input" id="div-notes" placeholder="e.g. FY24 Final Dividend / CDC Direct Payout" />
+          </div>
+
           <div class="form-field full">
             <div class="calc-preview-box tabular" id="div-calc-preview">
-              <span>Gross: <strong>Rs. 0.00</strong></span>
-              <span>WHT (15%): <strong>Rs. 0.00</strong></span>
+              <span>Gross Dividend: <strong>Rs. 0.00</strong></span>
+              <span>WHT (15%): <strong style="color:var(--muted);">Rs. 0.00</strong></span>
               <span>Net Payout: <strong style="color:var(--lime);">Rs. 0.00</strong></span>
-              <span>DPS: <strong>Rs. 0.00/sh</strong></span>
+              <span>Gross DPS: <strong>Rs. 0.00/sh</strong></span>
+              <span style="font-size:11px;color:#8A9992;grid-column:1/-1;">Credited To: <strong style="color:#E2E8F0;">Direct Bank IBAN</strong></span>
             </div>
           </div>
+
           <div class="form-field full" style="margin-top:4px;">
-            <button type="submit" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Save Dividend Record</button>
+            <button type="submit" id="btn-save-dividend" class="arch-btn-accent" style="justify-content:center;width:100%;padding:11px;">Save Dividend Record</button>
           </div>
         </div>
       </form>
@@ -3304,6 +3333,10 @@
     function closeModal(id) {
       const el = document.getElementById(id);
       if (el) el.classList.remove('open');
+      if (id === 'div-modal' || id === 'modal-dividend') {
+        const alt = document.getElementById(id === 'div-modal' ? 'modal-dividend' : 'div-modal');
+        if (alt) alt.classList.remove('open');
+      }
     }
 
     function openDetailModal(title, subtitle, htmlContent) {
@@ -4906,27 +4939,81 @@
       }
     }
 
+    const PORTFOLIO_DEFAULT_META = {
+      'SYS': { shares: 109, tax: 15 },
+      'FFC': { shares: 15, tax: 15 },
+      'OGDC': { shares: 25, tax: 15 },
+      'MARI': { shares: 12, tax: 15 },
+      'HUBC': { shares: 35, tax: 7.5 },
+      'LUCK': { shares: 2, tax: 15 },
+      'EFERT': { shares: 8, tax: 15 },
+      'MEBL': { shares: 2, tax: 15 },
+      'FABL': { shares: 5, tax: 15 },
+      'POL': { shares: 0, tax: 15 }
+    };
+
     function openEditDividendModal(id) {
       const d = (APP_STATE.dividends || []).find(item => item.id === id);
       if (!d) return;
       APP_STATE.editingDividendId = id;
-      document.getElementById('div-modal-title').textContent = `Edit ${d.ticker} Dividend Record`;
-      document.getElementById('div-ticker').value = d.ticker || '';
-      document.getElementById('div-shares').value = d.shares_held || '';
-      document.getElementById('div-tax').value = d.tax_rate_pct != null ? d.tax_rate_pct : '15';
-      document.getElementById('div-status').value = d.status || 'CREDITED_TO_BANK';
-      document.getElementById('div-ex-date').value = d.ex_date || '';
+      const title = document.getElementById('div-modal-title');
+      if (title) title.textContent = `Edit ${d.ticker} Dividend Record`;
+      const errBox = document.getElementById('div-modal-error');
+      if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
 
-      setDividendInputMode('net');
-      document.getElementById('div-primary-val').value = d.net_amount || d.gross_amount || '';
+      const tickSel = document.getElementById('div-ticker-select');
+      const tickInp = document.getElementById('div-ticker');
+      if (tickSel) {
+        if (Array.from(tickSel.options).some(o => o.value === d.ticker)) {
+          tickSel.value = d.ticker;
+          if (tickInp) tickInp.style.display = 'none';
+        } else {
+          tickSel.value = 'CUSTOM';
+          if (tickInp) { tickInp.style.display = 'block'; tickInp.value = d.ticker || ''; }
+        }
+      }
+      if (tickInp) tickInp.value = d.ticker || '';
+
+      const sharesInp = document.getElementById('div-shares');
+      if (sharesInp) sharesInp.value = d.shares_held != null ? d.shares_held : (d.shares != null ? d.shares : '');
+
+      const taxInp = document.getElementById('div-tax');
+      if (taxInp) taxInp.value = d.wht_rate_pct != null ? d.wht_rate_pct : (d.tax_rate_pct != null ? d.tax_rate_pct : '15');
+
+      const netInp = document.getElementById('div-net-amount');
+      if (netInp) netInp.value = d.net_amount || '';
+      const primInp = document.getElementById('div-primary-val');
+      if (primInp) primInp.value = d.net_amount || '';
+
+      const dpsInp = document.getElementById('div-dps');
+      if (dpsInp) dpsInp.value = d.dividend_per_share || d.dps_gross || '';
+
+      const payDate = document.getElementById('div-payment-date');
+      if (payDate) payDate.value = d.payment_date || d.ex_date || '';
+      const exDate = document.getElementById('div-ex-date');
+      if (exDate) exDate.value = d.ex_date || '';
+
+      const credTo = document.getElementById('div-credited-to');
+      if (credTo) credTo.value = (d.credited_to === 'ktrade_cash' || d.status === 'SENT_TO_KTRADE') ? 'ktrade_cash' : 'bank';
+
+      const notesInp = document.getElementById('div-notes');
+      if (notesInp) notesInp.value = d.notes || '';
+
       recalcDividendPreview();
-      document.getElementById('div-modal').classList.add('open');
+      const m1 = document.getElementById('modal-dividend');
+      if (m1) m1.classList.add('open');
+      const m2 = document.getElementById('div-modal');
+      if (m2 && m2 !== m1) m2.classList.add('open');
     }
 
     async function deleteDividend(id) {
       if (!confirm('Delete this dividend entry?')) return;
       try {
-        await apiFetch(`/api/dashboard/dividends/${id}`, { method: 'DELETE' });
+        const res = await apiFetch(`/api/dashboard/dividends/${id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || `Server status ${res.status}`);
+        }
         showToast('Dividend entry deleted.');
         await Promise.all([loadOverviewData(false), loadDividendsData()]);
       } catch (err) {
@@ -4936,69 +5023,152 @@
 
     function openDividendModal() {
       APP_STATE.editingDividendId = null;
-      document.getElementById('div-modal-title').textContent = 'Log PSX Dividend';
-      document.getElementById('div-ticker').value = '';
-      document.getElementById('div-shares').value = '';
-      document.getElementById('div-primary-val').value = '';
-      document.getElementById('div-tax').value = '15';
-      document.getElementById('div-ex-date').value = '';
-      document.getElementById('div-status').value = 'CREDITED_TO_BANK';
-      setDividendInputMode('net');
+      const title = document.getElementById('div-modal-title');
+      if (title) title.textContent = 'Log PSX Dividend';
+      const errBox = document.getElementById('div-modal-error');
+      if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
+
+      const tickSel = document.getElementById('div-ticker-select');
+      if (tickSel) tickSel.value = '';
+      const tickInp = document.getElementById('div-ticker');
+      if (tickInp) { tickInp.value = ''; tickInp.style.display = 'none'; }
+      const sharesInp = document.getElementById('div-shares');
+      if (sharesInp) sharesInp.value = '';
+      const netInp = document.getElementById('div-net-amount');
+      if (netInp) netInp.value = '';
+      const dpsInp = document.getElementById('div-dps');
+      if (dpsInp) dpsInp.value = '';
+      const primInp = document.getElementById('div-primary-val');
+      if (primInp) primInp.value = '';
+      const taxInp = document.getElementById('div-tax');
+      if (taxInp) taxInp.value = '15';
+      const payDate = document.getElementById('div-payment-date');
+      if (payDate) payDate.value = new Date().toISOString().slice(0, 10);
+      const exDate = document.getElementById('div-ex-date');
+      if (exDate) exDate.value = '';
+      const credTo = document.getElementById('div-credited-to');
+      if (credTo) credTo.value = 'bank';
+      const notesInp = document.getElementById('div-notes');
+      if (notesInp) notesInp.value = '';
+
       recalcDividendPreview();
-      document.getElementById('div-modal').classList.add('open');
+      const m1 = document.getElementById('modal-dividend');
+      if (m1) m1.classList.add('open');
+      const m2 = document.getElementById('div-modal');
+      if (m2 && m2 !== m1) m2.classList.add('open');
     }
 
-    function setDividendInputMode(mode) {
-      APP_STATE.divInputMode = mode;
-      document.querySelectorAll('[data-div-mode]').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.divMode === mode);
-      });
-      const lbl = document.getElementById('div-amount-label');
-      const inp = document.getElementById('div-primary-val');
-      if (mode === 'net') {
-        lbl.textContent = 'Total Net Received in Bank (PKR)';
-        inp.placeholder = 'e.g. 122';
-      } else if (mode === 'gross') {
-        lbl.textContent = 'Total Gross Dividend Amount (PKR)';
-        inp.placeholder = 'e.g. 143.53';
-      } else {
-        lbl.textContent = 'Gross Dividend Per Share — DPS (PKR)';
-        inp.placeholder = 'e.g. 4.00';
+    function onDividendTickerSelect(sym) {
+      const tickerInp = document.getElementById('div-ticker');
+      if (sym === 'CUSTOM') {
+        if (tickerInp) {
+          tickerInp.style.display = 'block';
+          tickerInp.value = '';
+          tickerInp.focus();
+        }
+        return;
       }
+      if (tickerInp) {
+        tickerInp.style.display = 'none';
+        tickerInp.value = sym;
+      }
+
+      const liveHoldings = APP_STATE.overview?.financial_summary?.holdings || [];
+      const liveMatch = liveHoldings.find(h => h.ticker === sym);
+      const defMeta = PORTFOLIO_DEFAULT_META[sym] || { shares: 0, tax: 15 };
+
+      const sharesInp = document.getElementById('div-shares');
+      if (sharesInp) {
+        sharesInp.value = liveMatch ? liveMatch.shares : defMeta.shares;
+      }
+
+      const taxInp = document.getElementById('div-tax');
+      if (taxInp) {
+        taxInp.value = defMeta.tax;
+      }
+
       recalcDividendPreview();
     }
 
     function onDividendTickerInput(rawVal) {
       const sym = normalizeSym(rawVal);
-      const holdings = APP_STATE.overview?.financial_summary?.holdings || [];
-      const match = holdings.find(h => h.ticker === sym);
+      const liveHoldings = APP_STATE.overview?.financial_summary?.holdings || [];
+      const match = liveHoldings.find(h => h.ticker === sym);
+      const defMeta = PORTFOLIO_DEFAULT_META[sym];
       const sharesInp = document.getElementById('div-shares');
-      if (match && (!sharesInp.value || Number(sharesInp.dataset.autofilled || 0) === 1)) {
-        sharesInp.value = match.shares;
+      if (sharesInp && (!sharesInp.value || sharesInp.dataset.autofilled === '1')) {
+        sharesInp.value = match ? match.shares : (defMeta ? defMeta.shares : '');
         sharesInp.dataset.autofilled = '1';
+      }
+      const taxInp = document.getElementById('div-tax');
+      if (taxInp && defMeta) {
+        taxInp.value = defMeta.tax;
+      }
+      recalcDividendPreview();
+    }
+
+    let _isUpdatingDivCalc = false;
+
+    function onDividendNetInput(val) {
+      if (_isUpdatingDivCalc) return;
+      _isUpdatingDivCalc = true;
+      try {
+        const net = Math.max(0, parseFloat(val || '0'));
+        const shares = Math.max(0, parseFloat(document.getElementById('div-shares')?.value || '0'));
+        const taxRate = Math.min(99, Math.max(0, parseFloat(document.getElementById('div-tax')?.value || '15')));
+        const taxFrac = taxRate / 100.0;
+        const gross = (1 - taxFrac) > 0 ? (net / (1 - taxFrac)) : net;
+        const dps = shares > 0 ? (gross / shares) : 0;
+        const dpsInp = document.getElementById('div-dps');
+        if (dpsInp) {
+          dpsInp.value = dps > 0 ? dps.toFixed(4) : '';
+        }
+        const primInp = document.getElementById('div-primary-val');
+        if (primInp) primInp.value = val;
+      } finally {
+        _isUpdatingDivCalc = false;
+      }
+      recalcDividendPreview();
+    }
+
+    function onDividendDpsInput(val) {
+      if (_isUpdatingDivCalc) return;
+      _isUpdatingDivCalc = true;
+      try {
+        const dps = Math.max(0, parseFloat(val || '0'));
+        const shares = Math.max(0, parseFloat(document.getElementById('div-shares')?.value || '0'));
+        const taxRate = Math.min(99, Math.max(0, parseFloat(document.getElementById('div-tax')?.value || '15')));
+        const taxFrac = taxRate / 100.0;
+        const gross = shares * dps;
+        const wht = gross * taxFrac;
+        const net = gross - wht;
+        const netInp = document.getElementById('div-net-amount');
+        if (netInp) {
+          netInp.value = net > 0 ? net.toFixed(2) : '';
+        }
+        const primInp = document.getElementById('div-primary-val');
+        if (primInp) primInp.value = net > 0 ? net.toFixed(2) : '';
+      } finally {
+        _isUpdatingDivCalc = false;
       }
       recalcDividendPreview();
     }
 
     function computeDividendBreakdown() {
       const shares = Math.max(0, parseFloat(document.getElementById('div-shares')?.value || '0'));
-      const rawVal = Math.max(0, parseFloat(document.getElementById('div-primary-val')?.value || '0'));
+      const netInpVal = parseFloat(document.getElementById('div-net-amount')?.value || document.getElementById('div-primary-val')?.value || '0');
+      const dpsInpVal = parseFloat(document.getElementById('div-dps')?.value || '0');
       const taxRate = Math.min(99, Math.max(0, parseFloat(document.getElementById('div-tax')?.value || '15')));
       const taxFrac = taxRate / 100.0;
 
       let gross = 0, wht = 0, net = 0, dps = 0;
-      if (APP_STATE.divInputMode === 'net') {
-        net = rawVal;
+      if (!isNaN(netInpVal) && netInpVal > 0) {
+        net = netInpVal;
         gross = (1 - taxFrac) > 0 ? (net / (1 - taxFrac)) : net;
         wht = gross - net;
-        dps = shares > 0 ? (gross / shares) : 0;
-      } else if (APP_STATE.divInputMode === 'gross') {
-        gross = rawVal;
-        wht = gross * taxFrac;
-        net = gross - wht;
-        dps = shares > 0 ? (gross / shares) : 0;
-      } else {
-        dps = rawVal;
+        dps = shares > 0 ? (gross / shares) : (dpsInpVal > 0 ? dpsInpVal : 0);
+      } else if (!isNaN(dpsInpVal) && dpsInpVal > 0) {
+        dps = dpsInpVal;
         gross = shares * dps;
         wht = gross * taxFrac;
         net = gross - wht;
@@ -5017,51 +5187,113 @@
       const c = computeDividendBreakdown();
       const box = document.getElementById('div-calc-preview');
       if (!box) return;
+      const isCash = document.getElementById('div-credited-to')?.value === 'ktrade_cash';
+      const destName = isCash ? 'KTrade Trading Cash (Reinvested)' : 'Direct Bank IBAN (CDC Payout)';
       box.innerHTML = `
-        <span>Gross: <strong>${fmtPKR(c.gross)}</strong></span>
-        <span>WHT (${c.taxRate}%): <strong>${fmtPKR(c.wht)}</strong></span>
+        <span>Gross Dividend: <strong>${fmtPKR(c.gross)}</strong></span>
+        <span>WHT Tax (${c.taxRate}%): <strong style="color:var(--muted);">${fmtPKR(c.wht)}</strong></span>
         <span>Net Payout: <strong style="color:var(--lime);">${fmtPKR(c.net)}</strong></span>
-        <span>DPS: <strong>Rs. ${c.dps.toFixed(2)}/sh</strong></span>
+        <span>Gross DPS: <strong>Rs. ${c.dps.toFixed(2)}/sh</strong></span>
+        <span style="font-size:11px;color:#8A9992;grid-column:1/-1;">Credited To: <strong style="color:#E2E8F0;">${destName}</strong></span>
       `;
     }
 
     async function submitDividendForm(e) {
       e.preventDefault();
-      const ticker = normalizeSym(document.getElementById('div-ticker').value);
+      const errBox = document.getElementById('div-modal-error');
+      if (errBox) {
+        errBox.style.display = 'none';
+        errBox.textContent = '';
+      }
+
+      const ticker = normalizeSym(document.getElementById('div-ticker')?.value || document.getElementById('div-ticker-select')?.value);
+      if (!ticker) {
+        if (errBox) {
+          errBox.textContent = 'Please select or enter a valid stock ticker.';
+          errBox.style.display = 'block';
+        }
+        showToast('Please enter a stock ticker.');
+        return;
+      }
+
       const calc = computeDividendBreakdown();
+      if (calc.net <= 0 && calc.dps <= 0) {
+        if (errBox) {
+          errBox.textContent = 'Please enter either Net Received in Bank or Dividend Per Share.';
+          errBox.style.display = 'block';
+        }
+        showToast('Please enter dividend amount.');
+        return;
+      }
+
+      const submitBtn = e.target.querySelector('button[type="submit"]') || document.getElementById('btn-save-dividend');
+      const origBtnText = submitBtn ? submitBtn.innerHTML : '';
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Saving Dividend...';
+      }
+
+      const creditedTo = document.getElementById('div-credited-to')?.value || 'bank';
+      const status = creditedTo === 'ktrade_cash' ? 'SENT_TO_KTRADE' : 'CREDITED_TO_BANK';
+
       const payload = {
-        ticker,
+        ticker: ticker,
+        shares: calc.shares,
         shares_held: calc.shares,
+        dps: calc.dps,
+        dividend_per_share: calc.dps,
         dps_gross: calc.dps,
         gross_amount: calc.gross,
+        tax_withheld: calc.wht,
         net_amount: calc.net,
+        wht_rate_pct: calc.taxRate,
         tax_rate_pct: calc.taxRate,
-        ex_date: document.getElementById('div-ex-date').value || null,
-        status: document.getElementById('div-status').value
+        payment_date: document.getElementById('div-payment-date')?.value || document.getElementById('div-ex-date')?.value || null,
+        ex_date: document.getElementById('div-ex-date')?.value || null,
+        credited_to: creditedTo,
+        status: status,
+        notes: document.getElementById('div-notes')?.value || null
       };
+
       try {
-        if (APP_STATE.editingDividendId) {
-          await apiFetch(`/api/dashboard/dividends/${APP_STATE.editingDividendId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          showToast(`Updated ${ticker} dividend: Net ${fmtPKR(calc.net)}.`);
-        } else {
-          await apiFetch('/api/dashboard/dividends', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          showToast(`Saved ${ticker} dividend: Net ${fmtPKR(calc.net)} (Gross ${fmtPKR(calc.gross)}).`);
+        const isEdit = Boolean(APP_STATE.editingDividendId);
+        const endpoint = isEdit ? `/api/dashboard/dividends/${APP_STATE.editingDividendId}` : '/api/dashboard/dividends';
+        const method = isEdit ? 'PUT' : 'POST';
+
+        const res = await apiFetch(endpoint, {
+          method: method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.detail || errJson.message || `Server returned status ${res.status}`);
         }
+
+        showToast(`Dividend logged: +Rs. ${fmtPKR(calc.net)} net for ${ticker}`);
+        closeModal('modal-dividend');
         closeModal('div-modal');
         APP_STATE.editingDividendId = null;
         e.target.reset();
-        document.getElementById('div-tax').value = '15';
+
+        if (document.getElementById('div-net-amount')) document.getElementById('div-net-amount').value = '';
+        if (document.getElementById('div-dps')) document.getElementById('div-dps').value = '';
+        if (document.getElementById('div-tax')) document.getElementById('div-tax').value = '15';
+
         await Promise.all([loadOverviewData(false), loadDividendsData()]);
       } catch (err) {
-        showToast('Failed saving dividend: ' + err.message);
+        console.error('Error submitting dividend:', err);
+        if (errBox) {
+          errBox.textContent = `Error: ${err.message}`;
+          errBox.style.display = 'block';
+        }
+        showToast(`Failed saving dividend: ${err.message}`);
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = origBtnText;
+        }
       }
     }
 
