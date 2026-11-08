@@ -3022,12 +3022,12 @@
   <!-- 3-Mode Dividend Calculator Modal -->
   <div id="modal-dividend" class="modal-backdrop" onclick="if(event.target===this) closeModal('modal-dividend')">
     <div class="modal-card">
-      <div class="card-header modal-head">
-        <div>
+      <div class="modal-head" style="display:flex; flex-direction:row; justify-content:space-between; align-items:flex-start; width:100%; margin-bottom:18px;">
+        <div style="flex:1; min-width:0; padding-right:12px;">
           <div class="card-title" id="div-modal-title">Log PSX Dividend</div>
-          <div class="card-subtitle">Enter Net Received or Per-Share DPS — Auto-calculates FBR WHT Tax &amp; Gross Payout</div>
+          <div class="card-subtitle" style="margin-top:4px;">Enter Net Received or Per-Share DPS — Auto-calculates FBR WHT Tax &amp; Gross Payout</div>
         </div>
-        <button class="icon-sq-btn" style="width:32px;height:32px;" onclick="closeModal('modal-dividend')">×</button>
+        <button type="button" class="icon-sq-btn modal-close" style="width:32px;height:32px;flex-shrink:0;" onclick="closeModal('modal-dividend')">×</button>
       </div>
 
       <div id="div-modal-error" style="display:none; color:#F87171; background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.25); padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;"></div>
@@ -5255,15 +5255,19 @@
         notes: document.getElementById('div-notes')?.value || null
       };
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
       try {
         const isEdit = Boolean(APP_STATE.editingDividendId);
-        const endpoint = isEdit ? `/api/dashboard/dividends/${APP_STATE.editingDividendId}` : '/api/dashboard/dividends';
+        const endpoint = isEdit ? `/api/dashboard/dividends/${APP_STATE.editingDividendId}` : '/api/dashboard/dividend';
         const method = isEdit ? 'PUT' : 'POST';
 
         const res = await apiFetch(endpoint, {
           method: method,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal: controller.signal
         });
 
         if (!res.ok) {
@@ -5284,15 +5288,19 @@
         await Promise.all([loadOverviewData(false), loadDividendsData()]);
       } catch (err) {
         console.error('Error submitting dividend:', err);
+        const msg = (err && (err.name === 'AbortError' || err.message?.includes('aborted')))
+          ? 'Request timed out after 8s. Please try again.'
+          : (err.message || String(err));
         if (errBox) {
-          errBox.textContent = `Error: ${err.message}`;
+          errBox.textContent = `Error: ${msg}`;
           errBox.style.display = 'block';
         }
-        showToast(`Failed saving dividend: ${err.message}`);
+        showToast(`Failed saving dividend: ${msg}`);
       } finally {
+        clearTimeout(timeoutId);
         if (submitBtn) {
           submitBtn.disabled = false;
-          submitBtn.innerHTML = origBtnText;
+          submitBtn.innerHTML = origBtnText || 'Save Dividend';
         }
       }
     }

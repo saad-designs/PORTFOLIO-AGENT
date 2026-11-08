@@ -124,7 +124,15 @@ def init_learning_tables() -> bool:
     cur = None
     try:
         conn = _get_conn()
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
         cur = conn.cursor()
+        try:
+            cur.execute("SET lock_timeout = '2s'; SET statement_timeout = '5s';")
+        except Exception:
+            pass
 
         # 1. prediction_ledger
         cur.execute("""
@@ -249,7 +257,15 @@ def seed_initial_predictions_if_empty() -> int:
     inserted = 0
     try:
         conn = _get_conn()
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
         cur = conn.cursor()
+        try:
+            cur.execute("SET lock_timeout = '2s'; SET statement_timeout = '5s';")
+        except Exception:
+            pass
         cur.execute("SELECT COUNT(*) FROM prediction_ledger;")
         if int(cur.fetchone()[0] or 0) > 0:
             return 0
@@ -364,7 +380,15 @@ def record_prediction(
     cur = None
     try:
         conn = _get_conn()
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
         cur = conn.cursor()
+        try:
+            cur.execute("SET lock_timeout = '2s'; SET statement_timeout = '5s';")
+        except Exception:
+            pass
 
         # Ensure source exists in source_reliability
         cur.execute("""

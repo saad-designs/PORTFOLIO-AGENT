@@ -174,6 +174,12 @@ class _PooledConnectionProxy:
     def __getattr__(self, name):
         return getattr(self._conn, name)
 
+    def __setattr__(self, name, value):
+        if name in ("_conn", "_pool", "_returned"):
+            super().__setattr__(name, value)
+        else:
+            setattr(self._conn, name, value)
+
     def close(self):
         if self._returned:
             return
@@ -251,238 +257,231 @@ def create_dashboard_and_ledger_tables():
     cur = None
     try:
         conn = get_db_connection()
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
         cur = conn.cursor()
+        try:
+            cur.execute("SET lock_timeout = '2s'; SET statement_timeout = '5s';")
+        except Exception:
+            pass
+
         # 1. agent_feed
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agent_feed (
-                id BIGSERIAL PRIMARY KEY,
-                category TEXT NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                metadata JSONB DEFAULT '{}'::jsonb,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS idx_agent_feed_category ON agent_feed (category);
-            CREATE INDEX IF NOT EXISTS idx_agent_feed_created ON agent_feed (created_at DESC);
-            ALTER TABLE agent_feed ENABLE ROW LEVEL SECURITY;
-        """)
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agent_feed (
+                    id BIGSERIAL PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_feed_category ON agent_feed (category);
+                CREATE INDEX IF NOT EXISTS idx_agent_feed_created ON agent_feed (created_at DESC);
+                ALTER TABLE agent_feed ENABLE ROW LEVEL SECURITY;
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] agent_feed table setup: {e}", flush=True)
 
         # 2. capital_ledger
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS capital_ledger (
-                id BIGSERIAL PRIMARY KEY,
-                tx_type TEXT NOT NULL,
-                amount NUMERIC(14,2) NOT NULL,
-                notes TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS notes TEXT;
-            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS reference_note TEXT;
-            ALTER TABLE capital_ledger ADD COLUMN IF NOT EXISTS tx_date TIMESTAMPTZ DEFAULT NOW();
-            CREATE INDEX IF NOT EXISTS idx_capital_ledger_created ON capital_ledger (created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_capital_ledger_tx_type ON capital_ledger (tx_type);
-            ALTER TABLE capital_ledger ENABLE ROW LEVEL SECURITY;
-        """)
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS capital_ledger (
+                    id BIGSERIAL PRIMARY KEY,
+                    tx_type TEXT NOT NULL,
+                    amount NUMERIC(14,2) NOT NULL,
+                    notes TEXT,
+                    reference_note TEXT,
+                    tx_date TIMESTAMPTZ DEFAULT NOW(),
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_capital_ledger_created ON capital_ledger (created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_capital_ledger_tx_type ON capital_ledger (tx_type);
+                ALTER TABLE capital_ledger ENABLE ROW LEVEL SECURITY;
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] capital_ledger table setup: {e}", flush=True)
 
         # 3. dividend_ledger & portfolio_dividends
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS dividend_ledger (
-                id BIGSERIAL PRIMARY KEY,
-                ticker TEXT NOT NULL,
-                shares_held NUMERIC(14,2) NOT NULL DEFAULT 0,
-                dps_gross NUMERIC(10,4) DEFAULT 0,
-                gross_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-                tax_rate_pct NUMERIC(5,2) DEFAULT 15.00,
-                tax_withheld NUMERIC(14,2) NOT NULL DEFAULT 0,
-                net_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'CREDITED_TO_BANK',
-                notes TEXT,
-                ex_date DATE,
-                payment_date DATE,
-                shares NUMERIC(14,2) DEFAULT 0,
-                dividend_per_share NUMERIC(10,4) DEFAULT 0,
-                wht_rate_pct NUMERIC(5,2) DEFAULT 15.00,
-                credited_to TEXT DEFAULT 'bank',
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS notes TEXT;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS ex_date DATE;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS payment_date DATE;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS shares NUMERIC(14,2) DEFAULT 0;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS shares_held NUMERIC(14,2) DEFAULT 0;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS dividend_per_share NUMERIC(10,4) DEFAULT 0;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS dps_gross NUMERIC(10,4) DEFAULT 0;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS wht_rate_pct NUMERIC(5,2) DEFAULT 15.00;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS tax_rate_pct NUMERIC(5,2) DEFAULT 15.00;
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS credited_to TEXT DEFAULT 'bank';
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'CREDITED_TO_BANK';
-            ALTER TABLE dividend_ledger ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-            ALTER TABLE dividend_ledger ALTER COLUMN dps_gross SET DEFAULT 0;
-            ALTER TABLE dividend_ledger ALTER COLUMN status SET DEFAULT 'CREDITED_TO_BANK';
-            CREATE INDEX IF NOT EXISTS idx_dividend_ledger_ticker ON dividend_ledger (ticker);
-            CREATE INDEX IF NOT EXISTS idx_dividend_ledger_status ON dividend_ledger (status);
-            CREATE INDEX IF NOT EXISTS idx_dividend_ledger_created ON dividend_ledger (created_at DESC);
-            ALTER TABLE dividend_ledger ENABLE ROW LEVEL SECURITY;
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS dividend_ledger (
+                    id BIGSERIAL PRIMARY KEY,
+                    ticker TEXT NOT NULL,
+                    shares_held NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    dps_gross NUMERIC(10,4) DEFAULT 0,
+                    gross_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    tax_rate_pct NUMERIC(5,2) DEFAULT 15.00,
+                    tax_withheld NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    net_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'CREDITED_TO_BANK',
+                    notes TEXT,
+                    ex_date DATE,
+                    payment_date DATE,
+                    shares NUMERIC(14,2) DEFAULT 0,
+                    dividend_per_share NUMERIC(10,4) DEFAULT 0,
+                    wht_rate_pct NUMERIC(5,2) DEFAULT 15.00,
+                    credited_to TEXT DEFAULT 'bank',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_dividend_ledger_ticker ON dividend_ledger (ticker);
+                CREATE INDEX IF NOT EXISTS idx_dividend_ledger_status ON dividend_ledger (status);
+                CREATE INDEX IF NOT EXISTS idx_dividend_ledger_created ON dividend_ledger (created_at DESC);
+                ALTER TABLE dividend_ledger ENABLE ROW LEVEL SECURITY;
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] dividend_ledger table setup: {e}", flush=True)
 
-            CREATE TABLE IF NOT EXISTS portfolio_dividends (
-                id BIGSERIAL PRIMARY KEY,
-                ticker TEXT NOT NULL,
-                shares NUMERIC(14,2) NOT NULL DEFAULT 0,
-                dividend_per_share NUMERIC(10,4) DEFAULT 0,
-                gross_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-                tax_withheld NUMERIC(14,2) NOT NULL DEFAULT 0,
-                net_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-                wht_rate_pct NUMERIC(5,2) DEFAULT 15.00,
-                ex_date DATE,
-                payment_date DATE,
-                credited_to TEXT DEFAULT 'bank',
-                notes TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS shares NUMERIC(14,2) DEFAULT 0;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS dividend_per_share NUMERIC(10,4) DEFAULT 0;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS gross_amount NUMERIC(14,2) DEFAULT 0;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS tax_withheld NUMERIC(14,2) DEFAULT 0;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS net_amount NUMERIC(14,2) DEFAULT 0;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS wht_rate_pct NUMERIC(5,2) DEFAULT 15.00;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS ex_date DATE;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS payment_date DATE;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS credited_to TEXT DEFAULT 'bank';
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS notes TEXT;
-            ALTER TABLE portfolio_dividends ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-            CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_ticker ON portfolio_dividends (ticker);
-            CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_created ON portfolio_dividends (created_at DESC);
-            ALTER TABLE portfolio_dividends ENABLE ROW LEVEL SECURITY;
-        """)
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS portfolio_dividends (
+                    id BIGSERIAL PRIMARY KEY,
+                    ticker TEXT NOT NULL,
+                    shares NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    dividend_per_share NUMERIC(10,4) DEFAULT 0,
+                    gross_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    tax_withheld NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    net_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+                    wht_rate_pct NUMERIC(5,2) DEFAULT 15.00,
+                    ex_date DATE,
+                    payment_date DATE,
+                    credited_to TEXT DEFAULT 'bank',
+                    notes TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_ticker ON portfolio_dividends (ticker);
+                CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_created ON portfolio_dividends (created_at DESC);
+                ALTER TABLE portfolio_dividends ENABLE ROW LEVEL SECURITY;
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] portfolio_dividends table setup: {e}", flush=True)
 
         # 4. trade_history
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS trade_history (
-                id BIGSERIAL PRIMARY KEY,
-                ticker TEXT NOT NULL,
-                side TEXT NOT NULL,
-                quantity NUMERIC(14,2) NOT NULL,
-                price NUMERIC(12,4) NOT NULL,
-                fees NUMERIC(12,2) DEFAULT 0.00,
-                net_total NUMERIC(14,2) NOT NULL,
-                notes TEXT,
-                executed_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS fees NUMERIC(12,2) DEFAULT 0.00;
-            ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS fees_and_tax NUMERIC(12,2) DEFAULT 0.00;
-            ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS notes TEXT;
-            CREATE INDEX IF NOT EXISTS idx_trade_history_ticker ON trade_history (ticker);
-            CREATE INDEX IF NOT EXISTS idx_trade_history_executed ON trade_history (executed_at DESC);
-            ALTER TABLE trade_history ENABLE ROW LEVEL SECURITY;
-        """)
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    ticker TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity NUMERIC(14,2) NOT NULL,
+                    price NUMERIC(12,4) NOT NULL,
+                    fees NUMERIC(12,2) DEFAULT 0.00,
+                    fees_and_tax NUMERIC(12,2) DEFAULT 0.00,
+                    net_total NUMERIC(14,2) NOT NULL,
+                    notes TEXT,
+                    executed_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_trade_history_ticker ON trade_history (ticker);
+                CREATE INDEX IF NOT EXISTS idx_trade_history_executed ON trade_history (executed_at DESC);
+                ALTER TABLE trade_history ENABLE ROW LEVEL SECURITY;
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] trade_history table setup: {e}", flush=True)
 
         # 5. chat_messages
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id BIGSERIAL PRIMARY KEY,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                actions_taken JSONB DEFAULT '[]'::jsonb,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages (created_at ASC);
-            ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
-        """)
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    actions_taken JSONB DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages (created_at ASC);
+                ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] chat_messages table setup: {e}", flush=True)
 
         # 6. Unified portfolio_holdings, watchlist_targets, agent_checkpoints, institutional_reports
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS portfolio_holdings (
-                id BIGSERIAL PRIMARY KEY,
-                ticker TEXT UNIQUE NOT NULL,
-                shares NUMERIC(14,4) NOT NULL DEFAULT 0,
-                avg_buy_price NUMERIC(12,4) NOT NULL DEFAULT 0,
-                last_price NUMERIC(12,4),
-                last_change_pct NUMERIC(8,4) DEFAULT 0,
-                price_updated_at TIMESTAMPTZ,
-                dividend_yield NUMERIC(8,4),
-                research_sentiment TEXT DEFAULT 'NEUTRAL',
-                sentiment_updated_at TIMESTAMPTZ,
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_price NUMERIC(12,4);
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_pct NUMERIC(8,4) DEFAULT 0;
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_abs NUMERIC(12,4) DEFAULT 0;
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS invested_cost NUMERIC(14,4);
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS avg_display NUMERIC(12,4);
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ;
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS dividend_yield NUMERIC(8,4);
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS research_sentiment TEXT DEFAULT 'NEUTRAL';
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS sentiment_updated_at TIMESTAMPTZ;
-            ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS portfolio_holdings (
+                    id BIGSERIAL PRIMARY KEY,
+                    ticker TEXT UNIQUE NOT NULL,
+                    shares NUMERIC(14,4) NOT NULL DEFAULT 0,
+                    avg_buy_price NUMERIC(12,4) NOT NULL DEFAULT 0,
+                    last_price NUMERIC(12,4),
+                    last_change_pct NUMERIC(8,4) DEFAULT 0,
+                    last_change_abs NUMERIC(12,4) DEFAULT 0,
+                    invested_cost NUMERIC(14,4),
+                    avg_display NUMERIC(12,4),
+                    price_updated_at TIMESTAMPTZ,
+                    dividend_yield NUMERIC(8,4),
+                    research_sentiment TEXT DEFAULT 'NEUTRAL',
+                    sentiment_updated_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_holdings_ticker_uniq ON portfolio_holdings (ticker);
 
-            CREATE TABLE IF NOT EXISTS watchlist_targets (
-                ticker TEXT PRIMARY KEY,
-                target_price NUMERIC(12,4),
-                stop_loss NUMERIC(12,4),
-                entry_zone NUMERIC(12,4),
-                historical_fair_pe NUMERIC(8,2),
-                current_trailing_pe NUMERIC(8,2),
-                forward_eps NUMERIC(10,4),
-                last_recalculated_date DATE,
-                notes TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS stop_loss NUMERIC(12,4);
-            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS entry_zone NUMERIC(12,4);
-            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS historical_fair_pe NUMERIC(8,2);
-            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS current_trailing_pe NUMERIC(8,2);
-            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS forward_eps NUMERIC(10,4);
-            ALTER TABLE watchlist_targets ADD COLUMN IF NOT EXISTS last_recalculated_date DATE;
+                CREATE TABLE IF NOT EXISTS watchlist_targets (
+                    ticker TEXT PRIMARY KEY,
+                    target_price NUMERIC(12,4),
+                    stop_loss NUMERIC(12,4),
+                    entry_zone NUMERIC(12,4),
+                    historical_fair_pe NUMERIC(8,2),
+                    current_trailing_pe NUMERIC(8,2),
+                    forward_eps NUMERIC(10,4),
+                    last_recalculated_date DATE,
+                    notes TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
 
-            CREATE TABLE IF NOT EXISTS agent_checkpoints (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            );
+                CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
 
-            CREATE TABLE IF NOT EXISTS institutional_reports (
-                id BIGSERIAL PRIMARY KEY,
-                source TEXT,
-                ticker TEXT,
-                subject TEXT,
-                sentiment TEXT,
-                summary TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-
-        # Ensure unique index on portfolio_holdings(ticker)
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_holdings_ticker_uniq ON portfolio_holdings (ticker);
-        """)
+                CREATE TABLE IF NOT EXISTS institutional_reports (
+                    id BIGSERIAL PRIMARY KEY,
+                    source TEXT,
+                    ticker TEXT,
+                    subject TEXT,
+                    sentiment TEXT,
+                    summary TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] core tables setup: {e}", flush=True)
 
         # Permissive Policies for Service Role
-        for tbl in ["agent_feed", "capital_ledger", "dividend_ledger", "portfolio_dividends", "trade_history", "chat_messages"]:
-            cur.execute(f"""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_policies WHERE tablename = '{tbl}' AND policyname = 'Allow service access on {tbl}'
-                    ) THEN
-                        CREATE POLICY "Allow service access on {tbl}" ON {tbl} FOR ALL USING (true);
-                    END IF;
-                END $$;
-            """)
+        try:
+            for tbl in ["agent_feed", "capital_ledger", "dividend_ledger", "portfolio_dividends", "trade_history", "chat_messages"]:
+                cur.execute(f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_policies WHERE tablename = '{tbl}' AND policyname = 'Allow service access on {tbl}'
+                        ) THEN
+                            CREATE POLICY "Allow service access on {tbl}" ON {tbl} FOR ALL USING (true);
+                        END IF;
+                    END $$;
+                """)
+        except Exception as e:
+            print(f"⚠️ [DDL Notice] policies setup: {e}", flush=True)
 
-        conn.commit()
+        try:
+            conn.commit()
+        except Exception:
+            pass
     except Exception as e:
-        if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
         print(f"⚠️ [Database Setup Warning] Could not ensure dashboard tables: {e}", flush=True)
     finally:
         if cur:
             try:
                 cur.close()
             except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
                 pass
         if conn:
             try:
@@ -1837,6 +1836,10 @@ def record_capital_transaction(tx_type: str, amount: float, notes: str = None, r
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
             VALUES (%s, %s, %s, %s, NOW(), NOW())
@@ -1878,8 +1881,20 @@ def record_capital_transaction(tx_type: str, amount: float, notes: str = None, r
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def log_dividend(
     ticker: str,
@@ -1908,94 +1923,97 @@ def log_dividend(
     from utils import normalize_ticker
     clean_ticker = normalize_ticker(ticker)
 
-    # 1. Resolve shares held
-    resolved_shares = shares if shares is not None and float(shares) > 0 else (
-        shares_held if shares_held is not None and float(shares_held) > 0 else None
-    )
-    if resolved_shares is None:
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         try:
-            conn_lk = get_db_connection()
-            cur_lk = conn_lk.cursor()
-            cur_lk.execute("SELECT shares FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker.upper(),))
-            r = cur_lk.fetchone()
-            if r and r[0] is not None and float(r[0]) > 0:
-                resolved_shares = float(r[0])
-            cur_lk.close()
-            conn_lk.close()
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
         except Exception:
             pass
 
-    if resolved_shares is None:
-        base_meta = KTRADE_BASELINE_HOLDINGS.get(clean_ticker.upper(), {})
-        resolved_shares = float(base_meta.get("shares", 0.0))
-
-    shares_val = float(resolved_shares or 0.0)
-
-    # 2. Determine WHT Rate: HUBC (IPP Section 150) = 7.5%, standard equities = 15.0%
-    if wht_rate_pct is not None and float(wht_rate_pct) >= 0:
-        wht_rate = float(wht_rate_pct)
-    elif tax_rate_pct is not None and float(tax_rate_pct) >= 0:
-        wht_rate = float(tax_rate_pct)
-    elif clean_ticker.upper() == "HUBC":
-        wht_rate = 7.50
-    else:
-        wht_rate = 15.00
-
-    tax_frac = wht_rate / 100.0
-
-    # 3. Resolve amounts
-    raw_dps = dividend_per_share if dividend_per_share is not None and float(dividend_per_share) > 0 else (
-        dps_gross if dps_gross is not None and float(dps_gross) > 0 else (
-            dps if dps is not None and float(dps) > 0 else None
+        # 1. Resolve shares held if not supplied
+        resolved_shares = shares if shares is not None and float(shares) > 0 else (
+            shares_held if shares_held is not None and float(shares_held) > 0 else None
         )
-    )
-    raw_net = net_amount if net_amount is not None and float(net_amount) > 0 else (
-        kwargs.get("total_net") or kwargs.get("net_received") or kwargs.get("amount")
-    )
-    if raw_net is not None:
-        raw_net = float(raw_net)
+        if resolved_shares is None:
+            try:
+                cur.execute("SELECT shares FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker.upper(),))
+                r = cur.fetchone()
+                if r and r[0] is not None and float(r[0]) > 0:
+                    resolved_shares = float(r[0])
+            except Exception:
+                pass
 
-    if raw_net is not None and raw_net > 0:
-        net_val = round(raw_net, 2)
-        if gross_amount is not None and float(gross_amount) >= net_val:
-            gross_val = round(float(gross_amount), 2)
-            tax_val = round(gross_val - net_val, 2)
+        if resolved_shares is None:
+            base_meta = KTRADE_BASELINE_HOLDINGS.get(clean_ticker.upper(), {})
+            resolved_shares = float(base_meta.get("shares", 0.0))
+
+        shares_val = float(resolved_shares or 0.0)
+
+        # 2. Determine WHT Rate: HUBC (IPP Section 150) = 7.5%, standard equities = 15.0%
+        if wht_rate_pct is not None and float(wht_rate_pct) >= 0:
+            wht_rate = float(wht_rate_pct)
+        elif tax_rate_pct is not None and float(tax_rate_pct) >= 0:
+            wht_rate = float(tax_rate_pct)
+        elif clean_ticker.upper() == "HUBC":
+            wht_rate = 7.50
         else:
-            gross_val = round(net_val / (1.0 - tax_frac), 2) if tax_frac < 1.0 else net_val
-            tax_val = round(gross_val - net_val, 2)
-        dps_val = round(gross_val / shares_val, 4) if shares_val > 0 else (round(float(raw_dps), 4) if raw_dps else 0.0)
-    elif raw_dps is not None and float(raw_dps) > 0:
-        dps_val = round(float(raw_dps), 4)
-        gross_val = round(shares_val * dps_val, 2) if gross_amount is None else round(float(gross_amount), 2)
-        tax_val = round(gross_val * tax_frac, 2) if tax_withheld is None else round(float(tax_withheld), 2)
-        net_val = round(gross_val - tax_val, 2)
-    elif gross_amount is not None and float(gross_amount) > 0:
-        gross_val = round(float(gross_amount), 2)
-        tax_val = round(gross_val * tax_frac, 2) if tax_withheld is None else round(float(tax_withheld), 2)
-        net_val = round(gross_val - tax_val, 2)
-        dps_val = round(gross_val / shares_val, 4) if shares_val > 0 else 0.0
-    else:
-        raise ValueError("Please provide either Total Net Received in Bank or Dividend Per Share.")
+            wht_rate = 15.00
 
-    # 4. Resolve credited_to / status
-    dest = (credited_to or status or "bank").strip().lower()
-    if dest in ("ktrade_cash", "ktrade", "sent_to_ktrade", "broker", "trading_cash"):
-        clean_credited_to = "ktrade_cash"
-        clean_status = "SENT_TO_KTRADE"
-    elif dest in ("entitled",):
-        clean_credited_to = "bank"
-        clean_status = "ENTITLED"
-    elif dest in ("announced",):
-        clean_credited_to = "bank"
-        clean_status = "ANNOUNCED"
-    else:
-        clean_credited_to = "bank"
-        clean_status = "CREDITED_TO_BANK"
+        tax_frac = wht_rate / 100.0
 
-    # 5. Insert into DB
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
+        # 3. Resolve amounts
+        raw_dps = dividend_per_share if dividend_per_share is not None and float(dividend_per_share) > 0 else (
+            dps_gross if dps_gross is not None and float(dps_gross) > 0 else (
+                dps if dps is not None and float(dps) > 0 else None
+            )
+        )
+        raw_net = net_amount if net_amount is not None and float(net_amount) > 0 else (
+            kwargs.get("total_net") or kwargs.get("net_received") or kwargs.get("amount")
+        )
+        if raw_net is not None:
+            raw_net = float(raw_net)
+
+        if raw_net is not None and raw_net > 0:
+            net_val = round(raw_net, 2)
+            if gross_amount is not None and float(gross_amount) >= net_val:
+                gross_val = round(float(gross_amount), 2)
+                tax_val = round(gross_val - net_val, 2)
+            else:
+                gross_val = round(net_val / (1.0 - tax_frac), 2) if tax_frac < 1.0 else net_val
+                tax_val = round(gross_val - net_val, 2)
+            dps_val = round(gross_val / shares_val, 4) if shares_val > 0 else (round(float(raw_dps), 4) if raw_dps else 0.0)
+        elif raw_dps is not None and float(raw_dps) > 0:
+            dps_val = round(float(raw_dps), 4)
+            gross_val = round(shares_val * dps_val, 2) if gross_amount is None else round(float(gross_amount), 2)
+            tax_val = round(gross_val * tax_frac, 2) if tax_withheld is None else round(float(tax_withheld), 2)
+            net_val = round(gross_val - tax_val, 2)
+        elif gross_amount is not None and float(gross_amount) > 0:
+            gross_val = round(float(gross_amount), 2)
+            tax_val = round(gross_val * tax_frac, 2) if tax_withheld is None else round(float(tax_withheld), 2)
+            net_val = round(gross_val - tax_val, 2)
+            dps_val = round(gross_val / shares_val, 4) if shares_val > 0 else 0.0
+        else:
+            raise ValueError("Please provide either Total Net Received in Bank or Dividend Per Share.")
+
+        # 4. Resolve credited_to / status
+        dest = (credited_to or status or "bank").strip().lower()
+        if dest in ("ktrade_cash", "ktrade", "sent_to_ktrade", "broker", "trading_cash"):
+            clean_credited_to = "ktrade_cash"
+            clean_status = "SENT_TO_KTRADE"
+        elif dest in ("entitled",):
+            clean_credited_to = "bank"
+            clean_status = "ENTITLED"
+        elif dest in ("announced",):
+            clean_credited_to = "bank"
+            clean_status = "ANNOUNCED"
+        else:
+            clean_credited_to = "bank"
+            clean_status = "CREDITED_TO_BANK"
+
+        # 5. Insert into DB
         cur.execute("""
             INSERT INTO dividend_ledger (
                 ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
@@ -2013,9 +2031,8 @@ def log_dividend(
         row = cur.fetchone()
         div_id = row[0]
 
-        # Also mirror into portfolio_dividends if table exists
+        # Mirror into portfolio_dividends
         try:
-            cur.execute("SAVEPOINT sp_port_div;")
             cur.execute("""
                 INSERT INTO portfolio_dividends (
                     id, ticker, shares, dividend_per_share, gross_amount,
@@ -2040,23 +2057,29 @@ def log_dividend(
                 tax_val, net_val, wht_rate, ex_date, payment_date,
                 clean_credited_to, notes
             ))
-            cur.execute("RELEASE SAVEPOINT sp_port_div;")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT sp_port_div;")
+        except Exception as p_err:
+            print(f"⚠️ [portfolio_dividends mirror notice]: {p_err}", flush=True)
 
-        conn.commit()
-        invalidate_financial_summary_cache()
-
-        # If credited to KTrade cash, insert into capital_ledger
+        # If credited to KTrade cash, insert into capital_ledger atomically on the same connection
         if clean_credited_to == "ktrade_cash" or clean_status == "SENT_TO_KTRADE":
             try:
-                record_capital_transaction(
-                    tx_type='DIVIDEND_SENT_TO_KTRADE',
-                    amount=net_val,
-                    reference_note=f"Reinvested Dividend #{div_id}: {clean_ticker} ({shares_val} shs @ Rs. {dps_val})"
-                )
+                cur.execute("""
+                    INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
+                    VALUES (%s, %s, %s, %s, NOW(), NOW());
+                """, (
+                    'DIVIDEND_SENT_TO_KTRADE',
+                    net_val,
+                    f"Reinvested Dividend #{div_id}: {clean_ticker} ({shares_val} shs @ Rs. {dps_val})",
+                    f"Reinvested Dividend #{div_id}: {clean_ticker}"
+                ))
             except Exception as cap_err:
                 print(f"⚠️ [Capital Ledger Sync] {cap_err}", flush=True)
+
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        invalidate_financial_summary_cache()
 
         return {
             "id": div_id,
@@ -2078,11 +2101,23 @@ def log_dividend(
             "created_at": row[12].isoformat() if row[12] else None
         }
     except Exception as e:
-        conn.rollback()
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 # Alias for backwards compatibility
 record_dividend = log_dividend
@@ -2096,6 +2131,10 @@ def transfer_dividend_to_ktrade(dividend_id_or_ticker) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         # Determine if target is ID or ticker
         is_id = False
         target_id = None
@@ -2181,8 +2220,20 @@ def transfer_dividend_to_ktrade(dividend_id_or_ticker) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def update_dividend_status(dividend_id: int, new_status: str) -> dict:
     """
@@ -2200,6 +2251,10 @@ def update_dividend_status(dividend_id: int, new_status: str) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             UPDATE dividend_ledger
             SET status = %s
@@ -2232,8 +2287,20 @@ def update_dividend_status(dividend_id: int, new_status: str) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def record_trade_execution(
     ticker: str,
@@ -2264,6 +2331,10 @@ def record_trade_execution(
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         # 1. Insert into trade_history
         cur.execute("""
             INSERT INTO trade_history (ticker, side, quantity, price, fees, fees_and_tax, net_total, executed_at, notes)
@@ -2339,8 +2410,20 @@ def record_trade_execution(
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 # Alias for backward compatibility
 record_trade = record_trade_execution
@@ -2395,6 +2478,10 @@ def sync_full_portfolio_state(
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         # Preserve any recently scraped spot prices so cached view stays accurate immediately
         existing_spot_map = {}
         try:
@@ -2524,8 +2611,20 @@ def sync_full_portfolio_state(
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def reset_ktrade_baseline_data() -> dict:
@@ -2544,6 +2643,10 @@ def reset_ktrade_baseline_data() -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS invested_cost NUMERIC(14,4);")
         cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS avg_display NUMERIC(12,4);")
         cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_abs NUMERIC(12,4) DEFAULT 0;")
@@ -2638,8 +2741,20 @@ def reset_ktrade_baseline_data() -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
     invalidate_financial_summary_cache()
     return get_complete_financial_summary(use_cached_prices=True)
@@ -2680,8 +2795,20 @@ def ensure_real_ktrade_portfolio_seeded() -> bool:
         print(f"⚠️ [Portfolio Seed Check] {e}", flush=True)
         return False
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
     if needs_seed:
         print("🔄 [KTrade Sync] Seeding verified 9-position KTrade book and locking baseline...", flush=True)
@@ -2701,11 +2828,27 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("SELECT ticker, avg_buy_price, last_price FROM portfolio_holdings WHERE shares > 0;")
         rows = cur.fetchall()
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
     if not rows:
         return {"updated": 0, "prices": {}}
@@ -2777,6 +2920,10 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         # 1. Unified Capital & Available Cash Summary from capital_ledger
         cur.execute("""
             SELECT
@@ -3107,18 +3254,43 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
         _CACHED_FIN_SUMMARY_TS = _time.time()
         return result_payload
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def get_all_dividends(limit: int = 100) -> list[dict]:
     """Retrieves all rows from dividend_ledger ordered by payment_date DESC, id DESC."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
+        cur = conn.cursor()
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             SELECT id, ticker, shares_held, dps_gross, gross_amount, tax_rate_pct,
                    tax_withheld, net_amount, ex_date, payment_date, status, notes, created_at,
-                   COALESCE(credited_to, CASE WHEN status = 'SENT_TO_KTRADE' THEN 'ktrade_cash' ELSE 'bank' END) AS credited_to
+                   COALESCE(credited_to, CASE WHEN status = 'SENT_TO_KTRADE' THEN 'ktrade_cash' ELSE 'bank' END) AS credited_to,
+                   COALESCE(shares, shares_held) AS shares,
+                   COALESCE(dividend_per_share, dps_gross) AS dividend_per_share,
+                   COALESCE(wht_rate_pct, tax_rate_pct) AS wht_rate_pct
             FROM dividend_ledger
             ORDER BY COALESCE(payment_date, created_at::date) DESC, id DESC
             LIMIT %s;
@@ -3128,12 +3300,12 @@ def get_all_dividends(limit: int = 100) -> list[dict]:
             {
                 "id": r[0],
                 "ticker": r[1],
-                "shares": float(r[2]),
+                "shares": float(r[14] if len(r) > 14 and r[14] is not None else r[2]),
                 "shares_held": float(r[2]),
-                "dividend_per_share": float(r[3]),
+                "dividend_per_share": float(r[15] if len(r) > 15 and r[15] is not None else r[3]),
                 "dps_gross": float(r[3]),
                 "gross_amount": float(r[4]),
-                "wht_rate_pct": float(r[5]),
+                "wht_rate_pct": float(r[16] if len(r) > 16 and r[16] is not None else r[5]),
                 "tax_rate_pct": float(r[5]),
                 "tax_withheld": float(r[6]),
                 "net_amount": float(r[7]),
@@ -3146,15 +3318,30 @@ def get_all_dividends(limit: int = 100) -> list[dict]:
             }
             for r in rows
         ]
+    except Exception as e:
+        print(f"⚠️ [get_all_dividends warning]: {e}", flush=True)
+        return []
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def get_capital_ledger_entries(limit: int = 50) -> list[dict]:
     """Retrieves recent cash transactions from capital_ledger."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             SELECT id, tx_type, amount, reference_note, tx_date
             FROM capital_ledger
@@ -3173,14 +3360,30 @@ def get_capital_ledger_entries(limit: int = 50) -> list[dict]:
             for r in rows
         ]
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def get_trade_history_entries(limit: int = 50) -> list[dict]:
     """Retrieves executed trade audit trail from trade_history."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             SELECT id, ticker, side, quantity, price, fees_and_tax, net_total, executed_at, notes
             FROM trade_history
@@ -3203,8 +3406,20 @@ def get_trade_history_entries(limit: int = 50) -> list[dict]:
             for r in rows
         ]
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def save_desk_manager_thought(thought_text: str):
     """
@@ -3326,6 +3541,10 @@ def get_agent_feed(limit: int = 50, category: str = None) -> list[dict]:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         if category:
             cur.execute("""
                 SELECT id, category, title, content, metadata, created_at
@@ -3360,8 +3579,20 @@ def get_agent_feed(limit: int = 50, category: str = None) -> list[dict]:
         print(f"❌ [Agent Feed] Error fetching feed: {e}")
         return []
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def save_chat_message(role: str, content: str, actions_taken: list = None) -> int:
     """Saves a user or assistant message to Supabase chat_messages."""
@@ -3370,6 +3601,10 @@ def save_chat_message(role: str, content: str, actions_taken: list = None) -> in
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             INSERT INTO chat_messages (role, content, actions_taken, created_at)
             VALUES (%s, %s, %s, NOW())
@@ -3380,14 +3615,30 @@ def save_chat_message(role: str, content: str, actions_taken: list = None) -> in
         msg_id = row[0] if row else None
         return msg_id
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 def get_chat_history(limit: int = 50) -> list[dict]:
     """Retrieves recent conversation history from chat_messages."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             SELECT id, role, content, actions_taken, created_at
             FROM chat_messages
@@ -3409,8 +3660,20 @@ def get_chat_history(limit: int = 50) -> list[dict]:
         print(f"❌ [Chat History] Error fetching history: {e}")
         return []
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 
@@ -3425,6 +3688,10 @@ def get_cached_db_prices() -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("""
             SELECT UPPER(ticker), COALESCE(NULLIF(last_price, 0), avg_buy_price), COALESCE(last_change_pct, 0)
             FROM portfolio_holdings
@@ -3436,8 +3703,20 @@ def get_cached_db_prices() -> dict:
     except Exception:
         pass
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
     return out
 
 
@@ -3455,6 +3734,10 @@ def update_portfolio_position(ticker: str, shares: float, avg_price: float) -> d
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         if shs == 0:
             cur.execute("DELETE FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker,))
             conn.commit()
@@ -3491,8 +3774,20 @@ def update_portfolio_position(ticker: str, shares: float, avg_price: float) -> d
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def bulk_update_cost_bases(cost_map: Dict[str, float]) -> dict:
@@ -3552,8 +3847,20 @@ def bulk_update_cost_bases(cost_map: Dict[str, float]) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def delete_portfolio_position(ticker: str) -> dict:
@@ -3563,6 +3870,10 @@ def delete_portfolio_position(ticker: str) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("DELETE FROM portfolio_holdings WHERE UPPER(ticker) = %s;", (clean_ticker,))
         deleted = cur.rowcount
         conn.commit()
@@ -3572,40 +3883,75 @@ def delete_portfolio_position(ticker: str) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def delete_dividend_entry(dividend_id: int) -> dict:
     """Deletes a dividend row from dividend_ledger and portfolio_dividends, reversing any linked reinvestment."""
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("SELECT id, status, net_amount FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
         existing = cur.fetchone()
         cur.execute("DELETE FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
         deleted = cur.rowcount
         try:
-            cur.execute("SAVEPOINT sp_del_port_div;")
             cur.execute("DELETE FROM portfolio_dividends WHERE id = %s;", (int(dividend_id),))
-            cur.execute("RELEASE SAVEPOINT sp_del_port_div;")
         except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT sp_del_port_div;")
+            pass
 
         if existing and existing[1] == "SENT_TO_KTRADE":
-            cur.execute(
-                "DELETE FROM capital_ledger WHERE tx_type = 'DIVIDEND_SENT_TO_KTRADE' AND (notes LIKE %s OR reference_note LIKE %s);",
-                (f"Reinvested Dividend #{int(dividend_id)}:%", f"Reinvested Dividend #{int(dividend_id)}:%"),
-            )
-        conn.commit()
+            try:
+                cur.execute(
+                    "DELETE FROM capital_ledger WHERE tx_type = 'DIVIDEND_SENT_TO_KTRADE' AND (notes LIKE %s OR reference_note LIKE %s);",
+                    (f"%#{int(dividend_id)}:%", f"%#{int(dividend_id)}:%"),
+                )
+            except Exception:
+                pass
+
+        try:
+            conn.commit()
+        except Exception:
+            pass
         invalidate_financial_summary_cache()
         return {"status": "success", "deleted": deleted, "id": int(dividend_id)}
     except Exception as e:
-        conn.rollback()
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def update_dividend_entry(dividend_id: int, payload: dict) -> dict:
@@ -3617,6 +3963,10 @@ def update_dividend_entry(dividend_id: int, payload: dict) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("SELECT id, status, net_amount, ticker FROM dividend_ledger WHERE id = %s;", (int(dividend_id),))
         row = cur.fetchone()
         if not row:
@@ -3704,8 +4054,20 @@ def update_dividend_entry(dividend_id: int, payload: dict) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def delete_trade_entry(trade_id: int) -> dict:
@@ -3713,6 +4075,10 @@ def delete_trade_entry(trade_id: int) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute(
             "SELECT ticker, side, quantity, price, notes FROM trade_history WHERE id = %s;",
             (int(trade_id),),
@@ -3741,8 +4107,20 @@ def delete_trade_entry(trade_id: int) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def delete_capital_entry(entry_id: int) -> dict:
@@ -3750,6 +4128,10 @@ def delete_capital_entry(entry_id: int) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("DELETE FROM capital_ledger WHERE id = %s;", (int(entry_id),))
         deleted = cur.rowcount
         conn.commit()
@@ -3759,8 +4141,20 @@ def delete_capital_entry(entry_id: int) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass
 
 
 def delete_agent_feed_entry(feed_id: int) -> dict:
@@ -3768,6 +4162,10 @@ def delete_agent_feed_entry(feed_id: int) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
+        except Exception:
+            pass
         cur.execute("DELETE FROM agent_feed WHERE id = %s;", (int(feed_id),))
         deleted = cur.rowcount
         conn.commit()
@@ -3776,5 +4174,17 @@ def delete_agent_feed_entry(feed_id: int) -> dict:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+            except Exception:
+                pass

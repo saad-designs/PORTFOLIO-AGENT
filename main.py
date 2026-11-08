@@ -161,7 +161,7 @@ import urllib.parse
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form, Body
-from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
@@ -1918,22 +1918,43 @@ async def get_dashboard_algorithm_state(request: Request):
 @app.get("/api/dividends")
 async def get_dashboard_dividends(request: Request, limit: int = 100):
     verify_dashboard_auth(request)
-    from portfolio_manager import get_all_dividends, get_complete_financial_summary
-    divs, summary = await asyncio.gather(
-        asyncio.to_thread(get_all_dividends, limit),
-        asyncio.to_thread(get_complete_financial_summary, True),
-    )
-    kpis = summary.get("financial_kpis", {})
+    from portfolio_manager import get_all_dividends
+    try:
+        divs = await asyncio.wait_for(
+            asyncio.to_thread(get_all_dividends, limit),
+            timeout=6.0
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"status": "error", "message": "Database query timed out"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+    total_gross = round(sum(float(d.get("gross_amount") or 0.0) for d in divs), 2)
+    total_tax = round(sum(float(d.get("tax_withheld") or 0.0) for d in divs), 2)
+    net_bank = round(sum(
+        float(d.get("net_amount") or 0.0) for d in divs
+        if str(d.get("status") or "").upper() == "CREDITED_TO_BANK" or str(d.get("credited_to") or "").lower() == "bank"
+    ), 2)
+    net_reinvested = round(sum(
+        float(d.get("net_amount") or 0.0) for d in divs
+        if str(d.get("status") or "").upper() == "SENT_TO_KTRADE" or str(d.get("credited_to") or "").lower() == "ktrade_cash"
+    ), 2)
+    pending = round(sum(
+        float(d.get("net_amount") or 0.0) for d in divs
+        if str(d.get("status") or "").upper() in ("ANNOUNCED", "ENTITLED")
+    ), 2)
+    total_received = round(net_bank + net_reinvested, 2)
+
     return {
         "status": "ok",
         "dividends": divs,
         "metrics": {
-            "total_gross_dividends": kpis.get("total_gross_dividends", 0.0),
-            "total_wht_tax_paid": kpis.get("total_wht_tax_paid", 0.0),
-            "net_dividends_in_bank": kpis.get("net_dividends_in_bank", 0.0),
-            "net_dividends_reinvested": kpis.get("net_dividends_reinvested", 0.0),
-            "total_dividends_received": kpis.get("total_dividends_received", 0.0),
-            "pending_dividends": kpis.get("pending_dividends", 0.0)
+            "total_gross_dividends": total_gross,
+            "total_wht_tax_paid": total_tax,
+            "net_dividends_in_bank": net_bank,
+            "net_dividends_reinvested": net_reinvested,
+            "total_dividends_received": total_received,
+            "pending_dividends": pending
         }
     }
 
@@ -1955,25 +1976,45 @@ async def create_dashboard_dividend(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Ticker is required."})
 
     try:
-        entry = await asyncio.to_thread(
-            log_dividend,
-            ticker=str(ticker),
-            shares=body.get("shares") or body.get("shares_held") or body.get("quantity"),
-            dividend_per_share=body.get("dividend_per_share") or body.get("dps_gross") or body.get("dps") or body.get("per_share"),
-            net_amount=body.get("net_amount") or body.get("total_net") or body.get("net_received") or body.get("amount") or body.get("net"),
-            gross_amount=body.get("gross_amount") or body.get("gross"),
-            tax_withheld=body.get("tax_withheld") or body.get("tax_amount") or body.get("wht_amount"),
-            wht_rate_pct=body.get("wht_rate_pct") or body.get("tax_rate_pct") or body.get("tax_rate") or body.get("wht_rate"),
-            payment_date=body.get("payment_date") or body.get("date") or body.get("pay_date"),
-            ex_date=body.get("ex_date") or body.get("book_closure_date"),
-            credited_to=body.get("credited_to") or body.get("status") or body.get("destination") or "bank",
-            notes=body.get("notes") or body.get("comment") or body.get("memo")
+        entry = await asyncio.wait_for(
+            asyncio.to_thread(
+                log_dividend,
+                ticker=str(ticker),
+                shares=body.get("shares") or body.get("shares_held") or body.get("quantity"),
+                dividend_per_share=body.get("dividend_per_share") or body.get("dps_gross") or body.get("dps") or body.get("per_share"),
+                net_amount=body.get("net_amount") or body.get("total_net") or body.get("net_received") or body.get("amount") or body.get("net"),
+                gross_amount=body.get("gross_amount") or body.get("gross"),
+                tax_withheld=body.get("tax_withheld") or body.get("tax_amount") or body.get("wht_amount"),
+                wht_rate_pct=body.get("wht_rate_pct") or body.get("tax_rate_pct") or body.get("tax_rate") or body.get("wht_rate"),
+                payment_date=body.get("payment_date") or body.get("date") or body.get("pay_date"),
+                ex_date=body.get("ex_date") or body.get("book_closure_date"),
+                credited_to=body.get("credited_to") or body.get("status") or body.get("destination") or "bank",
+                notes=body.get("notes") or body.get("comment") or body.get("memo")
+            ),
+            timeout=6.0
         )
         invalidate_financial_summary_cache()
         _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
         _OVERVIEW_CKPT_CACHE["ts"] = 0.0
-        overview = await get_dashboard_overview(request, refresh=False)
-        return {"status": "ok", "dividend": entry, "overview": overview}
+
+        # Update in-memory LIVE_PORTFOLIO_STATE if credited to KTrade cash
+        if entry.get("credited_to") == "ktrade_cash" or entry.get("status") == "SENT_TO_KTRADE":
+            try:
+                global LIVE_PORTFOLIO_STATE
+                if LIVE_PORTFOLIO_STATE and "totals" in LIVE_PORTFOLIO_STATE:
+                    cur_cash = float(LIVE_PORTFOLIO_STATE["totals"].get("ktrade_cash_balance", 0.0))
+                    new_cash = round(cur_cash + float(entry.get("net_amount", 0.0)), 2)
+                    LIVE_PORTFOLIO_STATE["totals"]["ktrade_cash_balance"] = new_cash
+                    if "portfolio_custody_value" in LIVE_PORTFOLIO_STATE["totals"]:
+                        LIVE_PORTFOLIO_STATE["totals"]["total_net_worth"] = round(
+                            float(LIVE_PORTFOLIO_STATE["totals"]["portfolio_custody_value"]) + new_cash, 2
+                        )
+            except Exception as st_err:
+                print(f"⚠️ [Live State Update Error]: {st_err}", flush=True)
+
+        return {"status": "ok", "dividend": entry}
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"status": "error", "message": "Dividend creation timed out"})
     except Exception as e:
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
@@ -1984,22 +2025,38 @@ async def create_dashboard_dividend(request: Request):
 async def update_dashboard_dividend(id: int, payload: DividendStatusUpdatePayload, request: Request):
     verify_dashboard_auth(request)
     from portfolio_manager import update_dividend_status, invalidate_financial_summary_cache
-    updated = await asyncio.to_thread(update_dividend_status, id, payload.status)
-    invalidate_financial_summary_cache()
-    _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
-    _OVERVIEW_CKPT_CACHE["ts"] = 0.0
-    return {"status": "success", "dividend": updated}
+    try:
+        updated = await asyncio.wait_for(
+            asyncio.to_thread(update_dividend_status, id, payload.status),
+            timeout=6.0
+        )
+        invalidate_financial_summary_cache()
+        _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
+        _OVERVIEW_CKPT_CACHE["ts"] = 0.0
+        return {"status": "success", "dividend": updated}
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"status": "error", "message": "Dividend status update timed out"})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 @app.put("/api/dashboard/dividends/{id}")
 @app.put("/api/dashboard/dividend/{id}")
 async def edit_dashboard_dividend(id: int, payload: DividendCreatePayload, request: Request):
     verify_dashboard_auth(request)
     from portfolio_manager import update_dividend_entry, invalidate_financial_summary_cache
-    updated = await asyncio.to_thread(update_dividend_entry, id, payload.dict())
-    invalidate_financial_summary_cache()
-    _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
-    _OVERVIEW_CKPT_CACHE["ts"] = 0.0
-    return {"status": "success", "dividend": updated}
+    try:
+        updated = await asyncio.wait_for(
+            asyncio.to_thread(update_dividend_entry, id, payload.dict()),
+            timeout=6.0
+        )
+        invalidate_financial_summary_cache()
+        _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
+        _OVERVIEW_CKPT_CACHE["ts"] = 0.0
+        return {"status": "success", "dividend": updated}
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"status": "error", "message": "Dividend edit timed out"})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 @app.delete("/api/dashboard/dividends/{id}")
 @app.delete("/api/dashboard/dividend/{id}")
@@ -2010,12 +2067,16 @@ async def delete_dashboard_dividend(id: int, request: Request):
     verify_dashboard_auth(request)
     from portfolio_manager import delete_dividend_entry, invalidate_financial_summary_cache
     try:
-        res = await asyncio.to_thread(delete_dividend_entry, id)
+        res = await asyncio.wait_for(
+            asyncio.to_thread(delete_dividend_entry, id),
+            timeout=6.0
+        )
         invalidate_financial_summary_cache()
         _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
         _OVERVIEW_CKPT_CACHE["ts"] = 0.0
-        overview = await get_dashboard_overview(request, refresh=False)
-        return {"status": "ok", "deleted": True, "id": id, "overview": overview}
+        return {"status": "ok", "deleted": True, "id": id}
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"status": "error", "message": "Dividend deletion timed out"})
     except Exception as e:
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
