@@ -331,6 +331,79 @@ def _normalize_psx_table_symbol(cell_el) -> str:
     return normalize_ticker(parts[0].strip())
 
 
+def _parse_dps_market_watch_html(html: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Parses https://dps.psx.com.pk/market-watch HTML table using exact data-search on td[0]
+    and data-order attributes on numeric td.right columns:
+      0: LDCP (prev_close)
+      1: OPEN
+      2: HIGH
+      3: LOW
+      4: CURRENT LIVE PRICE
+      5: CHANGE ABS
+      6: CHANGE PCT
+      7: VOLUME
+    """
+    if not html or "<table" not in html.lower():
+        return {}
+
+    rows = re.findall(r'<tr[\s\S]*?</tr>', html)
+    quotes: Dict[str, Dict[str, Any]] = {}
+    now = time.time()
+
+    for r in rows:
+        m_sym = re.search(r'<td[^>]*data-search=[\'"]([^\'"]+)[\'"]', r, re.I) or re.search(r'<td[^>]*data-order=[\'"]([A-Z0-9_\-]+)[\'"]', r, re.I)
+        if not m_sym:
+            continue
+        raw_sym = m_sym.group(1).upper().strip()
+        if not raw_sym or raw_sym in ("SCRIP", "SYMBOL") or raw_sym.isdigit():
+            continue
+
+        sym = normalize_ticker(raw_sym)
+        if not sym:
+            sym = raw_sym
+
+        right_tds = re.findall(r'<td[^>]*class=[\'"][^\'"]*right[^\'"]*[\'"][^>]*>[\s\S]*?</td>', r, re.I)
+        if len(right_tds) < 5:
+            continue
+
+        def get_val(td_str: str) -> float:
+            m_ord = re.search(r'data-order=[\'"]([^\'"]+)[\'"]', td_str, re.I)
+            if m_ord:
+                try:
+                    return float(m_ord.group(1))
+                except ValueError:
+                    pass
+            clean = re.sub(r'<[^>]+>', '', td_str).replace(',', '').strip()
+            m_num = re.search(r'[-+]?\d*\.?\d+', clean)
+            return float(m_num.group(0)) if m_num else 0.0
+
+        ldcp = get_val(right_tds[0])
+        open_p = get_val(right_tds[1])
+        high_p = get_val(right_tds[2])
+        low_p = get_val(right_tds[3])
+        current = get_val(right_tds[4])
+        change = get_val(right_tds[5]) if len(right_tds) > 5 else (current - ldcp)
+        change_pct = get_val(right_tds[6]) if len(right_tds) > 6 else ((change / ldcp * 100.0) if ldcp > 0 else 0.0)
+        volume = get_val(right_tds[7]) if len(right_tds) > 7 else 0.0
+
+        if current > 0:
+            quotes[sym] = {
+                "price": round(current, 2),
+                "change": round(change, 2),
+                "change_pct": round(change_pct, 2),
+                "change_abs": round(change, 2),
+                "prev_close": round(ldcp, 2) if ldcp > 0 else round(current - change, 2),
+                "open": round(open_p, 2) if open_p > 0 else round(current, 2),
+                "high": round(high_p, 2) if high_p > 0 else round(current, 2),
+                "low": round(low_p, 2) if low_p > 0 else round(current, 2),
+                "volume": volume,
+                "source": "psx_market_watch",
+                "timestamp": now,
+            }
+    return quotes
+
+
 def _parse_psx_bulk_table(html: str) -> Dict[str, Dict[str, Any]]:
     """
     Parses https://dps.psx.com.pk/market-watch or https://dps.psx.com.pk/screener HTML table.
@@ -338,6 +411,11 @@ def _parse_psx_bulk_table(html: str) -> Dict[str, Dict[str, Any]]:
     """
     if not html or "<table" not in html.lower():
         return {}
+
+    # 1. Try exact data-order parser first
+    dps_res = _parse_dps_market_watch_html(html)
+    if dps_res and len(dps_res) >= 5:
+        return dps_res
 
     soup = BeautifulSoup(html, "html.parser")
     quotes: Dict[str, Dict[str, Any]] = {}

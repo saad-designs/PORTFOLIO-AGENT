@@ -435,15 +435,15 @@ async def run_startup_orchestration():
 # ==============================================================================
 
 KTRADE_BASELINE_HOLDINGS: Dict[str, Dict[str, Any]] = {
-    "SYS": {"shares": 109.0, "invested_cost": 14541.51, "avg_display": 133.41, "last_price": 109.15},
-    "FFC": {"shares": 15.0, "invested_cost": 8110.98, "avg_display": 540.73, "last_price": 559.49},
-    "OGDC": {"shares": 25.0, "invested_cost": 7968.72, "avg_display": 318.75, "last_price": 306.78},
-    "MARI": {"shares": 11.0, "invested_cost": 7156.12, "avg_display": 650.56, "last_price": 631.53},
-    "HUBC": {"shares": 35.0, "invested_cost": 7238.22, "avg_display": 206.81, "last_price": 193.18},
-    "LUCK": {"shares": 6.0, "invested_cost": 2846.20, "avg_display": 474.37, "last_price": 391.38},
-    "EFERT": {"shares": 8.0, "invested_cost": 1601.65, "avg_display": 200.21, "last_price": 194.99},
-    "MEBL": {"shares": 2.0, "invested_cost": 983.69, "avg_display": 491.85, "last_price": 528.61},
-    "FABL": {"shares": 5.0, "invested_cost": 472.27, "avg_display": 94.45, "last_price": 91.40},
+    "SYS": {"shares": 109.0, "invested_cost": 14541.51, "avg_display": 133.41, "last_price": 119.48},
+    "FFC": {"shares": 15.0, "invested_cost": 8110.98, "avg_display": 540.73, "last_price": 574.04},
+    "OGDC": {"shares": 25.0, "invested_cost": 7968.72, "avg_display": 318.75, "last_price": 316.09},
+    "MARI": {"shares": 11.0, "invested_cost": 7156.12, "avg_display": 650.56, "last_price": 663.86},
+    "HUBC": {"shares": 35.0, "invested_cost": 7238.22, "avg_display": 206.81, "last_price": 208.98},
+    "LUCK": {"shares": 6.0, "invested_cost": 2846.20, "avg_display": 474.37, "last_price": 445.06},
+    "EFERT": {"shares": 8.0, "invested_cost": 1601.65, "avg_display": 200.21, "last_price": 210.88},
+    "MEBL": {"shares": 2.0, "invested_cost": 983.69, "avg_display": 491.85, "last_price": 563.92},
+    "FABL": {"shares": 5.0, "invested_cost": 472.27, "avg_display": 94.45, "last_price": 96.65},
 }
 KTRADE_LOCKED_CASH = 4357.38
 KTRADE_LOCKED_INVESTED_COST = 50919.36
@@ -742,7 +742,7 @@ async def background_quote_fetcher_loop():
     global _LATEST_QUOTES, _LAST_DB_SYNC_TS
     from market_data_scraper import fetch_realtime_psx_quotes
 
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.1)
     print("🚀 [PSX Quote Fetcher] Background Quote Fetcher loop initialized.", flush=True)
 
     while True:

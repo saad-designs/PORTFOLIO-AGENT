@@ -888,27 +888,143 @@ function fetchPsxMarketSummaryDirect() {
     });
 }
 
+function parseDpsMarketWatchHtml(html) {
+    if (!html || typeof html !== 'string') return { bySymbol: {}, count: 0 };
+    const rows = html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+    const bySymbol = {};
+    let count = 0;
+
+    for (const r of rows) {
+        const mSym = r.match(/<td[^>]*data-search=[\'"]([^\'"]+)[\'"]/i) || r.match(/<td[^>]*data-order=[\'"]([A-Z0-9_\-]+)[\'"]/i);
+        if (!mSym) continue;
+        const sym = mSym[1].toUpperCase().trim();
+        if (!sym || sym === 'SCRIP' || sym === 'SYMBOL' || /^\d+$/.test(sym)) continue;
+
+        const rightTds = r.match(/<td[^>]*class=[\'"][^\'"]*right[^\'"]*[\'"][^>]*>[\s\S]*?<\/td>/gi) || [];
+        if (rightTds.length < 5) continue;
+
+        const getVal = (tdStr) => {
+            const ord = tdStr.match(/data-order=[\'"]([^\'"]+)[\'"]/i);
+            if (ord) {
+                const v = parseFloat(ord[1]);
+                if (!isNaN(v)) return v;
+            }
+            const clean = tdStr.replace(/<[^>]+>/g, '').replace(/,/g, '').replace(/[^\d.-]/g, '').trim();
+            const v = parseFloat(clean);
+            return isNaN(v) ? 0 : v;
+        };
+
+        const ldcp = getVal(rightTds[0]);
+        const open = getVal(rightTds[1]);
+        const high = getVal(rightTds[2]);
+        const low = getVal(rightTds[3]);
+        const current = getVal(rightTds[4]);
+        const change = rightTds.length > 5 ? getVal(rightTds[5]) : (current - ldcp);
+        const change_pct = rightTds.length > 6 ? getVal(rightTds[6]) : (ldcp > 0 ? (change / ldcp) * 100 : 0);
+        const volume = rightTds.length > 7 ? parseInt(getVal(rightTds[7])) : 0;
+
+        if (current > 0) {
+            count++;
+            bySymbol[sym] = {
+                scrip: sym,
+                price: Math.round(current * 100) / 100,
+                ldcp: Math.round(ldcp * 100) / 100,
+                prev_close: Math.round(ldcp * 100) / 100,
+                open: Math.round(open * 100) / 100,
+                high: Math.round(high * 100) / 100,
+                low: Math.round(low * 100) / 100,
+                change: Math.round(change * 100) / 100,
+                change_abs: Math.round(change * 100) / 100,
+                change_pct: Math.round(change_pct * 100) / 100,
+                volume: volume,
+                source: 'chromium_psx_live',
+                timestamp: Date.now() / 1000
+            };
+        }
+    }
+    return { bySymbol, count };
+}
+
 async function extractPsxMarketQuotes() {
     if (isExtractingPsx) return;
     isExtractingPsx = true;
     try {
         psxCycleCounter++;
 
-        // 1. Direct Node fetch - 100% immune to browser navigation or execution context destruction
+        // 1. Direct Node fetch for market-summary (590+ stocks fallback)
         await fetchPsxMarketSummaryDirect();
 
-        // 2. Also check if Chromium page has updated HTML content, without in-page evaluate() fetch
+        // 2. Headless Chromium live extraction from dps.psx.com.pk/market-watch
         if (psxPage && !psxPage.isClosed()) {
             try {
-                const html = await psxPage.content();
-                const { bySymbol, count } = parseMarketSummaryHtml(html);
-                if (count > 0) {
-                    latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
+                const domQuotes = await psxPage.evaluate(() => {
+                    const out = {};
+                    const rows = document.querySelectorAll('tr');
+                    for (const tr of rows) {
+                        const tdSym = tr.querySelector('td[data-search]');
+                        if (!tdSym) continue;
+                        const sym = (tdSym.getAttribute('data-search') || tdSym.getAttribute('data-order') || '').toUpperCase().trim();
+                        if (!sym || sym === 'SCRIP' || sym === 'SYMBOL' || /^\d+$/.test(sym)) continue;
+
+                        const rightTds = tr.querySelectorAll('td.right');
+                        if (rightTds.length < 5) continue;
+
+                        const getVal = (el) => {
+                            if (!el) return 0;
+                            const ord = el.getAttribute('data-order');
+                            if (ord !== null && ord !== '') {
+                                const v = parseFloat(ord);
+                                if (!isNaN(v)) return v;
+                            }
+                            const clean = el.textContent.replace(/,/g, '').replace(/[^\d.-]/g, '');
+                            const v = parseFloat(clean);
+                            return isNaN(v) ? 0 : v;
+                        };
+
+                        const ldcp = getVal(rightTds[0]);
+                        const open = getVal(rightTds[1]);
+                        const high = getVal(rightTds[2]);
+                        const low = getVal(rightTds[3]);
+                        const current = getVal(rightTds[4]);
+                        const change = rightTds.length > 5 ? getVal(rightTds[5]) : (current - ldcp);
+                        const change_pct = rightTds.length > 6 ? getVal(rightTds[6]) : (ldcp > 0 ? (change / ldcp) * 100 : 0);
+                        const volume = rightTds.length > 7 ? parseInt(rightTds[7].getAttribute('data-order') || rightTds[7].textContent.replace(/,/g, '')) || 0 : 0;
+
+                        if (current > 0) {
+                            out[sym] = {
+                                scrip: sym,
+                                price: Math.round(current * 100) / 100,
+                                ldcp: Math.round(ldcp * 100) / 100,
+                                prev_close: Math.round(ldcp * 100) / 100,
+                                open: Math.round(open * 100) / 100,
+                                high: Math.round(high * 100) / 100,
+                                low: Math.round(low * 100) / 100,
+                                change: Math.round(change * 100) / 100,
+                                change_abs: Math.round(change * 100) / 100,
+                                change_pct: Math.round(change_pct * 100) / 100,
+                                volume: volume,
+                                source: 'chromium_psx_live',
+                                timestamp: Date.now() / 1000
+                            };
+                        }
+                    }
+                    return out;
+                });
+
+                if (domQuotes && Object.keys(domQuotes).length > 0) {
+                    latestPsxQuotes = Object.assign(latestPsxQuotes, domQuotes);
                     latestPsxTimestamp = Date.now();
                     psxMonitorError = null;
+                } else {
+                    const html = await psxPage.content();
+                    const { bySymbol, count } = parseDpsMarketWatchHtml(html);
+                    if (count > 0) {
+                        latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
+                        latestPsxTimestamp = Date.now();
+                        psxMonitorError = null;
+                    }
                 }
             } catch (pageErr) {
-                // Navigation destruction or page reload - catch silently and do not leak to status if quotes loaded
                 const errMsg = pageErr && pageErr.message ? pageErr.message : String(pageErr);
                 if (!errMsg.includes('Execution context was destroyed') && !errMsg.includes('Navigation')) {
                     if (Object.keys(latestPsxQuotes).length === 0) {
@@ -918,7 +1034,6 @@ async function extractPsxMarketQuotes() {
             }
         }
     } catch (err) {
-        // Fallback silently without throwing unhandled exceptions
         try {
             await fetchPsxMarketSummaryDirect();
         } catch (_) {}
@@ -972,8 +1087,8 @@ async function initPsxChromiumMonitor() {
         await psxPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
         await psxPage.setViewport({ width: 1280, height: 800 });
 
-        console.log('🌐 [PSX Monitor] Navigating to PSX market stream (https://dps.psx.com.pk/)...');
-        await psxPage.goto('https://dps.psx.com.pk/', {
+        console.log('🌐 [PSX Monitor] Navigating to PSX market stream (https://dps.psx.com.pk/market-watch)...');
+        await psxPage.goto('https://dps.psx.com.pk/market-watch', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
         });
