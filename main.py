@@ -699,7 +699,11 @@ async def fast_1s_heartbeat_loop():
             prev_custody_val = total_custody_val - total_day_pnl
             total_day_pnl_pct = round((total_day_pnl / prev_custody_val) * 100.0, 2) if prev_custody_val > 0 else 0.0
 
-            dominant_source = "chromium_psx_live" if any(q.get("source") == "chromium_psx_live" for q in _LATEST_QUOTES.values()) else ("tradingview_psx_live" if any("tradingview" in str(q.get("source")) for q in _LATEST_QUOTES.values()) else "realtime_feed")
+            dominant_source = "chromium_psx_live" if any(q.get("source") == "chromium_psx_live" for q in _LATEST_QUOTES.values()) else (
+                "psx_dps_realtime" if any(q.get("source") in ("dps_company_realtime", "psx_market_watch") for q in _LATEST_QUOTES.values()) else (
+                    "tradingview_psx_live" if any("tradingview" in str(q.get("source")) for q in _LATEST_QUOTES.values()) else "realtime_feed"
+                )
+            )
 
             LIVE_PORTFOLIO_STATE = {
                 "source": dominant_source,
@@ -1460,6 +1464,79 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
         _probe_bridge(),
         asyncio.to_thread(_fetch_live_engines_data),
     )
+
+    # Synchronize overview with live in-memory mark-to-market engine
+    global LIVE_PORTFOLIO_STATE
+    if LIVE_PORTFOLIO_STATE and LIVE_PORTFOLIO_STATE.get("totals"):
+        lt = LIVE_PORTFOLIO_STATE["totals"]
+        lh = LIVE_PORTFOLIO_STATE.get("holdings", {})
+
+        # Overlay financial KPIs
+        kpis = summary.setdefault("financial_kpis", {})
+        kpis["total_net_worth"] = lt.get("total_net_worth", kpis.get("total_net_worth"))
+        kpis["portfolio_market_value"] = lt.get("portfolio_custody_value", kpis.get("portfolio_market_value"))
+        kpis["portfolio_custody_value"] = lt.get("portfolio_custody_value", kpis.get("portfolio_custody_value"))
+        kpis["portfolio_cost_basis"] = lt.get("invested_cost", kpis.get("portfolio_cost_basis"))
+        kpis["ktrade_available_cash"] = lt.get("ktrade_cash_balance", kpis.get("ktrade_available_cash"))
+        kpis["ktrade_cash_balance"] = lt.get("ktrade_cash_balance", kpis.get("ktrade_cash_balance"))
+        kpis["unrealized_pnl"] = lt.get("unrealized_pnl", kpis.get("unrealized_pnl"))
+        kpis["total_unrealized_pnl"] = lt.get("unrealized_pnl", kpis.get("total_unrealized_pnl"))
+        kpis["unrealized_pnl_pct"] = lt.get("unrealized_pnl_pct", kpis.get("unrealized_pnl_pct"))
+        kpis["day_change_pkr"] = lt.get("day_pnl", kpis.get("day_change_pkr"))
+        kpis["day_change_pct"] = lt.get("day_pnl_pct", kpis.get("day_change_pct"))
+        kpis["today_day_pnl"] = lt.get("day_pnl", kpis.get("today_day_pnl"))
+        kpis["today_change_pct"] = lt.get("day_pnl_pct", kpis.get("today_change_pct"))
+        kpis["last_session_pnl_pkr"] = lt.get("day_pnl", kpis.get("last_session_pnl_pkr"))
+        kpis["last_session_pnl_pct"] = lt.get("day_pnl_pct", kpis.get("last_session_pnl_pct"))
+
+        # Overlay holdings
+        if "holdings" in summary and isinstance(summary["holdings"], list):
+            for h in summary["holdings"]:
+                sym = str(h.get("ticker", "")).upper().strip()
+                if sym in lh:
+                    live_item = lh[sym]
+                    pr = float(live_item.get("price") or 0.0)
+                    if pr > 0:
+                        h["last_price"] = pr
+                        h["current_price"] = pr
+                        h["price"] = pr
+                        h["market_value"] = live_item.get("market_value", h.get("market_value"))
+                        h["unrealized_pnl"] = live_item.get("unrealized_pnl", h.get("unrealized_pnl"))
+                        h["unrealized_pnl_pct"] = live_item.get("unrealized_pnl_pct", h.get("unrealized_pnl_pct"))
+                        h["change_pct"] = live_item.get("change_pct", h.get("change_pct"))
+                        h["change_abs"] = live_item.get("change_abs", h.get("change_abs"))
+                        h["last_change_pct"] = live_item.get("change_pct", h.get("last_change_pct"))
+                        h["last_change_abs"] = live_item.get("change_abs", h.get("last_change_abs"))
+                        h["day_change_pkr"] = live_item.get("day_pnl", h.get("day_change_pkr"))
+                        h["prev_close"] = live_item.get("prev_close", h.get("prev_close"))
+                        h["source"] = live_item.get("source", "realtime_feed")
+                        tot_cust = float(lt.get("portfolio_custody_value") or 0.0)
+                        if tot_cust > 0:
+                            h["weight_pct"] = round((float(h["market_value"]) / tot_cust) * 100.0, 1)
+
+        # Dynamic Top Movers for Scraped Intelligence card
+        if isinstance(live_engines, dict) and "prices" in live_engines:
+            sorted_movers = sorted(
+                lh.values(),
+                key=lambda x: abs(float(x.get("change_pct", 0.0))),
+                reverse=True
+            )
+            top_movers_list = []
+            for item in sorted_movers[:5]:
+                cp = float(item.get("change_pct", 0.0))
+                dp = float(item.get("day_pnl", 0.0))
+                top_movers_list.append({
+                    "ticker": item.get("ticker"),
+                    "change_pct": cp,
+                    "day_change_pkr": dp,
+                    "type": "gainer" if cp >= 0 else "loser"
+                })
+            dom_src = LIVE_PORTFOLIO_STATE.get("source", "dps_realtime")
+            live_engines["prices"]["status"] = "ONLINE"
+            live_engines["prices"]["engine_name"] = "PSX Official Data Portal (dps.psx.com.pk) & Chromium Live Engine"
+            live_engines["prices"]["last_poll"] = f"Live PSX Stream ({dom_src}) · Tick #{LIVE_PORTFOLIO_STATE.get('tick_seq', 1)}"
+            if top_movers_list:
+                live_engines["prices"]["top_movers"] = top_movers_list
 
     now = time.time()
     model_cooldowns = {

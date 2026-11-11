@@ -3619,6 +3619,9 @@
                   : h.weight_pct;
               }
             }
+            if (APP_STATE.activeTab === 'overview' || !APP_STATE.activeTab) {
+              renderPortfolioBarChart(fs.holdings);
+            }
           }
         }
       } catch (_) {

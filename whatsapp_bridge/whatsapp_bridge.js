@@ -720,7 +720,9 @@ const SCRIP_TO_SYMBOL = {
     'Systems Limited': 'SYS',
     'Fauji Fert': 'FFC',
     'Fauji Fertilizer': 'FFC',
+    'Fauji FertXD': 'FFC',
     'Oil & Gas Dev': 'OGDC',
+    'Oil & Gas DevXD': 'OGDC',
     'Oil and Gas Development': 'OGDC',
     'Mari Energies Ltd.': 'MARI',
     'Mari Petroleum': 'MARI',
@@ -729,15 +731,23 @@ const SCRIP_TO_SYMBOL = {
     'Hub Power': 'HUBC',
     'Lucky Cement': 'LUCK',
     'Engro FertertXD': 'EFERT',
+    'Engro Fertert': 'EFERT',
     'Engro Fertilizer': 'EFERT',
     'Engro Fert': 'EFERT',
     'Meezan Bank Ltd': 'MEBL',
+    'Meezan Bank LtdXD': 'MEBL',
     'Meezan Bank': 'MEBL',
     'Faysal Bank': 'FABL',
+    'Faysal BankXD': 'FABL',
     'Faysal Bank Ltd': 'FABL',
     'Pakistan Petroleum': 'PPL',
+    'Pak PetroleumXD': 'PPL',
+    'P.P.L.': 'PPL',
+    'P.P.L.XD': 'PPL',
     'Pak Oilfields': 'POL',
     'Pakistan State Oil': 'PSO',
+    'P.S.O.': 'PSO',
+    'P.S.O.XD': 'PSO',
     'United Bank': 'UBL',
     'MCB Bank': 'MCB',
     'Habib Bank': 'HBL',
@@ -765,47 +775,66 @@ function parseMarketSummaryHtml(html) {
     const rows = html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
     const bySymbol = {};
     let count = 0;
+
     for (const r of rows) {
-        let tds = (r.match(/<td[\s\S]*?<\/td>/gi) || []).map(t => t.replace(/<[^>]+>/g, '').trim());
-        if (tds.length >= 9 && tds[0] === '') tds = tds.slice(1);
-        if (tds.length >= 8 && tds[0] && tds[0] !== 'SCRIP') {
-            const scrip = tds[0];
-            const ldcp = parseFloat(tds[1].replace(/,/g, '')) || 0;
-            const open = parseFloat(tds[2].replace(/,/g, '')) || 0;
-            const high = parseFloat(tds[3].replace(/,/g, '')) || 0;
-            const low = parseFloat(tds[4].replace(/,/g, '')) || 0;
-            const current = parseFloat(tds[5].replace(/,/g, '')) || 0;
-            const change = parseFloat(tds[6].replace(/,/g, '')) || 0;
-            const volume = parseInt(tds[7].replace(/,/g, '')) || 0;
+        let tds = (r.match(/<t[hd][\s\S]*?<\/t[hd]>/gi) || []).map(t => t.replace(/<[^>]+>/g, '').trim());
+        if (tds.length < 7) continue;
 
-            if (current > 0) {
-                count++;
-                const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
-                const quote = {
-                    scrip,
-                    price: Math.round(current * 100) / 100,
-                    ldcp: Math.round(ldcp * 100) / 100,
-                    prev_close: Math.round(ldcp * 100) / 100,
-                    open: Math.round(open * 100) / 100,
-                    high: Math.round(high * 100) / 100,
-                    low: Math.round(low * 100) / 100,
-                    change: Math.round(change * 100) / 100,
-                    change_abs: Math.round(change * 100) / 100,
-                    change_pct: change_pct,
-                    volume: volume,
-                    source: 'chromium_psx_live',
-                    timestamp: Date.now() / 1000
-                };
-                bySymbol[scrip.toUpperCase()] = quote;
-                const cleanScrip = scrip.replace(/XD$/i, '').replace(/NC$/i, '').trim();
-                if (SCRIP_TO_SYMBOL[scrip]) bySymbol[SCRIP_TO_SYMBOL[scrip]] = quote;
-                else if (SCRIP_TO_SYMBOL[cleanScrip]) bySymbol[SCRIP_TO_SYMBOL[cleanScrip]] = quote;
+        // Strip leading empty or numeric sequence cell if present
+        if (tds[0] === '' || /^\d+$/.test(tds[0])) {
+            tds = tds.slice(1);
+        }
+        if (tds.length < 7) continue;
+        const scrip = tds[0];
+        if (!scrip || scrip.toUpperCase() === 'SCRIP' || scrip.toUpperCase() === 'SYMBOL') continue;
 
-                const parts = scrip.split('-');
-                if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
-                    const baseSym = parts[0].toUpperCase();
-                    if (!bySymbol[baseSym]) bySymbol[baseSym] = quote;
-                }
+        const cleanNum = (str) => {
+            if (!str) return 0;
+            const clean = str.replace(/,/g, '').replace(/[^\d.-]/g, '');
+            const val = parseFloat(clean);
+            return isNaN(val) ? 0 : val;
+        };
+
+        const ldcp = cleanNum(tds[1]);
+        const open = cleanNum(tds[2]);
+        const high = cleanNum(tds[3]);
+        const low = cleanNum(tds[4]);
+        const current = cleanNum(tds[5]);
+        const change = cleanNum(tds[6]);
+        const volume = parseInt((tds[7] || '0').replace(/,/g, '')) || 0;
+
+        if (current > 0) {
+            count++;
+            const change_pct = ldcp > 0 ? Math.round(((change / ldcp) * 100) * 100) / 100 : 0;
+            const quote = {
+                scrip,
+                price: Math.round(current * 100) / 100,
+                ldcp: Math.round(ldcp * 100) / 100,
+                prev_close: Math.round(ldcp * 100) / 100,
+                open: Math.round(open * 100) / 100,
+                high: Math.round(high * 100) / 100,
+                low: Math.round(low * 100) / 100,
+                change: Math.round(change * 100) / 100,
+                change_abs: Math.round(change * 100) / 100,
+                change_pct: change_pct,
+                volume: volume,
+                source: 'chromium_psx_live',
+                timestamp: Date.now() / 1000
+            };
+
+            const cleanScrip = scrip
+                .replace(/(\.|\s*)(XD|NC|XB|XR|WU|SPOT|PRO)$/i, '')
+                .replace(/\./g, '')
+                .trim();
+
+            const sym = SCRIP_TO_SYMBOL[scrip] || SCRIP_TO_SYMBOL[cleanScrip] || cleanScrip.toUpperCase();
+            bySymbol[sym] = quote;
+            bySymbol[scrip.toUpperCase()] = quote;
+
+            const parts = scrip.split('-');
+            if (parts.length === 2 && ['NOV', 'NOVB', 'NOVC', 'DEC', 'DECB', 'JAN', 'FEB'].includes(parts[1])) {
+                const baseSym = parts[0].toUpperCase();
+                if (!bySymbol[baseSym]) bySymbol[baseSym] = quote;
             }
         }
     }
