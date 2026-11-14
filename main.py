@@ -1093,9 +1093,17 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                     # b) If .git is missing for any reason, initialize it automatically
                     git_dir = os.path.join(repo_dir, ".git")
                     if not os.path.isdir(git_dir):
-                        subprocess.run([git_bin, "init"], cwd=repo_dir, check=True, capture_output=True, text=True, timeout=15)
+                        subprocess.run([git_bin, "init"], cwd=repo_dir, check=True, capture_output=True, text=True, timeout=10)
                         subprocess.run([git_bin, "remote", "add", "origin", repo_url], cwd=repo_dir, check=False, capture_output=True, text=True, timeout=10)
                     else:
+                        # Clean stale index.lock if lingering
+                        lock_file = os.path.join(git_dir, "index.lock")
+                        if os.path.exists(lock_file):
+                            try:
+                                os.unlink(lock_file)
+                                print(f"🧹 [Auto Git Pull] Removed stale git lock {lock_file}", flush=True)
+                            except Exception:
+                                pass
                         remotes_proc = subprocess.run([git_bin, "remote"], cwd=repo_dir, capture_output=True, text=True, timeout=5)
                         remotes = (remotes_proc.stdout or "").split()
                         if "origin" not in remotes:
@@ -1104,7 +1112,7 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                             subprocess.run([git_bin, "remote", "set-url", "origin", repo_url], cwd=repo_dir, check=False, capture_output=True, text=True, timeout=5)
 
                     # c) Run git fetch origin main && git reset --hard origin/main
-                    fetch_proc = subprocess.run([git_bin, "fetch", "origin", "main"], cwd=repo_dir, capture_output=True, text=True, timeout=30)
+                    fetch_proc = subprocess.run([git_bin, "fetch", "origin", "main"], cwd=repo_dir, capture_output=True, text=True, timeout=10)
                     if fetch_proc.returncode != 0:
                         detail = (fetch_proc.stderr or fetch_proc.stdout or "git fetch origin main failed").strip()
                         return {
@@ -1649,6 +1657,16 @@ async def execute_allocation_central_brain(request: Request, payload: CentralBra
     res = await asyncio.to_thread(execute_central_brain_allocation, payload.dict())
     return res
 
+@app.post("/api/brain/evaluate-now")
+@app.post("/api/dashboard/brain/evaluate-now")
+@app.get("/api/brain/opportunities")
+@app.get("/api/dashboard/brain/opportunities")
+async def evaluate_brain_golden_opportunities(request: Request):
+    verify_dashboard_auth(request)
+    from central_brain import scan_shariah_golden_opportunities
+    opps = await asyncio.to_thread(scan_shariah_golden_opportunities, False)
+    return opps
+
 @app.get("/api/test/all-features")
 async def test_all_system_features(request: Request):
     """
@@ -2151,6 +2169,22 @@ async def delete_dashboard_dividend(id: int, request: Request):
         invalidate_financial_summary_cache()
         _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
         _OVERVIEW_CKPT_CACHE["ts"] = 0.0
+
+        try:
+            from portfolio_manager import get_complete_financial_summary
+            summary = get_complete_financial_summary(use_cached_prices=True)
+            kpis = summary.get("financial_kpis", {})
+            global LIVE_PORTFOLIO_STATE
+            if LIVE_PORTFOLIO_STATE and "totals" in LIVE_PORTFOLIO_STATE:
+                new_cash = round(float(kpis.get("ktrade_cash_balance", 0.0)), 2)
+                LIVE_PORTFOLIO_STATE["totals"]["ktrade_cash_balance"] = new_cash
+                if "portfolio_custody_value" in LIVE_PORTFOLIO_STATE["totals"]:
+                    LIVE_PORTFOLIO_STATE["totals"]["total_net_worth"] = round(
+                        float(LIVE_PORTFOLIO_STATE["totals"]["portfolio_custody_value"]) + new_cash, 2
+                    )
+        except Exception:
+            pass
+
         return {"status": "ok", "deleted": True, "id": id}
     except asyncio.TimeoutError:
         return JSONResponse(status_code=504, content={"status": "error", "message": "Dividend deletion timed out"})
@@ -2190,19 +2224,35 @@ async def get_dashboard_trades(request: Request, limit: int = 100):
     return {"status": "success", "trades": entries}
 
 @app.post("/api/dashboard/trades")
+@app.post("/api/dashboard/trade")
+@app.post("/api/portfolio/trade")
 async def create_dashboard_trade(payload: TradeRecordPayload, request: Request):
     verify_dashboard_auth(request)
-    from portfolio_manager import record_trade
-    trade = await asyncio.to_thread(
-        record_trade,
-        ticker=payload.ticker,
-        side=payload.side,
-        quantity=payload.quantity,
-        price=payload.price,
-        fees_and_tax=payload.fees_and_tax or 0.00,
-        notes=payload.notes
-    )
-    return {"status": "success", "trade": trade}
+    from portfolio_manager import record_trade, is_shariah_compliant_stock
+    ticker_clean = (payload.ticker or "").upper().strip()
+    if not is_shariah_compliant_stock(ticker_clean):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": f"❌ BLOCKED: {ticker_clean} is NOT Shariah-compliant. Saad's portfolio is strictly Islamic equity only (KMIALLSHR / KMI30). Conventional banks and non-Shariah stocks are prohibited."
+            }
+        )
+    try:
+        trade = await asyncio.to_thread(
+            record_trade,
+            ticker=payload.ticker,
+            side=payload.side,
+            quantity=payload.quantity,
+            price=payload.price,
+            fees_and_tax=payload.fees_and_tax or 0.00,
+            notes=payload.notes
+        )
+        return {"status": "success", "trade": trade}
+    except ValueError as ve:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(ve)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 @app.delete("/api/dashboard/trades/{id}")
 async def delete_dashboard_trade(id: int, request: Request):

@@ -1663,6 +1663,81 @@ def fetch_supabase_equity_curve() -> pd.DataFrame:
 
 
 # ====================================================================
+# STRICT SHARIAH-COMPLIANT ONLY GATEKEEPER (KMIALLSHR / KMI30)
+# ====================================================================
+
+KMI_SHARIAH_WHITELIST = {
+    "SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL",
+    "PPL", "POL", "PSO", "ENGRO", "DGKC", "MLCF", "CHCC", "FCCL", "UNITY",
+    "PRL", "ATRL", "NRL", "PAEL", "WTL", "TELE", "LOTCHEM", "CNERGY",
+    "AIRLINK", "ILP", "SEARL", "AGP", "TGL", "GHNI", "INIL", "ISL", "ASTL",
+    "MUGHAL", "EPCL", "SPL", "SNGP", "SSGC", "SAZEW", "MTL", "GADT", "KOHC",
+    "FEROZ", "GLAXO", "HCL", "KAPCO", "NATF", "NESTLE", "NICL", "NML", "OCTOPUS",
+    "PIOC", "PSMC", "SHEL", "TOMCL", "TRG", "YOUW"
+}
+
+NON_SHARIAH_BLACKLIST = {
+    # Conventional Banks (Riba / Interest based)
+    "UBL", "MCB", "HBL", "BAHL", "ABL", "NBP", "BIPL", "BOK", "BOP", "JSBL",
+    "SAMBA", "SNBL", "SCBPL", "AKBL",
+    # Conventional Insurance & Leasing
+    "EFUG", "EFUL", "AICL", "IGIHL", "ASIC", "CICL", "JGICL", "OLPL",
+    # Prohibited Goods / Services (Alcohol / Tobacco / Gambling)
+    "MUREB", "PAKT", "PMPK"
+}
+
+
+def is_shariah_compliant_stock(ticker: str) -> bool:
+    """
+    Strict Shariah Compliance Gatekeeper:
+    Saad's portfolio is 100% Shariah-compliant. Under no circumstances should
+    any non-Shariah stock ever be recommended, traded, or added to active custody.
+    Checks:
+    1. Immediate rejection if in NON_SHARIAH_BLACKLIST (conventional banks, conventional insurance, alcohol/tobacco).
+    2. Checked against verified KMI_SHARIAH_WHITELIST and local kmi30_cache.json / kmi_all_cache.json.
+    3. Dynamic check from DPS Market-Watch table tag (KMIALLSHR / KMI30).
+    """
+    from utils import normalize_ticker
+    sym = normalize_ticker(ticker)
+    if not sym:
+        return False
+    sym_u = sym.upper().strip()
+
+    if sym_u in NON_SHARIAH_BLACKLIST:
+        return False
+
+    if sym_u in KMI_SHARIAH_WHITELIST:
+        return True
+
+    # Check cached KMI list
+    kmi_cache = os.path.join(os.path.dirname(__file__), "kmi30_cache.json")
+    if os.path.exists(kmi_cache):
+        try:
+            with open(kmi_cache, "r", encoding="utf-8") as f:
+                kmi_data = json.load(f)
+                tickers = kmi_data if isinstance(kmi_data, list) else kmi_data.get("tickers", [])
+                if sym_u in [t.upper().strip() for t in tickers]:
+                    return True
+        except Exception:
+            pass
+
+    # Dynamic DPS check via market data scraper cache
+    try:
+        from market_data_scraper import _BULK_QUOTES_CACHE
+        if sym_u in _BULK_QUOTES_CACHE:
+            q = _BULK_QUOTES_CACHE[sym_u]
+            if q.get("is_shariah") is True:
+                return True
+            indices = str(q.get("indices") or "").upper()
+            if "KMIALLSHR" in indices or "KMI30" in indices:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+# ====================================================================
 # PSX INVESTMENT, CAPITAL & 3-STAGE DIVIDEND ACCOUNTING ENGINE
 # ====================================================================
 
@@ -1947,8 +2022,12 @@ def log_dividend(
                 pass
 
         if resolved_shares is None:
-            base_meta = KTRADE_BASELINE_HOLDINGS.get(clean_ticker.upper(), {})
-            resolved_shares = float(base_meta.get("shares", 0.0))
+            try:
+                from main import KTRADE_BASELINE_HOLDINGS
+                base_meta = KTRADE_BASELINE_HOLDINGS.get(clean_ticker.upper(), {})
+                resolved_shares = float(base_meta.get("shares", 0.0))
+            except Exception:
+                resolved_shares = 0.0
 
         shares_val = float(resolved_shares or 0.0)
 
@@ -2317,6 +2396,9 @@ def record_trade_execution(
     """
     from utils import normalize_ticker
     clean_ticker = normalize_ticker(ticker)
+    if not is_shariah_compliant_stock(clean_ticker):
+        raise ValueError(f"❌ BLOCKED: {clean_ticker} is NOT Shariah-compliant. Saad's portfolio is strictly Islamic equity only (KMIALLSHR / KMI30). Conventional banks and non-Shariah stocks are prohibited.")
+
     clean_side = side.strip().upper()
     if clean_side not in {'BUY', 'SELL'}:
         raise ValueError("Trade side must be 'BUY' or 'SELL'.")

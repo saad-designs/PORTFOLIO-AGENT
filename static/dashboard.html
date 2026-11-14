@@ -1898,9 +1898,17 @@
 
     /* < 440px: Retain 2x2 KPI grid and responsive header actions */
     @media (max-width: 440px) {
+      html, body, .app-shell, .workspace, .main-stage, .tab-stage {
+        max-width: 100vw !important;
+        overflow-x: hidden !important;
+        box-sizing: border-box !important;
+      }
       .header-actions {
         width: 100%;
         justify-content: space-between;
+      }
+      .brain-toolbar > div {
+        min-width: 100% !important;
       }
     }
   </style>
@@ -2251,9 +2259,26 @@
                 <button class="arch-btn-accent" id="btn-run-central-brain" onclick="runCentralBrainDecision()">
                   <span>Run Central Brain Decision ↗</span>
                 </button>
+                <button class="arch-btn-accent" id="btn-scan-opportunities" onclick="runGoldenOpportunityScan()" style="background:#142A1D;border-color:var(--lime);color:var(--lime);" title="Scan Saad's active holdings for cost-basis averaging and dividend value opportunities">
+                  <span>⚡ Scan Golden Opportunities ↗</span>
+                </button>
                 <button class="arch-btn" onclick="openSystemVerifyModal()">
                   <span>Feeder Verification Suite</span>
                 </button>
+              </div>
+
+              <!-- Saad's Personal Wealth Manager: Golden Opportunities Box -->
+              <div id="brain-opportunities-stage" style="display: none; margin-bottom: 20px; border: 1px solid #243529; border-radius: 10px; background: #0C120F; padding: 16px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid #1E2B23; padding-bottom: 8px;">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 15px; font-weight: 800; color: var(--lime);">🌟 Saad's Golden Opportunity Detector</span>
+                    <span class="badge badge-emerald" style="font-size: 10px;">100% KMI SHARIAH CERTIFIED</span>
+                  </div>
+                  <div style="font-size: 11.5px; color: var(--muted); font-family: monospace;" id="opps-available-cash-label">
+                    Available Dry Powder: Rs. 4,357.38
+                  </div>
+                </div>
+                <div id="opps-cards-container" style="display: flex; flex-direction: column; gap: 12px;"></div>
               </div>
 
               <!-- Live Decision Output Stage -->
@@ -4334,7 +4359,10 @@
               <div class="ticker-badge-row">
                 <div class="ticker-circle">${escapeHtml(h.ticker.slice(0, 4))}</div>
                 <div>
-                  <div style="font-weight:700;color:var(--text);">${escapeHtml(h.ticker)}</div>
+                  <div style="font-weight:700;color:var(--text);display:flex;align-items:center;gap:5px;">
+                    <span>${escapeHtml(h.ticker)}</span>
+                    <span class="badge badge-emerald" style="font-size:9.5px;padding:1px 5px;" title="100% PSX KMI Shariah Compliant">☪ KMI</span>
+                  </div>
                   <div style="font-size:11.5px;color:var(--muted);">${escapeHtml(h.sector)}</div>
                 </div>
               </div>
@@ -4513,6 +4541,103 @@
       switchTab('overview');
       const el = document.getElementById('central-brain-allocator-card');
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function runGoldenOpportunityScan() {
+      const btn = document.getElementById('btn-scan-opportunities');
+      const stage = document.getElementById('brain-opportunities-stage');
+      const container = document.getElementById('opps-cards-container');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>Scanning Shariah Universe...</span>';
+      }
+      try {
+        const res = await apiFetch('/api/brain/evaluate-now', { method: 'POST' });
+        const data = await res.json();
+        if (!stage || !container) return;
+        stage.style.display = 'block';
+
+        const opps = data.golden_opportunities || [];
+        const cashLabel = document.getElementById('opps-available-cash-label');
+        if (cashLabel && data.investor_profile?.available_dry_powder_pkr !== undefined) {
+          cashLabel.textContent = `Available Dry Powder: ${fmtPKR(data.investor_profile.available_dry_powder_pkr)}`;
+        }
+
+        if (!opps.length) {
+          container.innerHTML = `
+            <div style="padding:14px;background:#0E1612;border:1px solid #1E2623;border-radius:8px;font-size:12.5px;color:var(--muted);">
+              No active holdings currently down >3% from entry. Portfolio cost-basis is healthy. Click "Run Central Brain Decision" to evaluate new capital additions.
+            </div>
+          `;
+          showToast('Scan complete: No drawdowns >3% in active holdings.');
+          return;
+        }
+
+        container.innerHTML = opps.map((op) => `
+          <div style="background:#0F1813;border:1px solid #233A2A;border-radius:8px;padding:14px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span class="badge badge-lime">${escapeHtml(op.type)}</span>
+                <span class="badge badge-emerald">☪ KMI SHARIAH</span>
+                <strong style="font-size:16px;color:#F0F4F2;font-family:monospace;">${escapeHtml(op.ticker)}</strong>
+                <span style="font-size:12px;color:var(--danger);font-family:monospace;">${Number(op.drawdown_pct).toFixed(2)}% from entry</span>
+              </div>
+              <span class="badge badge-warn">${escapeHtml(op.urgency)} PRIORITY</span>
+            </div>
+            <div style="font-size:13.5px;font-weight:700;color:#7CE751;margin-bottom:6px;">
+              ${escapeHtml(op.action_headline)}
+            </div>
+            <p style="font-size:12px;color:#B4C2BB;line-height:1.55;margin-bottom:12px;">
+              ${escapeHtml(op.justification)}
+            </p>
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:#080C0A;border:1px solid #1C2B21;border-radius:6px;padding:10px 14px;">
+              <div style="display:flex;flex-wrap:wrap;gap:16px;font-size:12px;font-family:monospace;">
+                <div><span style="color:var(--muted);">Spot:</span> <strong>Rs. ${Number(op.current_spot_price).toFixed(2)}</strong></div>
+                <div><span style="color:var(--muted);">Current Avg:</span> <strong>Rs. ${Number(op.avg_buy_price).toFixed(2)}</strong></div>
+                <div><span style="color:var(--muted);">New Avg:</span> <strong style="color:var(--lime);">Rs. ${Number(op.new_avg_buy_price).toFixed(2)}</strong></div>
+                <div><span style="color:var(--muted);">Savings/sh:</span> <strong style="color:var(--emerald);">-Rs. ${Number(op.cost_reduction_pkr).toFixed(2)}</strong></div>
+              </div>
+              <button class="arch-btn-accent" style="padding:6px 14px;font-size:12px;" onclick="executeDcaOrder('${escapeHtml(op.ticker)}', ${op.affordable_shares}, ${op.current_spot_price})">
+                <span>Execute ${op.affordable_shares} shs DCA Buy ↗</span>
+              </button>
+            </div>
+          </div>
+        `).join('');
+
+        showToast(`Found ${opps.length} golden DCA opportunit${opps.length === 1 ? 'y' : 'ies'}!`);
+      } catch (err) {
+        showToast('Scan failed: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<span>⚡ Scan Golden Opportunities ↗</span>';
+        }
+      }
+    }
+
+    async function executeDcaOrder(ticker, shares, price) {
+      if (!confirm(`Execute DCA Buy order for ${shares} shares of ${ticker} @ Rs. ${Number(price).toFixed(2)} (Total: ${fmtPKR(shares * price)})?`)) return;
+      try {
+        const res = await apiFetch('/api/dashboard/trades', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker: ticker,
+            side: 'BUY',
+            quantity: shares,
+            price: price,
+            notes: 'Executed via Personal Wealth Manager Golden Opportunity DCA'
+          })
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || `Server returned ${res.status}`);
+        }
+        showToast(`DCA Buy order executed: +${shares} ${ticker}!`);
+        await Promise.all([loadOverviewData(false), loadTransactionsData()]);
+      } catch (err) {
+        showToast('DCA Execution failed: ' + err.message);
+      }
     }
 
     async function runCentralBrainDecision() {

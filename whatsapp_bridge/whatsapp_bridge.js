@@ -900,6 +900,11 @@ function parseDpsMarketWatchHtml(html) {
         const sym = mSym[1].toUpperCase().trim();
         if (!sym || sym === 'SCRIP' || sym === 'SYMBOL' || /^\d+$/.test(sym)) continue;
 
+        const tds = r.match(/<td[\s\S]*?<\/td>/gi) || [];
+        const sector = tds.length > 1 ? tds[1].replace(/<[^>]+>/g, '').trim() : '';
+        const indices = tds.length > 2 ? tds[2].replace(/<[^>]+>/g, '').toUpperCase().trim() : '';
+        const is_shariah = indices.includes('KMIALLSHR') || indices.includes('KMI30');
+
         const rightTds = r.match(/<td[^>]*class=[\'"][^\'"]*right[^\'"]*[\'"][^>]*>[\s\S]*?<\/td>/gi) || [];
         if (rightTds.length < 5) continue;
 
@@ -927,6 +932,7 @@ function parseDpsMarketWatchHtml(html) {
             count++;
             bySymbol[sym] = {
                 scrip: sym,
+                symbol: sym,
                 price: Math.round(current * 100) / 100,
                 ldcp: Math.round(ldcp * 100) / 100,
                 prev_close: Math.round(ldcp * 100) / 100,
@@ -937,6 +943,9 @@ function parseDpsMarketWatchHtml(html) {
                 change_abs: Math.round(change * 100) / 100,
                 change_pct: Math.round(change_pct * 100) / 100,
                 volume: volume,
+                sector: sector,
+                indices: indices,
+                is_shariah: is_shariah,
                 source: 'chromium_psx_live',
                 timestamp: Date.now() / 1000
             };
@@ -951,20 +960,22 @@ async function extractPsxMarketQuotes() {
     try {
         psxCycleCounter++;
 
-        // 1. Direct Node fetch for market-summary (590+ stocks fallback)
-        await fetchPsxMarketSummaryDirect();
-
-        // 2. Headless Chromium live extraction from dps.psx.com.pk/market-watch
+        // 1. Persistent Headless Chromium DOM Live Extraction (1.5s real-time DPS stream)
         if (psxPage && !psxPage.isClosed()) {
             try {
                 const domQuotes = await psxPage.evaluate(() => {
                     const out = {};
                     const rows = document.querySelectorAll('tr');
                     for (const tr of rows) {
-                        const tdSym = tr.querySelector('td[data-search]');
+                        const tdSym = tr.querySelector('td[data-search]') || tr.querySelector('td');
                         if (!tdSym) continue;
-                        const sym = (tdSym.getAttribute('data-search') || tdSym.getAttribute('data-order') || '').toUpperCase().trim();
+                        const sym = (tdSym.getAttribute('data-search') || tdSym.getAttribute('data-order') || tdSym.textContent || '').toUpperCase().trim();
                         if (!sym || sym === 'SCRIP' || sym === 'SYMBOL' || /^\d+$/.test(sym)) continue;
+
+                        const tds = tr.querySelectorAll('td');
+                        const sector = (tds.length > 1 ? tds[1].textContent : '').trim();
+                        const indices = (tds.length > 2 ? (tds[2].getAttribute('data-order') || tds[2].textContent) : '').toUpperCase();
+                        const is_shariah = indices.includes('KMIALLSHR') || indices.includes('KMI30');
 
                         const rightTds = tr.querySelectorAll('td.right');
                         if (rightTds.length < 5) continue;
@@ -993,6 +1004,7 @@ async function extractPsxMarketQuotes() {
                         if (current > 0) {
                             out[sym] = {
                                 scrip: sym,
+                                symbol: sym,
                                 price: Math.round(current * 100) / 100,
                                 ldcp: Math.round(ldcp * 100) / 100,
                                 prev_close: Math.round(ldcp * 100) / 100,
@@ -1003,6 +1015,9 @@ async function extractPsxMarketQuotes() {
                                 change_abs: Math.round(change * 100) / 100,
                                 change_pct: Math.round(change_pct * 100) / 100,
                                 volume: volume,
+                                sector: sector,
+                                indices: indices,
+                                is_shariah: is_shariah,
                                 source: 'chromium_psx_live',
                                 timestamp: Date.now() / 1000
                             };
@@ -1033,11 +1048,19 @@ async function extractPsxMarketQuotes() {
                 }
             }
         }
+
+        // 2. Direct fast HTTP fallback if quotes are still empty or stale
+        if (Object.keys(latestPsxQuotes).length === 0 || (latestPsxTimestamp && Date.now() - latestPsxTimestamp > 15000)) {
+            await fetchPsxMarketSummaryDirect();
+        }
     } catch (err) {
         try {
             await fetchPsxMarketSummaryDirect();
         } catch (_) {}
     } finally {
+        isExtractingPsx = false;
+    }
+}
         isExtractingPsx = false;
     }
 }
@@ -1130,9 +1153,9 @@ app.listen(BRIDGE_PORT, '0.0.0.0', () => {
         }
     }).catch(() => {});
 
-    // 2. Poll every 2 seconds
+    // 2. Poll every 1.5 seconds (live DPS real-time PSX monitor)
     if (psxPollTimer) clearInterval(psxPollTimer);
-    psxPollTimer = setInterval(extractPsxMarketQuotes, 2000);
+    psxPollTimer = setInterval(extractPsxMarketQuotes, 1500);
 
     // 3. Launch Chromium monitor asynchronously without blocking Express
     initPsxChromiumMonitor().catch((err) => {

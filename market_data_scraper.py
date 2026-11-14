@@ -363,6 +363,13 @@ def _parse_dps_market_watch_html(html: str) -> Dict[str, Dict[str, Any]]:
         if not sym:
             sym = raw_sym
 
+        tds = re.findall(r'<td[\s\S]*?</td>', r, re.I)
+        sector = re.sub(r'<[^>]+>', '', tds[1]).strip() if len(tds) > 1 else ""
+        raw_indices = re.sub(r'<[^>]+>', '', tds[2]).upper().strip() if len(tds) > 2 else ""
+        m_ord_idx = re.search(r'data-order=[\'"]([^\'"]+)[\'"]', tds[2], re.I) if len(tds) > 2 else None
+        indices = m_ord_idx.group(1).upper() if m_ord_idx else raw_indices
+        is_shariah = ("KMIALLSHR" in indices) or ("KMI30" in indices)
+
         right_tds = re.findall(r'<td[^>]*class=[\'"][^\'"]*right[^\'"]*[\'"][^>]*>[\s\S]*?</td>', r, re.I)
         if len(right_tds) < 5:
             continue
@@ -398,10 +405,43 @@ def _parse_dps_market_watch_html(html: str) -> Dict[str, Dict[str, Any]]:
                 "high": round(high_p, 2) if high_p > 0 else round(current, 2),
                 "low": round(low_p, 2) if low_p > 0 else round(current, 2),
                 "volume": volume,
+                "sector": sector,
+                "indices": indices,
+                "is_shariah": is_shariah,
                 "source": "psx_market_watch",
                 "timestamp": now,
             }
     return quotes
+
+
+def fetch_live_psx_market_watch(timeout: float = 5.0) -> Dict[str, Dict[str, Any]]:
+    """
+    Fetches official PSX Data Portal Market Watch (https://dps.psx.com.pk/market-watch).
+    Parses table with exact data-search on symbol and data-order attributes.
+    Returns 500+ live PSX spot quotes with sector, indices, and is_shariah tag.
+    """
+    url = f"https://dps.psx.com.pk/market-watch?_={int(time.time() * 1000)}"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Cache-Control": "no-cache, no-store",
+                "Pragma": "no-cache",
+            },
+            verify=False,
+            timeout=timeout,
+        )
+        if resp.status_code == 200 and resp.text:
+            return _parse_dps_market_watch_html(resp.text)
+    except Exception:
+        pass
+    return {}
 
 
 def _parse_psx_bulk_table(html: str) -> Dict[str, Dict[str, Any]]:
@@ -647,7 +687,15 @@ def fetch_realtime_psx_quotes(
             if float(q.get("price") or 0.0) > 0:
                 quotes[s] = dict(q)
 
-    # 3. Source 3 (Bulk PSX Market Summary Feed): psx.com.pk/market-summary (590+ stocks)
+    # 3. Source 3 (Official Real-Time PSX Market-Watch Table): dps.psx.com.pk/market-watch (500+ stocks)
+    missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
+    if missing:
+        dps_mw_quotes = fetch_live_psx_market_watch(timeout=min(timeout, 4.0))
+        for s in missing:
+            if s in dps_mw_quotes and float(dps_mw_quotes[s].get("price", 0)) > 0:
+                quotes[s] = dict(dps_mw_quotes[s])
+
+    # 4. Source 4 (Bulk PSX Market Summary Feed): psx.com.pk/market-summary (590+ stocks)
     missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if missing:
         bulk_quotes = fetch_psx_market_summary_bulk(timeout=min(timeout, 4.0))
@@ -655,7 +703,7 @@ def fetch_realtime_psx_quotes(
             if s in bulk_quotes and float(bulk_quotes[s].get("price", 0)) > 0:
                 quotes[s] = dict(bulk_quotes[s])
 
-    # 4. Source 4 (Delayed Fallback ONLY): TradingView Real-Time Pakistan Scanner
+    # 5. Source 5 (Delayed Fallback ONLY): TradingView Real-Time Pakistan Scanner
     # CRITICAL: Only used for tickers STILL missing from all official PSX feeds.
     # Never allowed to overwrite live/accurate DPS real-time quotes.
     still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
@@ -667,7 +715,7 @@ def fetch_realtime_psx_quotes(
                 q_copy["source"] = "tradingview_psx_fallback"
                 quotes[s] = q_copy
 
-    # 5. Source 5: Yahoo Finance v8 Chart API & Direct Timeseries (Cloud-safe backup)
+    # 6. Source 6: Yahoo Finance v8 Chart API & Direct Timeseries (Cloud-safe backup)
     still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if still_missing:
         # Feed A: Yahoo Finance v8 Chart API

@@ -3,6 +3,8 @@
 portfolio_agent/.env
 cookies.txt
 portfolio_agent/cookies.txt
+*.key
+*.pem
 
 # Databases & Vector DBs
 *.sqlite3

@@ -30,6 +30,8 @@ from portfolio_manager import (
     invalidate_financial_summary_cache,
     DEFAULT_WATCHLIST_DCF_TARGETS,
     publish_agent_event,
+    is_shariah_compliant_stock,
+    sanitize_for_json,
 )
 from market_data_scraper import fetch_all_psx_prices_bulk
 from news_scraper import fetch_psx_news
@@ -38,10 +40,10 @@ from business_books_engine import calculate_net_dividend_yield, MASTER_PRINCIPLE
 
 ACCUMULATION_MANDATE = "CAPITAL_ACCUMULATION_BUY_ONLY"
 
-# Core Watchlist universe for KMI-30 / PSX Capital Accumulation
+# Core Watchlist universe for KMI-30 / PSX Capital Accumulation (Strictly Shariah-Compliant)
 CORE_CANDIDATE_UNIVERSE = [
     "SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL",
-    "PPL", "POL", "MCB", "HBL", "UBL", "PSO", "SAZEW", "ILP", "ENGRO"
+    "PPL", "POL", "PSO", "SAZEW", "ILP", "ENGRO", "DGKC", "MLCF", "AIRLINK"
 ]
 
 SECTOR_MAP = {
@@ -57,9 +59,9 @@ SECTOR_MAP = {
     "LUCK": "Cement",
     "MEBL": "Islamic Banking",
     "FABL": "Islamic Banking",
-    "MCB": "Commercial Banking",
-    "HBL": "Commercial Banking",
-    "UBL": "Commercial Banking",
+    "DGKC": "Cement",
+    "MLCF": "Cement",
+    "AIRLINK": "Technology / Communications",
     "PSO": "Oil Marketing",
     "SAZEW": "Automobile Assembler",
     "ILP": "Textile Composite",
@@ -270,10 +272,12 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
         mv = float(h.get("market_value") or 0.0)
         sector_weights[sec] = sector_weights.get(sec, 0.0) + ((mv / total_custody_val) if total_custody_val > 0 else 0.0)
 
-    # Evaluate candidate universe
+    # Evaluate candidate universe (strictly Shariah-compliant)
     candidates: List[Dict[str, Any]] = []
 
     for sym in CORE_CANDIDATE_UNIVERSE:
+        if not is_shariah_compliant_stock(sym):
+            continue
         q = live_quotes.get(sym) or {}
         spot_price = float(q.get("price") or 0.0)
         if spot_price <= 0:
@@ -634,6 +638,10 @@ def make_capital_deployment_decision(deposit_amount: float = 0.0, quick_mode: bo
     }
 
 
+# Backwards-compatible and descriptive alias
+evaluate_capital_allocation = make_capital_deployment_decision
+
+
 def execute_central_brain_allocation(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Executes and records the Central Brain's BUY decision directly into KTrade:
@@ -663,6 +671,9 @@ def execute_central_brain_allocation(payload: Dict[str, Any]) -> Dict[str, Any]:
         cur.execute("SAVEPOINT sp_central_exec;")
         for item in raw_allocs:
             ticker = normalize_ticker(item.get("ticker") or "")
+            if not is_shariah_compliant_stock(ticker):
+                raise ValueError(f"❌ BLOCKED: {ticker} is NOT Shariah-compliant. Saad's portfolio is strictly Islamic equity only (KMIALLSHR / KMI30).")
+
             shares = float(item.get("shares") or 0.0)
             price = float(item.get("price") or item.get("limit_price") or 0.0)
             notes = item.get("notes") or "Executed via Central Brain Allocation"
@@ -751,3 +762,116 @@ def execute_central_brain_allocation(payload: Dict[str, Any]) -> Dict[str, Any]:
     finally:
         cur.close()
         conn.close()
+
+
+def scan_shariah_golden_opportunities(quick_mode: bool = True) -> Dict[str, Any]:
+    """
+    Saad's Dedicated Personal Wealth Manager & Golden Opportunity Detector:
+    1. Ingests Saad's live portfolio holdings and available KTrade cash.
+    2. Scans active holdings where unrealized_pnl_pct < -3.0% (e.g. SYS down ~13.7%).
+       Calculates exact cost-basis averaging math:
+       - Affordable shares with available dry powder
+       - Total PKR outlay
+       - Remaining cash
+       - New average buy price & cost reduction per share!
+    3. Scans Shariah-compliant universe (KMIALLSHR / KMI30) for high-conviction value leaders.
+    4. Guarantees 100% Shariah compliance (zero conventional banks or non-Shariah stocks).
+    5. Returns sanitized JSON-ready structure.
+    """
+    summary = get_complete_financial_summary(use_cached_prices=quick_mode, force_live=(not quick_mode))
+    holdings = summary.get("holdings", [])
+    kpis = summary.get("financial_kpis", {})
+
+    available_cash = float(kpis.get("ktrade_available_cash", 4357.38))
+    custody_val = float(kpis.get("portfolio_market_value", 0.0))
+    total_cost = float(kpis.get("portfolio_cost_basis", 0.0))
+
+    golden_opportunities = []
+
+    # 1. Cost-Basis Averaging Scan on Saad's Active Holdings
+    for h in holdings:
+        sym = h.get("ticker", "").upper()
+        if not is_shariah_compliant_stock(sym):
+            continue
+        shares = float(h.get("shares", 0.0))
+        avg_price = float(h.get("avg_price", 0.0) or h.get("avg_buy_price", 0.0))
+        spot_price = float(h.get("current_price", 0.0))
+        pnl_pct = float(h.get("unrealized_pnl_pct", 0.0))
+
+        # Check live quotes cache if spot_price is identical to avg_price (unrefreshed DB row)
+        if spot_price <= 0 or abs(spot_price - avg_price) < 0.01:
+            try:
+                from market_data_scraper import _BULK_QUOTES_CACHE
+                if sym in _BULK_QUOTES_CACHE:
+                    cached_q = _BULK_QUOTES_CACHE[sym]
+                    if float(cached_q.get("price", 0.0)) > 0:
+                        spot_price = float(cached_q["price"])
+            except Exception:
+                pass
+
+        direct_dd = round(((spot_price - avg_price) / avg_price) * 100.0, 2) if avg_price > 0 and spot_price > 0 else pnl_pct
+        effective_pnl_pct = min(direct_dd, pnl_pct)
+
+        # Flag holdings with drawdown > 3% as prime DCA candidates
+        if effective_pnl_pct < -3.0 and spot_price > 0 and shares > 0:
+            affordable_shs = int(available_cash // spot_price)
+            if affordable_shs > 0:
+                outlay = round(affordable_shs * spot_price, 2)
+                rem_cash = round(available_cash - outlay, 2)
+                new_shares = shares + affordable_shs
+                new_avg = round(((shares * avg_price) + outlay) / new_shares, 2)
+                cost_reduction = round(avg_price - new_avg, 2)
+                pct_reduction = round((cost_reduction / avg_price) * 100.0, 2) if avg_price > 0 else 0.0
+
+                golden_opportunities.append({
+                    "type": "COST_BASIS_AVERAGING",
+                    "opportunity_title": f"Cost-Basis Reduction on {sym}",
+                    "ticker": sym,
+                    "sector": h.get("sector", "PSX Equity"),
+                    "current_shares": shares,
+                    "avg_buy_price": avg_price,
+                    "current_spot_price": spot_price,
+                    "drawdown_pct": effective_pnl_pct,
+                    "affordable_shares": affordable_shs,
+                    "required_cash_pkr": outlay,
+                    "remaining_cash_pkr": rem_cash,
+                    "new_total_shares": new_shares,
+                    "new_avg_buy_price": new_avg,
+                    "cost_reduction_pkr": cost_reduction,
+                    "cost_reduction_pct": pct_reduction,
+                    "urgency": "HIGH" if effective_pnl_pct < -10.0 else "MEDIUM",
+                    "shariah_compliant": True,
+                    "action_headline": f"Deploy Rs. {outlay:,.2f} to add {affordable_shs} shs of {sym} — drops average cost from Rs. {avg_price:.2f} to Rs. {new_avg:.2f}",
+                    "justification": (
+                        f"{sym} is trading at Rs. {spot_price:,.2f} ({effective_pnl_pct:+.2f}% drawdown from your entry of Rs. {avg_price:.2f}). "
+                        f"Deploying Rs. {outlay:,.2f} of your Rs. {available_cash:,.2f} available KTrade cash secures {affordable_shs} shares, "
+                        f"lowering your breakeven cost by -Rs. {cost_reduction:.2f}/share (-{pct_reduction}%) across all {new_shares} shares."
+                    )
+                })
+
+    # Sort opportunities: highest drawdown first
+    golden_opportunities.sort(key=lambda x: x["drawdown_pct"])
+
+    # 2. General Shariah Capital Evaluation for Next Best Accumulation Leg
+    top_directive = None
+    try:
+        top_directive = evaluate_capital_allocation(deposit_amount=0.0, quick_mode=quick_mode)
+    except Exception as e:
+        print(f"⚠️ [Central Brain] Top directive evaluation notice: {e}")
+
+    result = {
+        "status": "success",
+        "shariah_certified": True,
+        "investor_profile": {
+            "owner": "Saad",
+            "mandate": "Strict Shariah-Compliant Capital Accumulation (No Selling)",
+            "available_dry_powder_pkr": available_cash,
+            "portfolio_market_value_pkr": custody_val,
+            "portfolio_cost_basis_pkr": total_cost,
+        },
+        "golden_opportunities_count": len(golden_opportunities),
+        "golden_opportunities": golden_opportunities,
+        "allocation_directive": top_directive,
+        "scanned_at": datetime.now(timezone.utc).isoformat()
+    }
+    return sanitize_for_json(result)

@@ -84,6 +84,9 @@ def fetch_chromium_psx_quotes(
                             "low": round(low, 2),
                             "open": round(open_p, 2),
                             "volume": vol,
+                            "sector": q.get("sector") or "",
+                            "indices": q.get("indices") or "",
+                            "is_shariah": bool(q.get("is_shariah", False)),
                             "source": "chromium_psx_live",
                             "timestamp": now,
                         }
