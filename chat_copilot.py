@@ -57,14 +57,7 @@ ACTION DEFINITIONS:
    - action_data: {"deposit_amount": 10000.0, "notes": "Capital allocation query"}
 1. SYNC_PORTFOLIO:
    - Bulk portfolio reset & custody synchronization when the user pastes or uploads their full KTrade holdings snapshot, asks to replace mock/stale rows, or asks to synchronize their exact holdings and cash balance in one atomic transaction.
-   - action_data: {
-       "cash_balance": 4357.38,
-       "total_working_capital": 51446.75,
-       "holdings": [
-         {"ticker": "EFERT", "shares": 8.0, "avg_buy_price": 194.99},
-         {"ticker": "FABL", "shares": 5.0, "avg_buy_price": 91.40}
-       ]
-     }
+   - Include only holdings and cash values explicitly supplied in the current user message. Never invent or reuse portfolio values; omit SYNC_PORTFOLIO if the user did not provide a complete snapshot.
 1. BUY_STOCK:
    - Single share purchase (e.g. "Bought 500 HUBC at 118.50" or a 1-trade BUY confirmation slip)
    - action_data: {"ticker": "HUBC", "side": "BUY", "quantity": 500.0, "price": 118.50, "fees": 0.0, "notes": "Trade note if any"}
@@ -208,18 +201,40 @@ def get_live_financial_context() -> str:
     except Exception:
         pass
 
+    def format_amount(value):
+        return f"Rs. {float(value):,.2f}" if value is not None else "unavailable"
+
+    def format_percent(value):
+        return f"{float(value):+.2f}%" if value is not None else "unavailable"
+
+    price_status = summary.get("data_status", "unavailable")
+    partial_label = " · partial" if summary.get("data_partial", True) else ""
+    holding_context = []
+    for holding in holdings:
+        price = holding.get("current_price")
+        status = holding.get("price_status", "unavailable")
+        holding_context.append({
+            "ticker": holding.get("ticker"),
+            "shares": holding.get("shares"),
+            "average_cost": holding.get("avg_price"),
+            "spot_price": f"{format_amount(price)} ({status})" if price is not None else "unavailable",
+            "price_source": holding.get("price_source") or "unavailable",
+            "price_timestamp": holding.get("price_timestamp") or "unavailable",
+        })
+
     return f"""LIVE FINANCIAL CONTEXT:
-- Total Net Worth: Rs. {kpis.get('total_net_worth', 0):,.2f}
-- Fresh Capital Invested: Rs. {kpis.get('fresh_capital_invested', 0):,.2f}
-- KTrade Available Cash: Rs. {kpis.get('ktrade_available_cash', 0):,.2f}
-- Portfolio Market Value: Rs. {kpis.get('portfolio_market_value', 0):,.2f}
-- Unrealized P&L: Rs. {kpis.get('unrealized_pnl', 0):,.2f} ({kpis.get('unrealized_pnl_pct', 0):+.2f}%)
-- Dividends in Bank: Rs. {kpis.get('net_dividends_in_bank', 0):,.2f}
-- Dividends Sent to KTrade: Rs. {kpis.get('net_dividends_reinvested', 0):,.2f}
-- Pending Dividends: Rs. {kpis.get('pending_dividends', 0):,.2f}
+- Price data status: {price_status}{partial_label}; last quote received: {summary.get('last_quote_received') or 'unavailable'}
+- Total Net Worth: {format_amount(kpis.get('total_net_worth'))} ({price_status})
+- Fresh Capital Invested: {format_amount(kpis.get('fresh_capital_invested'))}
+- KTrade Available Cash: {format_amount(kpis.get('ktrade_available_cash'))}
+- Portfolio Market Value: {format_amount(kpis.get('portfolio_market_value'))} ({price_status})
+- Unrealized P&L: {format_amount(kpis.get('unrealized_pnl'))} ({format_percent(kpis.get('unrealized_pnl_pct'))}) ({price_status})
+- Dividends in Bank: {format_amount(kpis.get('net_dividends_in_bank'))}
+- Dividends Sent to KTrade: {format_amount(kpis.get('net_dividends_reinvested'))}
+- Pending Dividends: {format_amount(kpis.get('pending_dividends'))}
 
 ACTIVE HOLDINGS:
-{json.dumps([{h['ticker']: f"{h['shares']} shs @ Rs. {h['avg_price']} (Cur: Rs. {h['current_price']})"} for h in holdings], indent=2)}
+{json.dumps(holding_context, indent=2)}
 
 INTERNAL DCF / VALUATION WATCHLIST TARGETS:
 {json.dumps(valuation_targets, indent=2)}
