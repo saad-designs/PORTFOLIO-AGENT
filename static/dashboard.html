@@ -3226,12 +3226,6 @@
     }
 
     function getAuthKey() {
-      const urlParams = new URLSearchParams(window.location.search);
-      const qKey = urlParams.get('key');
-      if (qKey) {
-        localStorage.setItem('alphawise_dashboard_key', qKey);
-        return qKey;
-      }
       return localStorage.getItem('alphawise_dashboard_key') || '';
     }
 
@@ -3402,7 +3396,7 @@
       const box = document.getElementById('psx-diag-result');
       if (box) box.textContent = 'Testing Geo-Proof 3-Tier PSX Live Engine...';
       try {
-        const res = await fetch('/api/test/psx-scraper');
+        const res = await apiFetch('/api/test/psx-scraper');
         const data = await res.json();
         if (box) {
           box.innerHTML = `<div style="padding:10px;border-radius:10px;background:var(--bg);border:1px solid var(--border);margin-top:6px;">
