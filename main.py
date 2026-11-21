@@ -44,6 +44,7 @@ import subprocess
 import atexit
 import time
 import base64
+import hashlib
 import hmac
 import uuid
 import json
@@ -161,7 +162,7 @@ rate_limiter.apply_global_rate_limits()
 import urllib.parse
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form, Body
+from fastapi import FastAPI, Request, Response, HTTPException, BackgroundTasks, UploadFile, File, Form, Body
 from fastapi.responses import PlainTextResponse, HTMLResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -1009,9 +1010,42 @@ def verify_dashboard_auth(request: Request):
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         key = auth_header[7:].strip()
-    if not hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8")):
+    key_matches = hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8"))
+    cookie_matches = hmac.compare_digest(
+        request.cookies.get("dashboard_session", "").encode("utf-8"),
+        _dashboard_session_token().encode("utf-8"),
+    )
+    if not (key_matches or cookie_matches):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
     return True
+
+def _dashboard_session_token() -> str:
+    return hmac.new(
+        DASHBOARD_KEY.encode("utf-8"),
+        b"portfolio-agent-dashboard-session-v1",
+        hashlib.sha256,
+    ).hexdigest()
+
+@app.post("/api/auth/session")
+async def create_dashboard_session(request: Request, response: Response):
+    if not DASHBOARD_KEY:
+        raise HTTPException(status_code=503, detail="Dashboard authentication is not configured")
+    key = request.headers.get("x-dashboard-key", "")
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        key = auth_header[7:].strip()
+    if not hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
+    response.set_cookie(
+        key="dashboard_session",
+        value=_dashboard_session_token(),
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        max_age=12 * 60 * 60,
+        path="/",
+    )
+    return {"status": "authenticated"}
 
 def verify_ingest_auth(request: Request):
     if not INGEST_TOKEN:
@@ -2619,7 +2653,46 @@ async def trigger_dashboard_sweep(sweep_type: str, background_tasks: BackgroundT
 
 @app.get("/whatsapp-qr", response_class=HTMLResponse)
 async def whatsapp_qr_page(request: Request):
-    verify_dashboard_auth(request)
+    if not DASHBOARD_KEY:
+        raise HTTPException(status_code=503, detail="Dashboard authentication is not configured")
+    try:
+        verify_dashboard_auth(request)
+    except HTTPException as auth_error:
+        if auth_error.status_code != 401:
+            raise
+        unlock_html = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp Bridge Authentication</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#c9d1d9;font:16px system-ui}
+form{width:min(360px,calc(100% - 40px));padding:28px;background:#1c2128;border:1px solid #30363d;border-radius:14px}
+input,button{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:8px}
+input{background:#0d1117;color:#fff;border:1px solid #30363d}button{background:#238636;color:#fff;border:0;cursor:pointer}
+#error{color:#ff7b72}</style></head>
+<body><form id="unlock"><h2>WhatsApp Bridge</h2><p>Enter the dashboard key to continue.</p>
+<label for="key">Dashboard key</label><input id="key" type="password" autocomplete="current-password" required>
+<button type="submit">Continue</button><p id="error" role="alert"></p></form>
+<script>
+document.getElementById('unlock').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = document.getElementById('key');
+  const error = document.getElementById('error');
+  try {
+    const response = await fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'x-dashboard-key': input.value }
+    });
+    input.value = '';
+    if (!response.ok) throw new Error(response.status === 401 ? 'Invalid dashboard key.' : 'Authentication is unavailable.');
+    window.location.reload();
+  } catch (err) {
+    error.textContent = err.message;
+  }
+});
+</script></body></html>"""
+        return HTMLResponse(
+            content=unlock_html,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
     qr_data = None
     status = "DISABLED" if not is_whatsapp_bridge_enabled() else "INITIALIZING"
     
