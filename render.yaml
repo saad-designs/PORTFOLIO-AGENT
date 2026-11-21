@@ -1,3 +1,5 @@
+# UNUSED: Render deployment manifest. The "standard" plan below is paid.
+# Oracle Cloud Always Free is the intended production host.
 services:
   - type: web
     name: psx-portfolio-agent
