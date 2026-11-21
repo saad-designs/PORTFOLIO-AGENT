@@ -78,14 +78,25 @@ def sanitize_for_json(obj: Any) -> Any:
     return obj
 
 
-def is_psx_market_open(dt: Optional[datetime.datetime] = None) -> bool:
-    """
-    Returns True ONLY during active Pakistan Stock Exchange (PSX) trading sessions:
-    - Monday to Thursday: 09:30 to 15:30 PKT (UTC+5)
-    - Friday Session 1:   09:30 to 12:30 PKT
-    - Friday Session 2:   14:30 to 16:30 PKT
-    - Nights, early mornings, weekends: False.
-    """
+def _load_psx_holiday_calendar() -> Dict[str, Any]:
+    calendar_path = os.path.join(os.path.dirname(__file__), "data", "psx_holidays.json")
+    try:
+        with open(calendar_path, "r", encoding="utf-8") as calendar_file:
+            calendar_data = json.load(calendar_file)
+    except (OSError, ValueError) as exc:
+        print(f"⚠️ [PSX Calendar] Official holiday calendar unavailable: {exc}", flush=True)
+        return {}
+    if not isinstance(calendar_data, dict) or not isinstance(calendar_data.get("years"), dict):
+        print("⚠️ [PSX Calendar] Official holiday calendar has an invalid structure.", flush=True)
+        return {}
+    return calendar_data
+
+
+_PSX_HOLIDAY_CALENDAR = _load_psx_holiday_calendar()
+
+
+def is_psx_market_open(dt: Optional[datetime.datetime] = None) -> Optional[bool]:
+    """Return trading status using the covered-year PSX calendar and official session times."""
     pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
     if dt is None:
         dt = datetime.datetime.now(pkt_tz)
@@ -94,6 +105,18 @@ def is_psx_market_open(dt: Optional[datetime.datetime] = None) -> bool:
     else:
         dt = dt.astimezone(pkt_tz)
 
+    year_calendar = _PSX_HOLIDAY_CALENDAR.get("years", {}).get(str(dt.year))
+    if not isinstance(year_calendar, dict):
+        return None
+
+    holidays = {
+        entry.get("date")
+        for entry in year_calendar.get("holidays", [])
+        if isinstance(entry, dict) and isinstance(entry.get("date"), str)
+    }
+    if dt.date().isoformat() in holidays:
+        return False
+
     weekday = dt.weekday()
     if weekday > 4:
         return False
@@ -101,9 +124,9 @@ def is_psx_market_open(dt: Optional[datetime.datetime] = None) -> bool:
     time_min = dt.hour * 60 + dt.minute
 
     if weekday in (0, 1, 2, 3):  # Mon - Thu
-        return 570 <= time_min <= 930
+        return 572 <= time_min < 930
     elif weekday == 4:  # Friday
-        return (570 <= time_min <= 750) or (870 <= time_min <= 990)
+        return (557 <= time_min < 720) or (872 <= time_min < 990)
 
     return False
 
@@ -2735,7 +2758,9 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     (cached in memory for 120s via fetch_all_psx_prices_bulk) and updates last_price,
     last_change_pct, and price_updated_at in portfolio_holdings for all active holdings.
     """
-    from market_data_scraper import fetch_all_psx_prices_bulk
+    from market_data_scraper import _is_fresh_verified_quote, fetch_all_psx_prices_bulk
+    if is_psx_market_open() is not True:
+        return {"updated": 0, "prices": {}, "unavailable": []}
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -2793,6 +2818,7 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
                 "realtime_feed",
                 "unknown",
             }
+            and _is_fresh_verified_quote(q)
         ):
             updates[sym] = {
                 "price": cp,
@@ -3007,6 +3033,7 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
             for sym, quote in quote_map.items():
                 if (
                     sym in holdings_meta
+                    and price_state["holdings"].get(sym, {}).get("status") == "live"
                     and quote.get("price") is not None
                     and quote.get("timestamp")
                     and quote.get("source")
@@ -3082,6 +3109,8 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
 
             curr_price, change_pct, change_abs = price_map.get(tick, (None, None, None))
             holding_state = price_state["holdings"].get(tick, {})
+            if holding_state.get("status") == "suspect":
+                curr_price = None
 
             invested_c = float(row[13]) if len(row) > 13 and row[13] is not None else round(shares * avg_price, 2)
             avg_disp = float(row[14]) if len(row) > 14 and row[14] is not None else round(invested_c / shares, 2)
@@ -3142,6 +3171,12 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "price_status": holding_state.get("status", "unavailable"),
                 "price_source": holding_state.get("price_source"),
                 "price_timestamp": holding_state.get("price_timestamp"),
+                "price_timestamp_kind": holding_state.get("price_timestamp_kind"),
+                "price_received_timestamp": holding_state.get("price_received_timestamp"),
+                "price_limit_status": holding_state.get("price_limit_status"),
+                "price_limit_source": holding_state.get("price_limit_source"),
+                "lower_limit": holding_state.get("lower_limit"),
+                "upper_limit": holding_state.get("upper_limit"),
                 "price_age_seconds": holding_state.get("price_age_seconds"),
                 "dividend_yield": div_yield,
                 "sentiment": sentiment,

@@ -4,6 +4,18 @@ from live_portfolio import build_live_state, mark_live_state_stale
 
 
 NOW = 1_750_000_000.0
+FRESH_QUOTE = {
+    "price": 110,
+    "source": "dps_company_realtime",
+    "timestamp": NOW - 2,
+    "timestamp_kind": "exchange",
+    "received_timestamp": NOW - 1,
+    "freshness_evidence": "source_timestamp",
+    "price_limit_status": "passed",
+    "price_limit_source": "dps_psx_company_circuit_breaker",
+    "lower_limit": 100,
+    "upper_limit": 120,
+}
 HOLDING = {
     "SYS": {
         "shares": 2,
@@ -60,7 +72,7 @@ def test_stored_placeholder_source_is_not_shown_as_realtime():
 def test_fresh_verified_quote_is_live():
     state = build_live_state(
         HOLDING,
-        {"SYS": {"price": 110, "source": "dps_company_realtime", "timestamp": NOW - 2}},
+        {"SYS": {**FRESH_QUOTE}},
         50,
         True,
         True,
@@ -73,13 +85,106 @@ def test_fresh_verified_quote_is_live():
     assert holding["price"] == 110
     assert holding["price_source"] == "dps_company_realtime"
     assert holding["price_age_seconds"] == 2
+    assert holding["price_timestamp_kind"] == "exchange"
+    assert holding["price_received_timestamp"] == datetime.datetime.fromtimestamp(
+        NOW - 1,
+        datetime.timezone.utc,
+    ).isoformat()
+
+
+def test_stale_exchange_timestamp_is_not_live():
+    state = build_live_state(
+        HOLDING,
+        {"SYS": {**FRESH_QUOTE, "timestamp": NOW - 76}},
+        50,
+        True,
+        True,
+        NOW,
+        1,
+    )
+
+    assert state["holdings"]["SYS"]["status"] == "stale"
+    assert state["holdings"]["SYS"]["price"] == 110
+
+
+def test_received_time_without_activity_evidence_is_not_live():
+    state = build_live_state(
+        HOLDING,
+        {
+            "SYS": {
+                "price": 110,
+                "source": "chromium_psx_live",
+                "timestamp": NOW,
+                "timestamp_kind": "received",
+                "received_timestamp": NOW,
+                "freshness_evidence": "none",
+                "price_limit_status": "passed",
+            }
+        },
+        50,
+        True,
+        True,
+        NOW,
+        1,
+    )
+
+    holding = state["holdings"]["SYS"]
+    assert holding["status"] == "stale"
+    assert holding["price_timestamp_kind"] == "received"
+
+
+def test_recent_price_change_supports_receipt_only_quote():
+    state = build_live_state(
+        HOLDING,
+        {
+            "SYS": {
+                "price": 110,
+                "source": "chromium_psx_live",
+                "timestamp": NOW,
+                "timestamp_kind": "received",
+                "received_timestamp": NOW,
+                "freshness_evidence": "price_change",
+                "evidence_timestamp": NOW - 5,
+                "price_limit_status": "passed",
+            }
+        },
+        50,
+        True,
+        True,
+        NOW,
+        1,
+    )
+
+    assert state["holdings"]["SYS"]["status"] == "live"
+
+
+def test_circuit_limit_breach_is_suspect_and_excluded_from_totals():
+    quote = {
+        **FRESH_QUOTE,
+        "price": 130,
+        "price_limit_status": "breach",
+    }
+    state = build_live_state(HOLDING, {"SYS": quote}, 50, True, True, NOW, 1)
+
+    holding = state["holdings"]["SYS"]
+    assert holding["status"] == "suspect"
+    assert holding["market_value"] is None
+    assert state["totals"]["included_holdings"] == []
+    assert state["totals"]["excluded_holdings"] == ["SYS"]
+    assert state["totals"]["status"] == "suspect"
 
 
 def test_market_closed_uses_last_price_as_closed_not_live():
     quote_time = NOW - 3600
     state = build_live_state(
         HOLDING,
-        {"SYS": {"price": 110, "source": "dps_company_realtime", "timestamp": quote_time}},
+        {
+            "SYS": {
+                **FRESH_QUOTE,
+                "timestamp": quote_time,
+                "received_timestamp": quote_time,
+            }
+        },
         50,
         True,
         False,
@@ -93,6 +198,46 @@ def test_market_closed_uses_last_price_as_closed_not_live():
         quote_time,
         datetime.timezone.utc,
     ).isoformat()
+
+
+def test_market_closed_receipt_only_quote_without_activity_is_not_called_last_close():
+    state = build_live_state(
+        HOLDING,
+        {
+            "SYS": {
+                "price": 110,
+                "source": "chromium_psx_live",
+                "timestamp": NOW - 60,
+                "timestamp_kind": "received",
+                "received_timestamp": NOW - 60,
+                "freshness_evidence": "none",
+                "price_limit_status": "passed",
+            }
+        },
+        50,
+        True,
+        False,
+        NOW,
+        1,
+    )
+
+    assert state["holdings"]["SYS"]["status"] == "stale"
+
+
+def test_unverified_market_status_cannot_mark_quote_live():
+    state = build_live_state(
+        HOLDING,
+        {"SYS": {**FRESH_QUOTE, "timestamp": NOW, "received_timestamp": NOW}},
+        50,
+        True,
+        None,
+        NOW,
+        1,
+    )
+
+    assert state["market_status"] == "unverified"
+    assert state["holdings"]["SYS"]["status"] == "stale"
+    assert state["partial"] is True
 
 
 def test_database_unreachable_means_holdings_and_cash_unavailable():
@@ -138,7 +283,7 @@ def test_database_connection_failure_clears_seeded_runtime_state(monkeypatch):
 def test_heartbeat_exception_marks_prior_live_price_stale():
     state = build_live_state(
         HOLDING,
-        {"SYS": {"price": 110, "source": "dps_company_realtime", "timestamp": NOW}},
+        {"SYS": {**FRESH_QUOTE, "timestamp": NOW, "received_timestamp": NOW}},
         50,
         True,
         True,
@@ -163,7 +308,7 @@ def test_totals_report_included_and_excluded_holdings():
     }
     state = build_live_state(
         metadata,
-        {"SYS": {"price": 110, "source": "dps_company_realtime", "timestamp": NOW}},
+        {"SYS": {**FRESH_QUOTE, "timestamp": NOW, "received_timestamp": NOW}},
         50,
         True,
         True,

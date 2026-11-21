@@ -3294,6 +3294,21 @@
         : `${Number(value).toFixed(1)}s old`;
     }
 
+    function fmtQuoteTimestampKind(kind) {
+      return ({
+        exchange: 'PSX source time',
+        provider: 'provider timestamp',
+        received: 'received time only',
+        stored: 'stored database time',
+        unavailable: 'timestamp unavailable'
+      })[kind] || 'timestamp unavailable';
+    }
+
+    function fmtPriceLimits(holding) {
+      if (holding?.lower_limit == null || holding?.upper_limit == null) return 'unavailable';
+      return `${fmtAvailablePKR(holding.lower_limit)}–${fmtAvailablePKR(holding.upper_limit)}`;
+    }
+
     function updatePriceDataBanner(state) {
       const banners = document.querySelectorAll('.price-data-banner');
       if (!banners.length) return;
@@ -3301,17 +3316,25 @@
       const statuses = [...new Set(holdings.map(h => h.status))];
       const totals = state?.totals || {};
       const affected = statuses.filter(status => status !== 'live');
+      const limitsUnverified = holdings
+        .filter(h => h.price !== null && h.price !== undefined && h.price_limit_status === 'unverified')
+        .map(h => h.ticker);
       let message;
       if (!state?.holdings_available) {
         message = 'Holdings and cash unavailable: the portfolio database could not be read.';
       } else if (!holdings.length) {
         message = 'No holdings are available from the portfolio database.';
+      } else if (state?.market_status === 'unverified') {
+        message = 'Market status unverified: the official PSX holiday calendar does not cover this year; no quote can be confirmed live.';
       } else if (!affected.length && !totals.partial) {
         message = 'All displayed quotes are fresh and verified.';
       } else {
         const included = (totals.included_holdings || []).join(', ') || 'none';
         const excluded = (totals.excluded_holdings || []).join(', ') || 'none';
         message = `Price data ${affected.join(', ') || totals.status || 'partial'}. Totals are partial; included: ${included}; excluded: ${excluded}.`;
+      }
+      if (limitsUnverified.length) {
+        message += ` Circuit-breaker limits unverified: ${limitsUnverified.join(', ')}.`;
       }
       if (state?.last_quote_received) {
         const quoteDate = new Date(state.last_quote_received);
@@ -3325,9 +3348,10 @@
       for (const banner of banners) {
         banner.textContent = message;
         banner.style.display = 'block';
-        banner.style.borderColor = affected.length || !state?.holdings_available ? '#6b5b28' : '#245a3a';
-        banner.style.background = affected.length || !state?.holdings_available ? '#282315' : '#13241a';
-        banner.style.color = affected.length || !state?.holdings_available ? '#f0d98a' : '#9be6b1';
+        const warning = affected.length || !state?.holdings_available || state?.market_status === 'unverified';
+        banner.style.borderColor = warning ? '#6b5b28' : '#245a3a';
+        banner.style.background = warning ? '#282315' : '#13241a';
+        banner.style.color = warning ? '#f0d98a' : '#9be6b1';
       }
     }
 
@@ -3546,6 +3570,8 @@
         const isChromium = quoteHoldings.some(h => h.status === 'live' && h.price_source === 'chromium_psx_live');
         const priceStateLabel = !data.holdings_available
           ? 'HOLDINGS UNAVAILABLE'
+          : data.market_status === 'unverified'
+            ? 'MARKET STATUS UNVERIFIED'
           : liveCount > 0
             ? (data.partial ? 'PSX LIVE · PARTIAL' : (isChromium ? 'PSX LIVE CHROMIUM' : 'PSX LIVE'))
             : quoteHoldings.length && quoteHoldings.every(h => h.status === 'closed')
@@ -3635,21 +3661,21 @@
                 chgDiv.style.color = !hasChange ? 'var(--muted)' : isPos ? 'var(--emerald)' : 'var(--danger)';
               }
               const statusDiv = spotCell.querySelector('.pos-price-state');
-              if (statusDiv) statusDiv.textContent = `${h.status || 'unavailable'} · ${h.price_source || 'source unavailable'}`;
+              if (statusDiv) statusDiv.textContent = `${h.status || 'unavailable'} · ${h.price_source || 'source unavailable'} · circuit limits ${h.price_limit_status || 'unverified'} (${fmtPriceLimits(h)}), source received ${fmtQuoteTime(h.price_limit_retrieved_at)}`;
               const quoteDiv = spotCell.querySelector('.pos-quote-time');
-              if (quoteDiv) quoteDiv.textContent = `Last quote: ${fmtQuoteTime(h.price_timestamp)} · ${fmtQuoteAge(h.price_age_seconds)}`;
+              if (quoteDiv) quoteDiv.textContent = `Price time (${fmtQuoteTimestampKind(h.price_timestamp_kind)}): ${fmtQuoteTime(h.price_timestamp)} · received: ${fmtQuoteTime(h.price_received_timestamp)} · ${fmtQuoteAge(h.price_age_seconds)}`;
               if (!statusDiv) {
                 const status = document.createElement('div');
                 status.className = 'pos-price-state';
                 status.style.cssText = 'font-size:10px;color:var(--muted);';
-                status.textContent = `${h.status || 'unavailable'} · ${h.price_source || 'source unavailable'}`;
+                status.textContent = `${h.status || 'unavailable'} · ${h.price_source || 'source unavailable'} · circuit limits ${h.price_limit_status || 'unverified'} (${fmtPriceLimits(h)}), source received ${fmtQuoteTime(h.price_limit_retrieved_at)}`;
                 spotCell.appendChild(status);
               }
               if (!quoteDiv) {
                 const quoteTime = document.createElement('div');
                 quoteTime.className = 'pos-quote-time';
                 quoteTime.style.cssText = 'font-size:10px;color:var(--muted);';
-                quoteTime.textContent = `Last quote: ${fmtQuoteTime(h.price_timestamp)} · ${fmtQuoteAge(h.price_age_seconds)}`;
+                quoteTime.textContent = `Price time (${fmtQuoteTimestampKind(h.price_timestamp_kind)}): ${fmtQuoteTime(h.price_timestamp)} · received: ${fmtQuoteTime(h.price_received_timestamp)} · ${fmtQuoteAge(h.price_age_seconds)}`;
                 spotCell.appendChild(quoteTime);
               }
 
@@ -3748,6 +3774,13 @@
                 h.price_status = live.status;
                 h.price_source = live.price_source;
                 h.price_timestamp = live.price_timestamp;
+                h.price_timestamp_kind = live.price_timestamp_kind;
+                h.price_received_timestamp = live.price_received_timestamp;
+                h.price_limit_status = live.price_limit_status;
+                h.price_limit_source = live.price_limit_source;
+                h.price_limit_retrieved_at = live.price_limit_retrieved_at;
+                h.lower_limit = live.lower_limit;
+                h.upper_limit = live.upper_limit;
                 h.price_age_seconds = live.price_age_seconds;
                 h.weight_pct = data.totals.portfolio_custody_value > 0
                   ? Number((live.market_value / data.totals.portfolio_custody_value * 100).toFixed(1))
@@ -3760,6 +3793,13 @@
                 h.price_status = 'unavailable';
                 h.price_source = null;
                 h.price_timestamp = null;
+                h.price_timestamp_kind = 'unavailable';
+                h.price_received_timestamp = null;
+                h.price_limit_status = 'unverified';
+                h.price_limit_source = null;
+                h.price_limit_retrieved_at = null;
+                h.lower_limit = null;
+                h.upper_limit = null;
               }
             }
             if (APP_STATE.activeTab === 'overview' || !APP_STATE.activeTab) {
@@ -4393,7 +4433,7 @@
             <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">Live Spot &amp; Day</div>
               <div class="tabular" style="font-weight:700;font-size:15px;margin-top:3px;">${fmtAvailablePKR(h.current_price)} (${fmtAvailablePct(h.change_pct)})</div>
-              <div style="font-size:10px;color:var(--muted);">${escapeHtml(h.price_status || 'unavailable')} · ${escapeHtml(fmtQuoteTime(h.price_timestamp))}</div>
+              <div style="font-size:10px;color:var(--muted);">${escapeHtml(h.price_status || 'unavailable')} · ${escapeHtml(fmtQuoteTimestampKind(h.price_timestamp_kind))}: ${escapeHtml(fmtQuoteTime(h.price_timestamp))} · received: ${escapeHtml(fmtQuoteTime(h.price_received_timestamp))}</div>
             </div>
             <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">DCF Fair Value</div>
@@ -4495,8 +4535,8 @@
             <td data-label="Live Spot & Day" data-col="spot" class="tabular">
               <div class="pos-spot-price" style="font-weight:700;color:${affected ? 'var(--muted)' : 'var(--text)'};" title="${escapeHtml(priceStatus)}">${h.current_price === null || h.current_price === undefined ? 'Unavailable' : fmtPKR(h.current_price)}</div>
               <div class="pos-day-chg" style="font-size:11px;color:${dayPct === null || dayPct === undefined ? 'var(--muted)' : Number(dayPct) >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtAvailablePct(dayPct)} (${fmtAvailablePKR(dayPnl, true)})</div>
-              <div class="pos-price-state" style="font-size:10px;color:var(--muted);">${escapeHtml(priceStatus)} · ${escapeHtml(h.price_source || 'source unavailable')}</div>
-              <div class="pos-quote-time" style="font-size:10px;color:var(--muted);">Last quote: ${escapeHtml(fmtQuoteTime(h.price_timestamp))} · ${escapeHtml(fmtQuoteAge(h.price_age_seconds))}</div>
+              <div class="pos-price-state" style="font-size:10px;color:var(--muted);">${escapeHtml(priceStatus)} · ${escapeHtml(h.price_source || 'source unavailable')} · circuit limits ${escapeHtml(h.price_limit_status || 'unverified')} (${escapeHtml(fmtPriceLimits(h))}), source received ${escapeHtml(fmtQuoteTime(h.price_limit_retrieved_at))}</div>
+              <div class="pos-quote-time" style="font-size:10px;color:var(--muted);">Price time (${escapeHtml(fmtQuoteTimestampKind(h.price_timestamp_kind))}): ${escapeHtml(fmtQuoteTime(h.price_timestamp))} · received: ${escapeHtml(fmtQuoteTime(h.price_received_timestamp))} · ${escapeHtml(fmtQuoteAge(h.price_age_seconds))}</div>
             </td>
             <td data-label="Market Value" data-col="mv" class="tabular" style="font-weight:700;color:${affected ? 'var(--muted)' : 'var(--text)'};">${fmtAvailablePKR(h.market_value)}</td>
             <td data-label="Weight" data-col="weight" class="tabular">${h.weight_pct === null || h.weight_pct === undefined ? '—' : Number(h.weight_pct).toFixed(1) + '%'}</td>

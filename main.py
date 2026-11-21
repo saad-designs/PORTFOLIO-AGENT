@@ -559,7 +559,11 @@ async def _sync_live_prices_to_db(quotes: Dict[str, Dict[str, Any]]):
     """Persists spot prices to portfolio_holdings in background every 15s without blocking the 1s tick."""
     def _do_sync():
         try:
+            from market_data_scraper import _is_fresh_verified_quote
             from portfolio_manager import get_db_connection
+            from portfolio_manager import is_psx_market_open
+            if is_psx_market_open() is not True:
+                return
             conn = get_db_connection()
             cur = conn.cursor()
             try:
@@ -580,6 +584,7 @@ async def _sync_live_prices_to_db(quotes: Dict[str, Dict[str, Any]]):
                             "unknown",
                         }
                         and quote_timestamp
+                        and _is_fresh_verified_quote(q)
                     ):
                         if dy is not None and float(dy) > 0:
                             cur.execute("""
@@ -722,16 +727,11 @@ async def lifespan(app: FastAPI):
         name="Daily YouTube Transcript Sweep"
     )
     async def _scheduled_psx_live_price_tick():
-        """Refreshes PSX holdings every 60s during PSX market hours (Mon-Fri 09:05-16:45 PKT)."""
+        """Refreshes stored portfolio prices only during verified PSX trading sessions."""
         try:
             pkt_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
-            is_weekday = pkt_now.weekday() < 5
-            in_market_window = (
-                (pkt_now.hour > 9 or (pkt_now.hour == 9 and pkt_now.minute >= 5))
-                and (pkt_now.hour < 16 or (pkt_now.hour == 16 and pkt_now.minute <= 45))
-            )
-            if is_weekday and in_market_window:
-                from portfolio_manager import refresh_portfolio_live_prices
+            from portfolio_manager import is_psx_market_open, refresh_portfolio_live_prices
+            if is_psx_market_open(pkt_now) is True:
                 await asyncio.to_thread(refresh_portfolio_live_prices, True)
         except Exception as price_tick_err:
             print(f"⚠️ [60s Price Monitor] {price_tick_err}", flush=True)
@@ -854,7 +854,7 @@ async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True
                 "unknown",
             }
             and not quote.get("stored")
-            and quote_timestamp is not None
+            and holding.get("status") == "live"
             and holding.get("price") is not None
         )
         prices_out[sym] = {
@@ -862,6 +862,14 @@ async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True
             "change_pct": holding.get("change_pct"),
             "source": holding.get("price_source"),
             "timestamp": holding.get("price_timestamp"),
+            "timestamp_kind": holding.get("price_timestamp_kind"),
+            "received_timestamp": holding.get("price_received_timestamp"),
+            "freshness_evidence": holding.get("freshness_evidence"),
+            "price_limit_status": holding.get("price_limit_status"),
+            "price_limit_source": holding.get("price_limit_source"),
+            "price_limit_retrieved_at": holding.get("price_limit_retrieved_at"),
+            "lower_limit": holding.get("lower_limit"),
+            "upper_limit": holding.get("upper_limit"),
             "age_seconds": holding.get("price_age_seconds"),
             "status": holding.get("status"),
             "verified_quote": verified_quote,
@@ -1616,6 +1624,13 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
                         "price_status": item.get("status"),
                         "price_source": item.get("price_source"),
                         "price_timestamp": item.get("price_timestamp"),
+                        "price_timestamp_kind": item.get("price_timestamp_kind"),
+                        "price_received_timestamp": item.get("price_received_timestamp"),
+                        "price_limit_status": item.get("price_limit_status"),
+                        "price_limit_source": item.get("price_limit_source"),
+                        "price_limit_retrieved_at": item.get("price_limit_retrieved_at"),
+                        "lower_limit": item.get("lower_limit"),
+                        "upper_limit": item.get("upper_limit"),
                         "price_age_seconds": item.get("price_age_seconds"),
                         "verdict": "UNAVAILABLE",
                         "sector": "Unknown",
@@ -1644,6 +1659,13 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
                     h["source"] = live_item.get("price_source")
                     h["price_source"] = live_item.get("price_source")
                     h["price_timestamp"] = live_item.get("price_timestamp")
+                    h["price_timestamp_kind"] = live_item.get("price_timestamp_kind")
+                    h["price_received_timestamp"] = live_item.get("price_received_timestamp")
+                    h["price_limit_status"] = live_item.get("price_limit_status")
+                    h["price_limit_source"] = live_item.get("price_limit_source")
+                    h["price_limit_retrieved_at"] = live_item.get("price_limit_retrieved_at")
+                    h["lower_limit"] = live_item.get("lower_limit")
+                    h["upper_limit"] = live_item.get("upper_limit")
                     h["price_age_seconds"] = live_item.get("price_age_seconds")
                     h["price_status"] = live_item.get("status")
                     tot_cust = lt.get("portfolio_custody_value")
@@ -1659,6 +1681,13 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
                         "unrealized_pnl_pct": None,
                         "price_source": None,
                         "price_timestamp": None,
+                        "price_timestamp_kind": "unavailable",
+                        "price_received_timestamp": None,
+                        "price_limit_status": "unverified",
+                        "price_limit_source": None,
+                        "price_limit_retrieved_at": None,
+                        "lower_limit": None,
+                        "upper_limit": None,
                         "price_age_seconds": None,
                         "price_status": "unavailable",
                     })

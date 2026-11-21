@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import datetime
 import json
 import math
 import random
@@ -7,7 +8,7 @@ import re
 import threading
 import time
 import warnings
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, overload
 
 import aiohttp
 import requests
@@ -46,9 +47,185 @@ BULK_QUOTE_TTL_SECONDS: float = 1.0
 _BULK_QUOTES_CACHE: Dict[str, Dict[str, Any]] = {}
 _BULK_QUOTES_TS: float = 0.0
 _BULK_LOCK = threading.Lock()
+_QUOTE_OBSERVATIONS: Dict[str, Dict[str, Any]] = {}
+_QUOTE_OBSERVATIONS_LOCK = threading.Lock()
+_PSX_CIRCUIT_LIMITS: Dict[str, Dict[str, Any]] = {}
+_PSX_CIRCUIT_LIMITS_ATTEMPTED: set = set()
+_PSX_CIRCUIT_LIMITS_DAY: Optional[str] = None
+_PSX_CIRCUIT_LIMITS_LOCK = threading.Lock()
+
+
+def _is_price_within_circuit_limits(price: Any, lower_limit: Any, upper_limit: Any) -> Optional[bool]:
+    try:
+        price_value = float(price)
+        lower_value = float(lower_limit)
+        upper_value = float(upper_limit)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (price_value, lower_value, upper_value)):
+        return None
+    if price_value <= 0 or lower_value <= 0 or upper_value < lower_value:
+        return None
+    return round(lower_value, 2) <= round(price_value, 2) <= round(upper_value, 2)
+
+
+def _is_valid_circuit_limit_range(lower_limit: Any, upper_limit: Any) -> bool:
+    try:
+        lower_value = float(lower_limit)
+        upper_value = float(upper_limit)
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(lower_value)
+        and math.isfinite(upper_value)
+        and lower_value > 0
+        and upper_value >= lower_value
+    )
+
+
+def _attach_official_circuit_limits(
+    quotes: Dict[str, Dict[str, Any]],
+    tickers: Iterable[str],
+    timeout: float,
+) -> None:
+    """Load each symbol's official PSX cap range at most once per Pakistan trading date."""
+    global _PSX_CIRCUIT_LIMITS_DAY
+    pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+    today = datetime.datetime.now(pkt_tz).date().isoformat()
+    targets = list(dict.fromkeys(tickers))
+
+    with _PSX_CIRCUIT_LIMITS_LOCK:
+        if _PSX_CIRCUIT_LIMITS_DAY != today:
+            _PSX_CIRCUIT_LIMITS.clear()
+            _PSX_CIRCUIT_LIMITS_ATTEMPTED.clear()
+            _PSX_CIRCUIT_LIMITS_DAY = today
+        for symbol, quote in quotes.items():
+            if quote.get("source") != "dps_company_realtime":
+                continue
+            try:
+                received = float(quote.get("received_timestamp") or 0.0)
+                received_day = datetime.datetime.fromtimestamp(received, pkt_tz).date().isoformat()
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+            if received_day != today:
+                continue
+            lower = quote.get("lower_limit")
+            upper = quote.get("upper_limit")
+            previous_close = quote.get("prev_close")
+            if _is_valid_circuit_limit_range(lower, upper):
+                _PSX_CIRCUIT_LIMITS[symbol] = {
+                    "lower_limit": float(lower),
+                    "upper_limit": float(upper),
+                    "previous_close": float(previous_close) if previous_close is not None else None,
+                    "timestamp": quote.get("timestamp"),
+                    "retrieved_at": received,
+                }
+        missing = [
+            symbol for symbol in targets
+            if symbol not in _PSX_CIRCUIT_LIMITS
+            and (symbol, today) not in _PSX_CIRCUIT_LIMITS_ATTEMPTED
+        ]
+        _PSX_CIRCUIT_LIMITS_ATTEMPTED.update((symbol, today) for symbol in missing)
+
+    if missing:
+        dps_quotes = fetch_dps_company_quotes_concurrent(missing, timeout=min(timeout, 3.5))
+        with _PSX_CIRCUIT_LIMITS_LOCK:
+            for symbol, dps_quote in dps_quotes.items():
+                lower = dps_quote.get("lower_limit")
+                upper = dps_quote.get("upper_limit")
+                previous_close = dps_quote.get("prev_close")
+                if _is_valid_circuit_limit_range(lower, upper):
+                    _PSX_CIRCUIT_LIMITS[symbol] = {
+                        "lower_limit": float(lower),
+                        "upper_limit": float(upper),
+                        "previous_close": float(previous_close) if previous_close is not None else None,
+                        "timestamp": dps_quote.get("timestamp"),
+                        "retrieved_at": dps_quote.get("received_timestamp") or time.time(),
+                    }
+
+    with _PSX_CIRCUIT_LIMITS_LOCK:
+        for symbol, quote in quotes.items():
+            if quote.get("stored"):
+                continue
+            limits = _PSX_CIRCUIT_LIMITS.get(symbol)
+            if not limits:
+                quote["price_limit_status"] = "unverified"
+                quote["price_limit_source"] = None
+                quote["lower_limit"] = None
+                quote["upper_limit"] = None
+                quote["limit_previous_close"] = None
+                quote["limit_timestamp"] = None
+                quote["limit_retrieved_at"] = None
+                continue
+            quote["lower_limit"] = limits["lower_limit"]
+            quote["upper_limit"] = limits["upper_limit"]
+            quote["limit_previous_close"] = limits["previous_close"]
+            quote["limit_timestamp"] = limits["timestamp"]
+            quote["limit_retrieved_at"] = limits["retrieved_at"]
+            quote["price_limit_source"] = "dps_psx_company_circuit_breaker"
+            within_limits = _is_price_within_circuit_limits(
+                quote.get("price"),
+                limits["lower_limit"],
+                limits["upper_limit"],
+            )
+            quote["price_limit_status"] = "passed" if within_limits else "breach" if within_limits is False else "unverified"
 
 # Suffixes appended to ticker symbols in PSX tables
 _PSX_STATUS_SUFFIXES = {"NC", "XD", "XB", "XR", "WU", "SPOT", "PRO"}
+
+
+def _attach_quote_freshness_evidence(quotes: Dict[str, Dict[str, Any]]) -> None:
+    """Keep receipt-only feeds non-live until the same source shows price or volume activity."""
+    now = time.time()
+    with _QUOTE_OBSERVATIONS_LOCK:
+        for symbol, quote in quotes.items():
+            if quote.get("stored"):
+                continue
+            try:
+                price = float(quote.get("price") or 0.0)
+                received = float(quote.get("received_timestamp") or quote.get("timestamp") or now)
+                timestamp = float(quote.get("timestamp") or received)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(price) or price <= 0 or not math.isfinite(received):
+                continue
+
+            kind = quote.get("timestamp_kind")
+            quote["received_timestamp"] = received
+            if kind in {"exchange", "provider"} and timestamp > 0:
+                quote["timestamp_kind"] = kind
+                quote["freshness_evidence"] = "source_timestamp"
+                quote["evidence_timestamp"] = timestamp
+                continue
+
+            quote["timestamp_kind"] = "received"
+            quote["timestamp"] = timestamp
+            source_key = f"{symbol}:{quote.get('source') or 'unknown'}"
+            previous = _QUOTE_OBSERVATIONS.get(source_key)
+            evidence = previous.get("freshness_evidence") if previous else None
+            evidence_timestamp = previous.get("evidence_timestamp") if previous else None
+            if previous:
+                try:
+                    prior_price = float(previous.get("price") or 0.0)
+                    prior_volume = previous.get("volume")
+                    volume = quote.get("volume")
+                    if abs(price - prior_price) >= 0.01:
+                        evidence = "price_change"
+                        evidence_timestamp = received
+                    elif volume is not None and prior_volume is not None and float(volume) != float(prior_volume):
+                        evidence = "volume_change"
+                        evidence_timestamp = received
+                except (TypeError, ValueError):
+                    pass
+            quote["freshness_evidence"] = evidence or "none"
+            quote["evidence_timestamp"] = evidence_timestamp
+            _QUOTE_OBSERVATIONS[source_key] = {
+                "price": price,
+                "volume": quote.get("volume"),
+                "freshness_evidence": evidence,
+                "evidence_timestamp": evidence_timestamp,
+            }
+
 
 PSX_SCRIP_TO_SYMBOL: Dict[str, str] = {
     "SYSTEMS LIMITED": "SYS",
@@ -130,7 +307,7 @@ def fetch_dps_company_quote(ticker: str, timeout: float = 3.5) -> Optional[Dict[
         if resp.status_code != 200:
             return None
         html = resp.text
-        quote_timestamp = time.time()
+        received_timestamp = time.time()
 
         m_price = re.search(r'<div class="quote__close">Rs\.?\s*([0-9.,]+)</div>', html)
         if not m_price:
@@ -139,15 +316,45 @@ def fetch_dps_company_quote(ticker: str, timeout: float = 3.5) -> Optional[Dict[
         if price <= 0:
             return None
 
-        def _get_stat(lbl: str) -> float:
+        def _get_stat(lbl: str) -> Optional[float]:
             m = re.search(rf'<div class="stats_label">{lbl}</div>\s*<div class="stats_value">([0-9.,]+)</div>', html, re.I)
-            return _clean_float(m.group(1), 0.0) if m else 0.0
+            return _clean_float(m.group(1), None) if m else None
 
         ldcp = _get_stat("LDCP")
         open_p = _get_stat("Open")
         high_p = _get_stat("High")
         low_p = _get_stat("Low")
         vol = _get_stat("Volume")
+        circuit_match = re.search(
+            r'<div class="stats_label">\s*CIRCUIT BREAKER\s*</div>\s*'
+            r'<div class="stats_value">([^<]+)',
+            html,
+            re.I,
+        )
+        circuit_values = re.findall(
+            r"\d[\d,]*(?:\.\d+)?",
+            circuit_match.group(1) if circuit_match else "",
+        )
+        lower_limit = _clean_float(circuit_values[0]) if len(circuit_values) >= 2 else None
+        upper_limit = _clean_float(circuit_values[1]) if len(circuit_values) >= 2 else None
+
+        page_text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+        as_of_match = re.search(
+            r"\bAs of\s+([A-Za-z]{3},\s+[A-Za-z]{3}\s+\d{1,2},\s+\d{4}\s+"
+            r"\d{1,2}:\d{2}\s+[AP]M)",
+            page_text,
+            re.I,
+        )
+        quote_timestamp = None
+        if as_of_match:
+            try:
+                pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+                quote_timestamp = datetime.datetime.strptime(
+                    as_of_match.group(1),
+                    "%a, %b %d, %Y %I:%M %p",
+                ).replace(tzinfo=pkt_tz).timestamp()
+            except ValueError:
+                quote_timestamp = None
 
         chg_match = re.search(r'<div class="quote__change\s+([^"]+)">', html)
         is_neg = False
@@ -155,32 +362,39 @@ def fetch_dps_company_quote(ticker: str, timeout: float = 3.5) -> Optional[Dict[
             is_neg = True
 
         m_chg = re.search(r'<div class="change__value">([0-9.,]+)</div>', html)
-        chg_val = _clean_float(m_chg.group(1), 0.0) if m_chg else 0.0
-        if is_neg and chg_val > 0:
+        chg_val = _clean_float(m_chg.group(1), None) if m_chg else None
+        if is_neg and chg_val is not None and chg_val > 0:
             chg_val = -chg_val
 
         m_pct = re.search(r'<div class="change__percent">\s*\(([0-9.,]+)%\)</div>', html)
-        chg_pct = _clean_float(m_pct.group(1), 0.0) if m_pct else 0.0
-        if is_neg and chg_pct > 0:
+        chg_pct = _clean_float(m_pct.group(1), None) if m_pct else None
+        if is_neg and chg_pct is not None and chg_pct > 0:
             chg_pct = -chg_pct
 
-        prev_close = ldcp if ldcp > 0 else (round(price - chg_val, 2) if chg_val != 0 else price)
-        if chg_val == 0.0 and prev_close > 0 and price != prev_close:
+        prev_close = ldcp if ldcp is not None and ldcp > 0 else None
+        if prev_close is not None and chg_val is None:
             chg_val = round(price - prev_close, 2)
+        if prev_close is not None and chg_val == 0.0 and price != prev_close:
+            chg_val = round(price - prev_close, 2)
+        if prev_close is not None and chg_pct is None:
             chg_pct = round(((price - prev_close) / prev_close) * 100.0, 2)
 
         return {
             "price": round(price, 2),
-            "change": round(chg_val, 2),
-            "change_pct": round(chg_pct, 2),
-            "change_abs": round(chg_val, 2),
-            "prev_close": round(prev_close, 2),
-            "open": round(open_p, 2) if open_p > 0 else round(price, 2),
-            "high": round(high_p, 2) if high_p > 0 else round(price, 2),
-            "low": round(low_p, 2) if low_p > 0 else round(price, 2),
+            "change": round(chg_val, 2) if chg_val is not None else None,
+            "change_pct": round(chg_pct, 2) if chg_pct is not None else None,
+            "change_abs": round(chg_val, 2) if chg_val is not None else None,
+            "prev_close": round(prev_close, 2) if prev_close is not None else None,
+            "open": round(open_p, 2) if open_p is not None and open_p > 0 else None,
+            "high": round(high_p, 2) if high_p is not None and high_p > 0 else None,
+            "low": round(low_p, 2) if low_p is not None and low_p > 0 else None,
             "volume": vol,
             "source": "dps_company_realtime",
-            "timestamp": quote_timestamp,
+            "timestamp": quote_timestamp or received_timestamp,
+            "timestamp_kind": "exchange" if quote_timestamp is not None else "received",
+            "received_timestamp": received_timestamp,
+            "lower_limit": lower_limit,
+            "upper_limit": upper_limit,
         }
     except Exception:
         return None
@@ -265,8 +479,10 @@ def fetch_psx_market_summary_bulk(timeout: float = 5.0) -> Dict[str, Dict[str, A
                 "high": round(high_p, 2) if high_p > 0 else round(current, 2),
                 "low": round(low_p, 2) if low_p > 0 else round(current, 2),
                 "volume": volume,
-                "source": "psx_market_watch",
+                "source": "psx_market_summary",
                 "timestamp": now,
+                "timestamp_kind": "received",
+                "received_timestamp": now,
             }
 
             clean_scrip = re.sub(r'(\.|\s*)(XD|NC|XB|XR|WU|SPOT|PRO)$', '', scrip, flags=re.I).replace('.', '').strip()
@@ -289,7 +505,17 @@ def fetch_psx_market_summary_bulk(timeout: float = 5.0) -> Dict[str, Dict[str, A
         return {}
 
 
+@overload
+def _clean_float(raw: Any, default: None) -> Optional[float]:
+    ...
+
+
+@overload
 def _clean_float(raw: Any, default: float = 0.0) -> float:
+    ...
+
+
+def _clean_float(raw: Any, default: Optional[float] = 0.0) -> Optional[float]:
     if raw is None:
         return default
     if isinstance(raw, (int, float)):
@@ -412,6 +638,8 @@ def _parse_dps_market_watch_html(html: str) -> Dict[str, Dict[str, Any]]:
                 "is_shariah": is_shariah,
                 "source": "psx_market_watch",
                 "timestamp": now,
+                "timestamp_kind": "received",
+                "received_timestamp": now,
             }
     return quotes
 
@@ -610,6 +838,7 @@ def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -
             div_yield = _clean_float(d[11] if len(d) > 11 else None, None)
 
             if sym and price > 0:
+                received_timestamp = time.time()
                 prev_close = round(price - chg_abs, 2) if chg_abs != 0 else (
                     round(price / (1.0 + (chg_pct / 100.0)), 2) if chg_pct != 0 else price
                 )
@@ -630,7 +859,9 @@ def fetch_tradingview_psx_quotes(tickers: Iterable[str], timeout: float = 6.0) -
                     "pe_ttm": round(pe_ttm, 2) if pe_ttm is not None else None,
                     "dividend_yield": round(div_yield, 2) if div_yield is not None else None,
                     "source": "tradingview_psx_realtime",
-                    "timestamp": time.time(),
+                    "timestamp": received_timestamp,
+                    "timestamp_kind": "received",
+                    "received_timestamp": received_timestamp,
                 }
         return out
     except Exception:
@@ -646,17 +877,10 @@ def fetch_realtime_psx_quotes(
     timeout: float = 5.0,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    TASK 1: Multi-Source 1-Second Real-Time PSX Price Engine:
-    Fetches real-time intraday quotes concurrently across:
-      - Feed B (Primary): TradingView Real-Time Pakistan Stock Scanner (POST https://scanner.tradingview.com/pakistan/scan?_t={now_ms})
-      - Feed A (Secondary): Yahoo Finance v8 1-Minute Intraday Stream (https://query1.finance.yahoo.com/v8/finance/chart/{ticker}.KA)
-      - Feed C (Tertiary): PSX Direct Intraday Timeseries / Market Watch (https://dps.psx.com.pk)
-      - Feed D (Failsafe): In-memory cache and Supabase portfolio_holdings.last_price
-
-    Computes exact:
-      - prev_close = round(price - change_abs, 2)
-      - change_abs = round(price - prev_close, 2)
-      - change_pct = round((change_abs / prev_close) * 100.0, 2)
+    Fetches price tiers in order: Chromium bridge, PSX company page, PSX market watch,
+    PSX market summary, TradingView, Yahoo Finance, then stored cache/database prices.
+    Exchange/provider timestamps are preserved; receipt-only feeds require observed activity
+    before the portfolio state can classify them as live.
 
     Updates _BULK_QUOTES_CACHE so every component in the system gets instant live prices.
     """
@@ -672,7 +896,7 @@ def fetch_realtime_psx_quotes(
 
     quotes: Dict[str, Dict[str, Any]] = {}
 
-    # 1. Source 1 (Primary): Persistent 1-Tab Headless Chromium PSX Stream (sub-5ms when warm)
+    # 1. Persistent Chromium bridge (receipt time only; requires observed activity)
     try:
         chrom_quotes = fetch_chromium_psx_quotes(target_syms, timeout=min(timeout, 1.0))
         for s, q in chrom_quotes.items():
@@ -681,7 +905,7 @@ def fetch_realtime_psx_quotes(
     except Exception:
         pass
 
-    # 2. Source 2 (Official Real-Time PSX Data Portal): dps.psx.com.pk/company/{sym} (sub-300ms, 100% exact spot)
+    # 2. PSX company page (official quote time when present)
     missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if missing:
         dps_quotes = fetch_dps_company_quotes_concurrent(missing, timeout=min(timeout, 3.5))
@@ -689,7 +913,7 @@ def fetch_realtime_psx_quotes(
             if float(q.get("price") or 0.0) > 0:
                 quotes[s] = dict(q)
 
-    # 3. Source 3 (Official Real-Time PSX Market-Watch Table): dps.psx.com.pk/market-watch (500+ stocks)
+    # 3. DPS market-watch (receipt time only)
     missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if missing:
         dps_mw_quotes = fetch_live_psx_market_watch(timeout=min(timeout, 4.0))
@@ -697,7 +921,7 @@ def fetch_realtime_psx_quotes(
             if s in dps_mw_quotes and float(dps_mw_quotes[s].get("price", 0)) > 0:
                 quotes[s] = dict(dps_mw_quotes[s])
 
-    # 4. Source 4 (Bulk PSX Market Summary Feed): psx.com.pk/market-summary (590+ stocks)
+    # 4. PSX corporate market summary (receipt time only)
     missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if missing:
         bulk_quotes = fetch_psx_market_summary_bulk(timeout=min(timeout, 4.0))
@@ -705,9 +929,7 @@ def fetch_realtime_psx_quotes(
             if s in bulk_quotes and float(bulk_quotes[s].get("price", 0)) > 0:
                 quotes[s] = dict(bulk_quotes[s])
 
-    # 5. Source 5 (Delayed Fallback ONLY): TradingView Real-Time Pakistan Scanner
-    # CRITICAL: Only used for tickers STILL missing from all official PSX feeds.
-    # Never allowed to overwrite live/accurate DPS real-time quotes.
+    # 5. TradingView scanner (receipt time only; only used if PSX sources are missing)
     still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if still_missing:
         tv_quotes = fetch_tradingview_psx_quotes(still_missing, timeout=timeout)
@@ -717,7 +939,7 @@ def fetch_realtime_psx_quotes(
                 q_copy["source"] = "tradingview_psx_fallback"
                 quotes[s] = q_copy
 
-    # 6. Source 6: Yahoo Finance v8 Chart API & Direct Timeseries (Cloud-safe backup)
+    # 6. Yahoo Finance (provider timestamp when supplied)
     still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if still_missing:
         # Feed A: Yahoo Finance v8 Chart API
@@ -729,23 +951,33 @@ def fetch_realtime_psx_quotes(
                     q = fut.result()
                     if q and float(q.get("price", 0)) > 0:
                         pr = round(float(q["price"]), 2)
-                        ca = round(float(q.get("change", 0.0)), 2)
-                        cp = round(float(q.get("change_pct", 0.0)), 2)
-                        pc = round(pr - ca, 2) if ca != 0 else (round(pr / (1.0 + (cp / 100.0)), 2) if cp != 0 else pr)
+                        received_timestamp = time.time()
+                        raw_change = q.get("change")
+                        raw_change_pct = q.get("change_pct")
+                        raw_prev_close = q.get("prev_close")
+                        ca = round(float(raw_change), 2) if raw_change is not None else None
+                        cp = round(float(raw_change_pct), 2) if raw_change_pct is not None else None
+                        pc = round(float(raw_prev_close), 2) if raw_prev_close is not None else None
+                        if pc is not None and ca is None:
+                            ca = round(pr - pc, 2)
+                        if pc is not None and cp is None and pc > 0:
+                            cp = round(((pr - pc) / pc) * 100.0, 2)
                         quotes[s] = {
                             "price": pr,
                             "change": ca,
                             "change_pct": cp,
                             "change_abs": ca,
                             "prev_close": pc,
-                            "volume": 0.0,
+                            "volume": q.get("volume"),
                             "source": q.get("source", "yahoo_v8_ka"),
-                            "timestamp": time.time(),
+                            "timestamp": q.get("timestamp") or received_timestamp,
+                            "timestamp_kind": q.get("timestamp_kind", "received"),
+                            "received_timestamp": received_timestamp,
                         }
                 except Exception:
                     pass
 
-    # 6. Source 6: Cache & DB Fallback
+    # 7. In-memory and database fallback (stored timestamp; never live)
     still_missing = [s for s in target_syms if s not in quotes or quotes[s].get("price", 0) <= 0]
     if still_missing:
         db_quotes = _get_tier3_db_cached_quotes()
@@ -754,19 +986,36 @@ def fetch_realtime_psx_quotes(
                 quotes[s] = dict(_BULK_QUOTES_CACHE[s])
             elif s in db_quotes and db_quotes[s].get("price", 0) > 0:
                 pr = round(float(db_quotes[s]["price"]), 2)
-                cp = round(float(db_quotes[s].get("change_pct", 0.0)), 2)
                 quotes[s] = {
                     "price": pr,
-                    "change": 0.0,
-                    "change_pct": cp,
-                    "change_abs": 0.0,
-                    "prev_close": pr,
-                    "volume": 0.0,
+                    "change": None,
+                    "change_pct": None,
+                    "change_abs": None,
+                    "prev_close": None,
+                    "volume": None,
                     "source": "database_stored",
                     "price_source": db_quotes[s].get("price_source", "database_stored"),
                     "timestamp": db_quotes[s].get("timestamp"),
+                    "timestamp_kind": "stored",
+                    "received_timestamp": None,
                     "stored": True,
                 }
+
+    from portfolio_manager import is_psx_market_open
+    if is_psx_market_open() is True:
+        _attach_official_circuit_limits(quotes, target_syms, timeout)
+    else:
+        for quote in quotes.values():
+            if quote.get("stored"):
+                continue
+            quote.setdefault("price_limit_status", "unverified")
+            quote.setdefault("price_limit_source", None)
+            quote.setdefault("lower_limit", None)
+            quote.setdefault("upper_limit", None)
+            quote.setdefault("limit_previous_close", None)
+            quote.setdefault("limit_timestamp", None)
+            quote.setdefault("limit_retrieved_at", None)
+    _attach_quote_freshness_evidence(quotes)
 
     # Atomic cache update
     with _BULK_LOCK:
@@ -808,11 +1057,18 @@ def _fetch_psx_timeseries_intraday(ticker: str, timeout: float = 5.0) -> Optiona
                 if len(latest_point) >= 2:
                     price = _clean_float(latest_point[1], 0.0)
                     if price > 0:
+                        source_timestamp = _clean_float(latest_point[0], 0.0)
+                        if source_timestamp > 1e12:
+                            source_timestamp /= 1000.0
+                        received_timestamp = time.time()
                         return {
                             "price": round(price, 2),
-                            "change": 0.0,
-                            "change_pct": 0.0,
+                            "change": None,
+                            "change_pct": None,
                             "source": "dps_timeseries_int",
+                            "timestamp": source_timestamp or received_timestamp,
+                            "timestamp_kind": "provider" if source_timestamp > 0 else "received",
+                            "received_timestamp": received_timestamp,
                         }
     except Exception:
         pass
@@ -853,20 +1109,25 @@ def _fetch_single_yahoo_ka_quote(ticker: str, timeout: float = 5.0) -> Optional[
             price = _clean_float(meta.get("regularMarketPrice"), 0.0)
             if price <= 0:
                 continue
-            prev_close = _clean_float(
-                meta.get("chartPreviousClose") or meta.get("previousClose"),
-                price,
+            raw_prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+            prev_close = _clean_float(raw_prev_close, None)
+            if prev_close is not None and prev_close <= 0:
+                prev_close = None
+            change = round(price - prev_close, 2) if prev_close is not None else None
+            change_pct = (
+                round(((price - prev_close) / prev_close) * 100.0, 2)
+                if prev_close is not None and prev_close > 0
+                else None
             )
-            if prev_close <= 0:
-                prev_close = price
-            change = round(price - prev_close, 2)
-            change_pct = round(((price - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
             return {
                 "price": round(price, 2),
                 "change": change,
                 "change_pct": change_pct,
                 "source": "yahoo_v8_ka",
                 "timestamp": mkt_ts if mkt_ts > 0 else None,
+                "timestamp_kind": "provider" if mkt_ts > 0 else "received",
+                "prev_close": prev_close,
+                "volume": meta.get("regularMarketVolume"),
             }
         except Exception:
             continue
@@ -983,11 +1244,16 @@ def _get_tier3_db_cached_quotes() -> Dict[str, Dict[str, Any]]:
         return {
             sym: {
                 "price": float(val[0]),
-                "change": 0.0,
-                "change_pct": float(val[1]),
+                "change": None,
+                "change_pct": None,
+                "change_abs": None,
+                "prev_close": None,
+                "volume": None,
                 "source": "database_stored",
                 "price_source": val[3] if len(val) > 3 and val[3] else "database_stored",
                 "timestamp": val[2] if len(val) > 2 else None,
+                "timestamp_kind": "stored",
+                "received_timestamp": None,
                 "stored": True,
             }
             for sym, val in db_map.items()
@@ -1080,19 +1346,8 @@ def _is_fresh_verified_quote(quote: Dict[str, Any]) -> bool:
         or quote.get("stored")
     ):
         return False
-    try:
-        price = float(quote.get("price") or 0.0)
-        timestamp = float(quote.get("timestamp") or 0.0)
-    except (TypeError, ValueError):
-        return False
-    now_ts = time.time()
-    return (
-        math.isfinite(price)
-        and price > 0
-        and timestamp > 0
-        and timestamp <= now_ts + 1
-        and now_ts - timestamp <= 20
-    )
+    from live_portfolio import quote_is_fresh
+    return quote_is_fresh(quote, time.time())
 
 
 def get_live_price_and_change(ticker: str, allow_single_fallback: bool = True) -> Tuple[float, float]:
