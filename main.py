@@ -43,9 +43,11 @@ os.environ.pop("GEMINI_API_KEY", None)
 import subprocess
 import atexit
 import time
+from urllib.parse import urlsplit
 import base64
 import hashlib
 import hmac
+import secrets
 import uuid
 import json
 import re
@@ -921,11 +923,64 @@ async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True
 
 DASHBOARD_KEY = os.getenv("DASHBOARD_KEY", "").strip()
 INGEST_TOKEN = os.getenv("INGEST_TOKEN", "").strip()
+DASHBOARD_SESSION_TTL_SECONDS = 12 * 60 * 60
+SESSION_COOKIE_SECURE_MODE = os.getenv("SESSION_COOKIE_SECURE", "auto").strip().lower()
+_HTTP_SESSION_WARNING_LOGGED = False
+if SESSION_COOKIE_SECURE_MODE not in {"auto", "true", "false"}:
+    raise RuntimeError("SESSION_COOKIE_SECURE must be one of: auto, true, false")
 
 if not DASHBOARD_KEY:
     print("⚠️ [Startup Warning] DASHBOARD_KEY is unset; dashboard/API access will fail closed.", flush=True)
 if not INGEST_TOKEN:
     print("⚠️ [Startup Warning] INGEST_TOKEN is unset; WhatsApp/webhook ingestion remains unauthenticated.", flush=True)
+if SESSION_COOKIE_SECURE_MODE != "true":
+    print(
+        "⚠️ [Startup Warning] HTTPS is not enforced for dashboard sessions; "
+        "Secure is enabled only for HTTPS requests in auto mode.",
+        flush=True,
+    )
+
+
+def _request_uses_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    request_proto = request.url.scheme.lower()
+    if forwarded_proto in {"http", "https"}:
+        request_proto = forwarded_proto
+    return request_proto == "https"
+
+
+def _require_same_origin(request: Request):
+    origin = request.headers.get("origin")
+    if not origin:
+        raise HTTPException(status_code=403, detail="A same-origin request is required")
+    try:
+        parsed_origin = urlsplit(origin)
+        if parsed_origin.scheme.lower() not in {"http", "https"} or not parsed_origin.netloc:
+            raise HTTPException(status_code=403, detail="Invalid request origin")
+
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        expected_scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme.lower()
+        forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+        expected_host = forwarded_host or request.headers.get("host", "").strip()
+        origin_port = parsed_origin.port or (443 if parsed_origin.scheme.lower() == "https" else 80)
+        expected = urlsplit(f"{expected_scheme}://{expected_host}")
+        expected_port = expected.port or (443 if expected_scheme == "https" else 80)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid request origin")
+    if (
+        parsed_origin.username is not None
+        or parsed_origin.password is not None
+        or parsed_origin.scheme.lower() != expected_scheme
+        or parsed_origin.hostname is None
+        or expected.hostname is None
+        or parsed_origin.hostname.lower() != expected.hostname.lower()
+        or origin_port != expected_port
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+    ):
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
+
 
 def verify_dashboard_auth(request: Request):
     if not DASHBOARD_KEY:
@@ -935,23 +990,48 @@ def verify_dashboard_auth(request: Request):
     if auth_header.startswith("Bearer "):
         key = auth_header[7:].strip()
     key_matches = hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8"))
-    cookie_matches = hmac.compare_digest(
-        request.cookies.get("dashboard_session", "").encode("utf-8"),
-        _dashboard_session_token().encode("utf-8"),
-    )
+    cookie_matches = _is_valid_dashboard_session(request.cookies.get("dashboard_session", ""))
     if not (key_matches or cookie_matches):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
+    if cookie_matches and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        _require_same_origin(request)
     return True
 
-def _dashboard_session_token() -> str:
-    return hmac.new(
+
+def _create_dashboard_session_token() -> str:
+    issued_at = int(time.time())
+    nonce = secrets.token_urlsafe(32)
+    payload = f"{issued_at}.{nonce}"
+    signature = hmac.new(
         DASHBOARD_KEY.encode("utf-8"),
-        b"portfolio-agent-dashboard-session-v1",
+        payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _is_valid_dashboard_session(token: str) -> bool:
+    try:
+        issued_at_text, nonce, signature = token.split(".", 2)
+        issued_at = int(issued_at_text)
+    except (AttributeError, ValueError):
+        return False
+    if not nonce or not signature:
+        return False
+    now = int(time.time())
+    if issued_at > now + 30 or now >= issued_at + DASHBOARD_SESSION_TTL_SECONDS:
+        return False
+    payload = f"{issued_at}.{nonce}"
+    expected_signature = hmac.new(
+        DASHBOARD_KEY.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature.encode("utf-8"), expected_signature.encode("utf-8"))
 
 @app.post("/api/auth/session")
 async def create_dashboard_session(request: Request, response: Response):
+    global _HTTP_SESSION_WARNING_LOGGED
     if not DASHBOARD_KEY:
         raise HTTPException(status_code=503, detail="Dashboard authentication is not configured")
     key = request.headers.get("x-dashboard-key", "")
@@ -961,17 +1041,46 @@ async def create_dashboard_session(request: Request, response: Response):
     if not hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
     forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    request_https = _request_uses_https(request)
+    if not request_https and not _HTTP_SESSION_WARNING_LOGGED:
+        print(
+            "⚠️ [Session Security] Dashboard login is using HTTP; session cookies cannot be protected in transit.",
+            flush=True,
+        )
+        _HTTP_SESSION_WARNING_LOGGED = True
+    secure_cookie = SESSION_COOKIE_SECURE_MODE == "true" or (
+        SESSION_COOKIE_SECURE_MODE == "auto"
+        and request_https
+    )
     response.set_cookie(
         key="dashboard_session",
-        value=_dashboard_session_token(),
+        value=_create_dashboard_session_token(),
         httponly=True,
-        secure=request.url.scheme == "https" or forwarded_proto == "https",
+        secure=secure_cookie,
         samesite="strict",
-        max_age=12 * 60 * 60,
+        max_age=DASHBOARD_SESSION_TTL_SECONDS,
         path="/",
     )
     response.headers["Cache-Control"] = "no-store"
     return {"status": "authenticated"}
+
+
+@app.post("/api/auth/logout")
+async def logout_dashboard_session(request: Request, response: Response):
+    _require_same_origin(request)
+    secure_cookie = SESSION_COOKIE_SECURE_MODE == "true" or (
+        SESSION_COOKIE_SECURE_MODE == "auto" and _request_uses_https(request)
+    )
+    response.delete_cookie(
+        key="dashboard_session",
+        path="/",
+        httponly=True,
+        secure=secure_cookie,
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "logged_out"}
+
 
 def verify_ingest_auth(request: Request):
     if not INGEST_TOKEN:
