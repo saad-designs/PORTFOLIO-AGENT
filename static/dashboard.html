@@ -1961,9 +1961,6 @@
             <span>+ Log Trade</span>
           </button>
 
-          <button class="arch-btn" id="btn-reset-baseline" onclick="confirmResetKtradeBaseline()" title="Reset portfolio database to verified KTrade baseline (Rs. 4,357.38 Cash / Rs. 47,089.75 Custody)">
-            <span>Reset Baseline</span>
-          </button>
         </div>
 
         <button class="icon-sq-btn" onclick="openSearchModal()" title="Quick Search">
@@ -2050,6 +2047,8 @@
             </div>
           </div>
 
+          <div class="price-data-banner" role="status" style="display:none;padding:10px 14px;margin:0 0 16px;border:1px solid #6b5b28;border-radius:10px;background:#282315;color:#f0d98a;font-size:12px;"></div>
+
           <!-- Row 1: 4 Equal KPI Cards (Clean Seamless Header, Zero Cutouts) -->
           <div class="kpi-grid">
             <div class="kpi-card" onclick="openKpiBreakdown('net_worth')">
@@ -2057,8 +2056,8 @@
                 <div class="kpi-label">Total Net Worth</div>
                 <div class="kpi-action-btn" title="Inspect Total Net Worth">↗</div>
               </div>
-              <div class="kpi-value tabular" id="kpi-net-worth">Rs. 51,447.13</div>
-              <div class="kpi-trend tabular" id="kpi-net-worth-sub">Custody Rs. 47,089.75 + Cash Rs. 4,357.38</div>
+              <div class="kpi-value tabular" id="kpi-net-worth">—</div>
+              <div class="kpi-trend tabular" id="kpi-net-worth-sub">Waiting for database and quote data</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('custody')">
@@ -2066,8 +2065,8 @@
                 <div class="kpi-label">Custody Market Value</div>
                 <div class="kpi-action-btn" title="Inspect Custody Market Value">↗</div>
               </div>
-              <div class="kpi-value tabular" id="kpi-custody-val">Rs. 47,089.75</div>
-              <div class="kpi-trend tabular" id="kpi-custody-sub">Invested Cost (Inv): Rs. 50,919.36</div>
+              <div class="kpi-value tabular" id="kpi-custody-val">—</div>
+              <div class="kpi-trend tabular" id="kpi-custody-sub">Waiting for database and quote data</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('cash')">
@@ -2075,8 +2074,8 @@
                 <div class="kpi-label">KTrade Cash Available</div>
                 <div class="kpi-action-btn" title="Inspect Cash Available">↗</div>
               </div>
-              <div class="kpi-value tabular" id="kpi-cash-val">Rs. 4,357.38</div>
-              <div class="kpi-trend tabular" id="kpi-cash-sub">Working Capital: Rs. 51,446.75</div>
+              <div class="kpi-value tabular" id="kpi-cash-val">—</div>
+              <div class="kpi-trend tabular" id="kpi-cash-sub">Waiting for database data</div>
             </div>
 
             <div class="kpi-card" onclick="openKpiBreakdown('pnl')">
@@ -2084,8 +2083,8 @@
                 <div class="kpi-label" id="kpi-pnl-label">Total Unrealized P&amp;L</div>
                 <div class="kpi-action-btn" title="Inspect Total Unrealized P&L">↗</div>
               </div>
-              <div class="kpi-value tabular" id="kpi-pnl-val" style="color: var(--danger);">-Rs. 3,829.61 (-7.52%)</div>
-              <div class="kpi-trend tabular negative" id="kpi-pnl-sub">Last Session P&amp;L: -Rs. 107.46 (-0.23%)</div>
+              <div class="kpi-value tabular" id="kpi-pnl-val">—</div>
+              <div class="kpi-trend tabular" id="kpi-pnl-sub">Waiting for fresh quote data</div>
             </div>
           </div>
 
@@ -2244,7 +2243,7 @@
               <div class="flex items-center gap-2">
                 <div style="background: #0B0E0D; border: 1px solid #1E2623; border-radius: 8px; padding: 4px 10px; font-size: 12px; font-family: monospace;">
                   <span style="color: var(--muted);">Deployable Cash: </span>
-                  <strong style="color: var(--text);" id="brain-deployable-cash-pill">Rs. 4,357.38</strong>
+                  <strong style="color: var(--text);" id="brain-deployable-cash-pill">—</strong>
                 </div>
               </div>
             </div>
@@ -2275,7 +2274,7 @@
                     <span class="badge badge-emerald" style="font-size: 10px;">100% KMI SHARIAH CERTIFIED</span>
                   </div>
                   <div style="font-size: 11.5px; color: var(--muted); font-family: monospace;" id="opps-available-cash-label">
-                    Available Dry Powder: Rs. 4,357.38
+                    Available Dry Powder: —
                   </div>
                 </div>
                 <div id="opps-cards-container" style="display: flex; flex-direction: column; gap: 12px;"></div>
@@ -2419,8 +2418,8 @@
                     <span class="mini-acc-name">KTrade Custody</span>
                     <span>↗</span>
                   </div>
-                  <div class="mini-acc-val tabular" id="mini-custody-val">Rs. 47,089.75</div>
-                  <div class="mini-acc-tag" id="mini-custody-tag">••• 9 STOCKS</div>
+                  <div class="mini-acc-val tabular" id="mini-custody-val">—</div>
+                  <div class="mini-acc-tag" id="mini-custody-tag">••• HOLDINGS PENDING</div>
                 </div>
 
                 <div class="mini-account-card" onclick="openTxModal('cash')">
@@ -2428,7 +2427,7 @@
                     <span class="mini-acc-name">KTrade Cash</span>
                     <span>↗</span>
                   </div>
-                  <div class="mini-acc-val tabular" id="mini-cash-val">Rs. 4,357.38</div>
+                  <div class="mini-acc-val tabular" id="mini-cash-val">—</div>
                   <div class="mini-acc-tag">••• LIQUID</div>
                 </div>
 
@@ -2468,14 +2467,16 @@
             </div>
           </div>
 
+          <div class="price-data-banner" role="status" style="display:none;padding:10px 14px;margin:0 0 16px;border:1px solid #6b5b28;border-radius:10px;background:#282315;color:#f0d98a;font-size:12px;"></div>
+
           <div class="bento-card">
             <!-- Positions Summary Bar -->
             <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;border-bottom:1px solid #1E2623;background:#0C100E;border-radius:12px 12px 0 0;font-size:12px;">
               <div style="display:flex;flex-wrap:wrap;gap:16px;">
-                <div><span style="color:var(--muted);">Custody Market Value:</span> <strong style="color:var(--text);font-family:monospace;" id="pos-sum-mv">Rs. 0.00</strong></div>
-                <div><span style="color:var(--muted);">Total Cost Basis:</span> <strong style="color:var(--text);font-family:monospace;" id="pos-sum-cb">Rs. 0.00</strong></div>
-                <div><span style="color:var(--muted);">Total Unrealized P&amp;L:</span> <strong style="color:var(--lime);font-family:monospace;" id="pos-sum-pnl">+Rs. 0.00 (0.00%)</strong></div>
-                <div><span style="color:var(--muted);">Day P&amp;L:</span> <strong style="font-family:monospace;" id="pos-sum-day">+Rs. 0.00 (0.00%)</strong></div>
+                <div><span style="color:var(--muted);">Custody Market Value:</span> <strong style="color:var(--text);font-family:monospace;" id="pos-sum-mv">—</strong></div>
+                <div><span style="color:var(--muted);">Total Cost Basis:</span> <strong style="color:var(--text);font-family:monospace;" id="pos-sum-cb">—</strong></div>
+                <div><span style="color:var(--muted);">Total Unrealized P&amp;L:</span> <strong style="color:var(--lime);font-family:monospace;" id="pos-sum-pnl">—</strong></div>
+                <div><span style="color:var(--muted);">Day P&amp;L:</span> <strong style="font-family:monospace;" id="pos-sum-day">—</strong></div>
               </div>
               <div>
                 <button class="row-btn" onclick="openBulkCostModal()" style="font-size:11.5px;padding:5px 12px;background:#151B18;color:#7CE751;border:1px solid #24302B;">Edit All 9 Cost Bases</button>
@@ -3251,6 +3252,12 @@
       return (n < 0 ? '-Rs. ' : 'Rs. ') + abs;
     }
 
+    function fmtAvailablePKR(val, signed = false) {
+      return val === null || val === undefined || !Number.isFinite(Number(val))
+        ? 'Unavailable'
+        : fmtPKR(val, signed);
+    }
+
     function fmtCompactPKR(val) {
       const n = Number(val || 0);
       const abs = Math.abs(n);
@@ -3263,6 +3270,65 @@
       const n = Number(val || 0);
       const prefix = signed && n > 0 ? '+' : '';
       return prefix + n.toFixed(2) + '%';
+    }
+
+    function fmtAvailablePct(val, signed = true) {
+      return val === null || val === undefined || !Number.isFinite(Number(val))
+        ? 'Unavailable'
+        : fmtPct(val, signed);
+    }
+
+    function fmtQuoteTime(value) {
+      if (!value) return 'Unavailable';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return 'Unavailable';
+      return date.toLocaleString('en-GB', {
+        timeZone: 'Asia/Karachi',
+        hour12: false
+      }) + ' PKT';
+    }
+
+    function fmtQuoteAge(value) {
+      return value === null || value === undefined || !Number.isFinite(Number(value))
+        ? 'age unavailable'
+        : `${Number(value).toFixed(1)}s old`;
+    }
+
+    function updatePriceDataBanner(state) {
+      const banners = document.querySelectorAll('.price-data-banner');
+      if (!banners.length) return;
+      const holdings = Object.values(state?.holdings || {});
+      const statuses = [...new Set(holdings.map(h => h.status))];
+      const totals = state?.totals || {};
+      const affected = statuses.filter(status => status !== 'live');
+      let message;
+      if (!state?.holdings_available) {
+        message = 'Holdings and cash unavailable: the portfolio database could not be read.';
+      } else if (!holdings.length) {
+        message = 'No holdings are available from the portfolio database.';
+      } else if (!affected.length && !totals.partial) {
+        message = 'All displayed quotes are fresh and verified.';
+      } else {
+        const included = (totals.included_holdings || []).join(', ') || 'none';
+        const excluded = (totals.excluded_holdings || []).join(', ') || 'none';
+        message = `Price data ${affected.join(', ') || totals.status || 'partial'}. Totals are partial; included: ${included}; excluded: ${excluded}.`;
+      }
+      if (state?.last_quote_received) {
+        const quoteDate = new Date(state.last_quote_received);
+        const quoteTime = Number.isNaN(quoteDate.getTime())
+          ? 'timestamp unavailable'
+          : quoteDate.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false });
+        message += ` Last quote received: ${quoteTime} PKT.`;
+      } else {
+        message += ' Last quote received: unavailable.';
+      }
+      for (const banner of banners) {
+        banner.textContent = message;
+        banner.style.display = 'block';
+        banner.style.borderColor = affected.length || !state?.holdings_available ? '#6b5b28' : '#245a3a';
+        banner.style.background = affected.length || !state?.holdings_available ? '#282315' : '#13241a';
+        banner.style.color = affected.length || !state?.holdings_available ? '#f0d98a' : '#9be6b1';
+      }
     }
 
     function fmtDateShort(iso) {
@@ -3467,95 +3533,127 @@
         const res = await apiFetch('/api/live-prices/tick');
         if (!res.ok) return;
         const data = await res.json();
-        if (!data || !data.totals || !data.holdings || Object.keys(data.holdings).length === 0) return;
+        if (!data || !data.totals || !data.holdings) return;
+        updatePriceDataBanner(data);
 
         // 1. Top Heartbeat Badge Update
         const dotEl = document.getElementById('market-status-dot');
         const stateEl = document.getElementById('market-status-state');
         const detailEl = document.getElementById('market-status-details');
 
-        const isChromium = (data.source === 'chromium_psx_live');
+        const quoteHoldings = Object.values(data.holdings);
+        const liveCount = quoteHoldings.filter(h => h.status === 'live').length;
+        const isChromium = quoteHoldings.some(h => h.status === 'live' && h.price_source === 'chromium_psx_live');
+        const priceStateLabel = !data.holdings_available
+          ? 'HOLDINGS UNAVAILABLE'
+          : liveCount > 0
+            ? (data.partial ? 'PSX LIVE · PARTIAL' : (isChromium ? 'PSX LIVE CHROMIUM' : 'PSX LIVE'))
+            : quoteHoldings.length && quoteHoldings.every(h => h.status === 'closed')
+              ? 'PSX CLOSED · LAST CLOSE'
+              : quoteHoldings.length
+                ? 'PSX PRICE DATA STALE/UNAVAILABLE'
+                : 'NO HOLDINGS';
         if (dotEl) {
-          dotEl.className = 'heartbeat-dot ' + (data.market_open ? 'open-live' : 'closed-afterhours');
+          dotEl.className = 'heartbeat-dot ' + (liveCount > 0 ? 'open-live' : 'closed-afterhours');
         }
         if (stateEl) {
-          stateEl.textContent = data.market_open ? (isChromium ? 'PSX LIVE CHROMIUM' : 'PSX LIVE STREAM') : 'PSX CLOSED (SETTLEMENT)';
+          stateEl.textContent = priceStateLabel;
         }
         if (detailEl) {
-          let timeStr = '';
-          try {
-            const d = new Date(data.timestamp);
-            timeStr = d.toLocaleTimeString('en-US', { hour12: false, timeZone: 'Asia/Karachi' });
-          } catch (_) {
-            timeStr = new Date().toLocaleTimeString('en-US', { hour12: false });
-          }
-          if (data.market_open) {
-            const streamLabel = isChromium ? '1s STREAM' : 'STREAM';
-            detailEl.innerHTML = `${isChromium ? 'PSX LIVE CHROMIUM' : 'PSX LIVE'} &middot; ${streamLabel} &middot; Tick #${data.tick_seq || 0} (${timeStr} PKT)`;
-          } else {
-            detailEl.innerHTML = `PSX CLOSED (SETTLEMENT) &middot; 1s MONITOR ACTIVE &middot; Tick #${data.tick_seq || 0} (${timeStr} PKT)`;
-          }
+          detailEl.textContent = `Last quote received: ${fmtQuoteTime(data.last_quote_received)} · Heartbeat #${data.tick_seq || 0}${data.error ? ` · Error: ${data.error}` : ''}`;
         }
 
         // 2. Update KPI Cards in-place
         const nwEl = document.getElementById('kpi-net-worth');
-        if (nwEl) nwEl.textContent = fmtPKR(data.totals.total_net_worth);
+        if (nwEl) nwEl.textContent = fmtAvailablePKR(data.totals.total_net_worth);
         const nwSub = document.getElementById('kpi-net-worth-sub');
-        if (nwSub) nwSub.textContent = `Custody ${fmtPKR(data.totals.portfolio_custody_value)} + Cash ${fmtPKR(data.totals.ktrade_cash_balance)}`;
+        if (nwSub) nwSub.textContent = `Custody ${fmtAvailablePKR(data.totals.portfolio_custody_value)} + Cash ${fmtAvailablePKR(data.totals.ktrade_cash_balance)} · ${data.totals.status || data.status}${data.totals.partial ? ' · partial' : ''}`;
 
         const custEl = document.getElementById('kpi-custody-val');
-        if (custEl) custEl.textContent = fmtPKR(data.totals.portfolio_custody_value);
+        if (custEl) custEl.textContent = fmtAvailablePKR(data.totals.portfolio_custody_value);
         const custSub = document.getElementById('kpi-custody-sub');
-        if (custSub) custSub.textContent = `Invested Cost (Inv): ${fmtPKR(data.totals.invested_cost)}`;
+        if (custSub) custSub.textContent = `Invested Cost (database holdings): ${fmtAvailablePKR(data.totals.invested_cost)}`;
 
         const cashEl = document.getElementById('kpi-cash-val');
-        if (cashEl) cashEl.textContent = fmtPKR(data.totals.ktrade_cash_balance);
+        if (cashEl) cashEl.textContent = fmtAvailablePKR(data.totals.ktrade_cash_balance);
 
         const pnlValEl = document.getElementById('kpi-pnl-val');
         const pnlSub = document.getElementById('kpi-pnl-sub');
         if (pnlValEl) {
-          const uPnl = Number(data.totals.unrealized_pnl || 0);
-          const uPct = Number(data.totals.unrealized_pnl_pct || 0);
-          pnlValEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPct)})`;
-          pnlValEl.style.color = uPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
+          const uPnl = data.totals.unrealized_pnl;
+          const uPct = data.totals.unrealized_pnl_pct;
+          pnlValEl.textContent = uPnl === null || uPnl === undefined
+            ? 'Unavailable'
+            : `${fmtAvailablePKR(uPnl, true)} (${fmtAvailablePct(uPct)})`;
+          pnlValEl.style.color = uPnl === null || uPnl === undefined
+            ? 'var(--text-secondary)'
+            : Number(uPnl) >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
         }
         if (pnlSub) {
-          const dPnl = Number(data.totals.day_pnl || 0);
-          const dPct = Number(data.totals.day_pnl_pct || 0);
-          pnlSub.textContent = `Day P&L: ${fmtPKR(dPnl, true)} (${fmtPct(dPct)})`;
-          pnlSub.className = 'kpi-trend tabular ' + (dPnl >= 0 ? '' : 'negative');
+          const dPnl = data.totals.day_pnl;
+          const dPct = data.totals.day_pnl_pct;
+          pnlSub.textContent = `Day P&L: ${fmtAvailablePKR(dPnl, true)} (${fmtAvailablePct(dPct)})`;
+          pnlSub.className = 'kpi-trend tabular';
         }
 
         // Mini Accounts
         const miniCust = document.getElementById('mini-custody-val');
-        if (miniCust) miniCust.textContent = fmtPKR(data.totals.portfolio_custody_value);
+        if (miniCust) miniCust.textContent = fmtAvailablePKR(data.totals.portfolio_custody_value);
         const miniCash = document.getElementById('mini-cash-val');
-        if (miniCash) miniCash.textContent = fmtPKR(data.totals.ktrade_cash_balance);
+        if (miniCash) miniCash.textContent = fmtAvailablePKR(data.totals.ktrade_cash_balance);
 
         // 3. Update Positions Table Rows in-place with Flash Effects
         const tbody = document.getElementById('positions-tbody');
         const holdingsMap = data.holdings || {};
 
         if (tbody) {
+          if (!Object.keys(holdingsMap).length) {
+            tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px;">Holdings unavailable</td></tr>`;
+          }
           for (const [sym, h] of Object.entries(holdingsMap)) {
             const tr = tbody.querySelector(`tr[data-ticker="${sym}"]`);
             if (!tr) continue;
 
             const oldPrice = Number(tr.dataset.lastPrice || 0);
-            tr.dataset.lastPrice = h.price;
+            tr.dataset.lastPrice = h.price ?? '';
+            tr.dataset.priceStatus = h.status || 'unavailable';
+            tr.style.color = h.status === 'live' ? '' : 'var(--muted)';
 
             const spotCell = tr.querySelector('[data-col="spot"]');
             if (spotCell) {
               const priceDiv = spotCell.querySelector('.pos-spot-price');
-              if (priceDiv) priceDiv.textContent = `Rs. ${Number(h.price).toFixed(2)}`;
+              if (priceDiv) {
+                priceDiv.textContent = fmtAvailablePKR(h.price);
+                priceDiv.style.color = h.status === 'live' ? 'var(--text)' : 'var(--muted)';
+                priceDiv.title = h.status || 'unavailable';
+              }
               const chgDiv = spotCell.querySelector('.pos-day-chg');
               if (chgDiv) {
+                const hasChange = h.change_pct !== null && h.change_pct !== undefined;
                 const isPos = Number(h.change_pct) >= 0;
-                chgDiv.textContent = `${fmtPct(h.change_pct)} (${fmtPKR(h.day_pnl, true)})`;
-                chgDiv.style.color = isPos ? 'var(--emerald)' : 'var(--danger)';
+                chgDiv.textContent = `${fmtAvailablePct(h.change_pct)} (${fmtAvailablePKR(h.day_pnl, true)})`;
+                chgDiv.style.color = !hasChange ? 'var(--muted)' : isPos ? 'var(--emerald)' : 'var(--danger)';
+              }
+              const statusDiv = spotCell.querySelector('.pos-price-state');
+              if (statusDiv) statusDiv.textContent = `${h.status || 'unavailable'} · ${h.price_source || 'source unavailable'}`;
+              const quoteDiv = spotCell.querySelector('.pos-quote-time');
+              if (quoteDiv) quoteDiv.textContent = `Last quote: ${fmtQuoteTime(h.price_timestamp)} · ${fmtQuoteAge(h.price_age_seconds)}`;
+              if (!statusDiv) {
+                const status = document.createElement('div');
+                status.className = 'pos-price-state';
+                status.style.cssText = 'font-size:10px;color:var(--muted);';
+                status.textContent = `${h.status || 'unavailable'} · ${h.price_source || 'source unavailable'}`;
+                spotCell.appendChild(status);
+              }
+              if (!quoteDiv) {
+                const quoteTime = document.createElement('div');
+                quoteTime.className = 'pos-quote-time';
+                quoteTime.style.cssText = 'font-size:10px;color:var(--muted);';
+                quoteTime.textContent = `Last quote: ${fmtQuoteTime(h.price_timestamp)} · ${fmtQuoteAge(h.price_age_seconds)}`;
+                spotCell.appendChild(quoteTime);
               }
 
-              if (oldPrice > 0 && Math.abs(h.price - oldPrice) > 0.001) {
+              if (h.status === 'live' && oldPrice > 0 && Number.isFinite(Number(h.price)) && Math.abs(h.price - oldPrice) > 0.001) {
                 const flashClass = h.price > oldPrice ? 'tick-flash-up' : 'tick-flash-down';
                 spotCell.classList.remove('tick-flash-up', 'tick-flash-down');
                 void spotCell.offsetWidth;
@@ -3565,24 +3663,30 @@
             }
 
             const mvCell = tr.querySelector('[data-col="mv"]');
-            if (mvCell) mvCell.textContent = fmtPKR(h.market_value);
+            if (mvCell) {
+              mvCell.textContent = fmtAvailablePKR(h.market_value);
+              mvCell.style.color = h.status === 'live' ? 'var(--text)' : 'var(--muted)';
+            }
 
             const wtCell = tr.querySelector('[data-col="weight"]');
-            if (wtCell && data.totals.portfolio_custody_value > 0) {
+            if (wtCell && h.market_value !== null && h.market_value !== undefined && data.totals.portfolio_custody_value > 0) {
               wtCell.textContent = (h.market_value / data.totals.portfolio_custody_value * 100).toFixed(1) + '%';
+            } else if (wtCell) {
+              wtCell.textContent = '—';
             }
 
             const pnlCell = tr.querySelector('[data-col="pnl"]');
             if (pnlCell) {
+              const hasPnl = h.unrealized_pnl !== null && h.unrealized_pnl !== undefined;
               const isPos = Number(h.unrealized_pnl) >= 0;
-              pnlCell.innerHTML = `
+              pnlCell.innerHTML = hasPnl ? `
                 <div style="font-weight:700;color:${isPos ? 'var(--accent-lime)' : 'var(--danger)'};">
-                  ${fmtPKR(h.unrealized_pnl, true)}
+                  ${fmtAvailablePKR(h.unrealized_pnl, true)}
                 </div>
                 <div style="font-size:11px;color:${isPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
-                  ${fmtPct(h.unrealized_pnl_pct)}
+                  ${fmtAvailablePct(h.unrealized_pnl_pct)}
                 </div>
-              `;
+              ` : '<div style="color:var(--muted);">Unavailable</div>';
             }
           }
 
@@ -3591,19 +3695,27 @@
           const posCb = document.getElementById('pos-sum-cb');
           const posPnl = document.getElementById('pos-sum-pnl');
           const posDay = document.getElementById('pos-sum-day');
-          if (posMv) posMv.textContent = fmtPKR(data.totals.portfolio_custody_value);
-          if (posCb) posCb.textContent = fmtPKR(data.totals.invested_cost);
+          if (posMv) posMv.textContent = fmtAvailablePKR(data.totals.portfolio_custody_value);
+          if (posCb) posCb.textContent = fmtAvailablePKR(data.totals.invested_cost);
           if (posPnl) {
-            const uPnl = Number(data.totals.unrealized_pnl || 0);
-            const uPct = Number(data.totals.unrealized_pnl_pct || 0);
-            posPnl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPct)})`;
-            posPnl.style.color = uPnl >= 0 ? 'var(--lime)' : 'var(--danger)';
+            const uPnl = data.totals.unrealized_pnl;
+            const uPct = data.totals.unrealized_pnl_pct;
+            posPnl.textContent = uPnl === null || uPnl === undefined
+              ? 'Unavailable'
+              : `${fmtAvailablePKR(uPnl, true)} (${fmtAvailablePct(uPct)})`;
+            posPnl.style.color = uPnl === null || uPnl === undefined
+              ? 'var(--muted)'
+              : Number(uPnl) >= 0 ? 'var(--lime)' : 'var(--danger)';
           }
           if (posDay) {
-            const dPnl = Number(data.totals.day_pnl || 0);
-            const dPct = Number(data.totals.day_pnl_pct || 0);
-            posDay.textContent = `${fmtPKR(dPnl, true)} (${fmtPct(dPct)})`;
-            posDay.style.color = dPnl >= 0 ? 'var(--emerald)' : 'var(--danger)';
+            const dPnl = data.totals.day_pnl;
+            const dPct = data.totals.day_pnl_pct;
+            posDay.textContent = dPnl === null || dPnl === undefined
+              ? 'Unavailable'
+              : `${fmtAvailablePKR(dPnl, true)} (${fmtAvailablePct(dPct)})`;
+            posDay.style.color = dPnl === null || dPnl === undefined
+              ? 'var(--muted)'
+              : Number(dPnl) >= 0 ? 'var(--emerald)' : 'var(--danger)';
           }
         }
 
@@ -3633,9 +3745,21 @@
                 h.change_pct = live.change_pct;
                 h.change_abs = live.change_abs;
                 h.day_change_pkr = live.day_pnl;
+                h.price_status = live.status;
+                h.price_source = live.price_source;
+                h.price_timestamp = live.price_timestamp;
+                h.price_age_seconds = live.price_age_seconds;
                 h.weight_pct = data.totals.portfolio_custody_value > 0
                   ? Number((live.market_value / data.totals.portfolio_custody_value * 100).toFixed(1))
                   : h.weight_pct;
+              } else {
+                h.current_price = null;
+                h.market_value = null;
+                h.unrealized_pnl = null;
+                h.unrealized_pnl_pct = null;
+                h.price_status = 'unavailable';
+                h.price_source = null;
+                h.price_timestamp = null;
               }
             }
             if (APP_STATE.activeTab === 'overview' || !APP_STATE.activeTab) {
@@ -3721,32 +3845,6 @@
     setInterval(() => {
       pollLiveTickEverySecond();
     }, 1000);
-
-    async function confirmResetKtradeBaseline() {
-      if (!confirm('Reset portfolio database to exact KTrade verified baseline (Rs. 4,357.38 Cash / Rs. 47,089.75 Custody / 9 Holdings)?')) return;
-      const btn = document.getElementById('btn-reset-baseline');
-      if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = '<span>Resetting...</span>';
-      }
-      try {
-        const res = await apiFetch('/api/dashboard/reset-ktrade-baseline', { method: 'POST' });
-        const data = await res.json();
-        if (data.status === 'success') {
-          showToast('Portfolio database successfully reset to exact KTrade baseline!');
-          await loadOverviewData(true);
-        } else {
-          showToast('Reset failed: ' + (data.message || 'Unknown error'));
-        }
-      } catch (err) {
-        showToast('Reset error: ' + err.message);
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.innerHTML = '<span>Reset Baseline</span>';
-        }
-      }
-    }
 
     async function triggerEngineRun(engine) {
       const btnMap = {
@@ -3916,13 +4014,13 @@
       const kpis = ov.financial_summary.financial_kpis || {};
       const holdings = ov.financial_summary.holdings || [];
 
-      const netWorth = Number(kpis.total_net_worth || 0);
-      const custodyVal = Number(kpis.portfolio_market_value || 0);
-      const cashVal = Number(kpis.ktrade_available_cash || 0);
-      const dayChg = Number(kpis.day_change_pkr || 0);
-      const dayChgPct = Number(kpis.day_change_pct || 0);
-      const uPnl = Number(kpis.unrealized_pnl || 0);
-      const uPnlPct = Number(kpis.unrealized_pnl_pct || 0);
+      const netWorth = kpis.total_net_worth;
+      const custodyVal = kpis.portfolio_market_value;
+      const cashVal = kpis.ktrade_available_cash;
+      const dayChg = kpis.day_change_pkr;
+      const dayChgPct = kpis.day_change_pct;
+      const uPnl = kpis.unrealized_pnl;
+      const uPnlPct = kpis.unrealized_pnl_pct;
       const divBank = Number(kpis.net_dividends_in_bank || 0);
       const freshCap = Number(kpis.fresh_capital_invested || 0);
       const trueRoi = Number(kpis.true_roi_pct || 0);
@@ -3930,35 +4028,46 @@
       updatePsxMarketHeartbeat();
 
       // Row 1 KPIs
-      document.getElementById('kpi-net-worth').textContent = fmtPKR(netWorth);
+      document.getElementById('kpi-net-worth').textContent = fmtAvailablePKR(netWorth);
       const nwSub = document.getElementById('kpi-net-worth-sub');
-      nwSub.textContent = `Custody ${fmtPKR(custodyVal)} + Cash ${fmtPKR(cashVal)}`;
+      nwSub.textContent = `Custody ${fmtAvailablePKR(custodyVal)} + Cash ${fmtAvailablePKR(cashVal)} · ${ov.financial_summary.data_status || 'unknown'}${ov.financial_summary.data_partial ? ' · partial' : ''}`;
       nwSub.className = 'kpi-trend tabular';
 
-      const costBasisVal = Number(kpis.portfolio_cost_basis || kpis.total_cost_basis || 50919.36);
-      document.getElementById('kpi-custody-val').textContent = fmtPKR(custodyVal);
+      const costBasisVal = kpis.portfolio_cost_basis ?? kpis.total_cost_basis;
+      document.getElementById('kpi-custody-val').textContent = fmtAvailablePKR(custodyVal);
       const custSub = document.getElementById('kpi-custody-sub');
-      custSub.textContent = `Invested Cost (Inv): ${fmtPKR(costBasisVal)}`;
+      custSub.textContent = `Invested Cost (database holdings): ${fmtAvailablePKR(costBasisVal)}`;
       custSub.className = 'kpi-trend tabular';
 
-      document.getElementById('kpi-cash-val').textContent = fmtPKR(cashVal);
-      const workingCapVal = Number(kpis.fresh_capital_invested || kpis.working_capital || 50919.36);
-      document.getElementById('kpi-cash-sub').textContent = `Working Capital: ${fmtPKR(workingCapVal)}`;
+      document.getElementById('kpi-cash-val').textContent = fmtAvailablePKR(cashVal);
+      const workingCapVal = kpis.fresh_capital_invested ?? kpis.working_capital;
+      document.getElementById('kpi-cash-sub').textContent = `Working Capital: ${fmtAvailablePKR(workingCapVal)}`;
       const pill = document.getElementById('brain-deployable-cash-pill');
-      if (pill) pill.textContent = fmtPKR(cashVal);
+      if (pill) pill.textContent = fmtAvailablePKR(cashVal);
 
       // 4th KPI Card: Total Unrealized P&L
       const pnlValEl = document.getElementById('kpi-pnl-val');
       const pnlSub = document.getElementById('kpi-pnl-sub');
       const pnlLabel = document.getElementById('kpi-pnl-label');
-      const lastSessionPnl = Number(kpis.last_session_pnl_pkr ?? dayChg);
-      const lastSessionPct = Number(kpis.last_session_pnl_pct ?? dayChgPct);
+      const lastSessionPnl = kpis.last_session_pnl_pkr ?? dayChg;
+      const lastSessionPct = kpis.last_session_pnl_pct ?? dayChgPct;
 
       if (pnlLabel) pnlLabel.textContent = 'Total Unrealized P&L';
-      pnlValEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPnlPct)})`;
-      pnlValEl.style.color = uPnl >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
-      pnlSub.textContent = `Last Session P&L: ${fmtPKR(lastSessionPnl, true)} (${fmtPct(lastSessionPct)})`;
-      pnlSub.className = 'kpi-trend tabular ' + (lastSessionPnl >= 0 ? '' : 'negative');
+      pnlValEl.textContent = uPnl === null || uPnl === undefined
+        ? 'Unavailable'
+        : `${fmtAvailablePKR(uPnl, true)} (${fmtAvailablePct(uPnlPct)})`;
+      pnlValEl.style.color = uPnl === null || uPnl === undefined
+        ? 'var(--text-secondary)'
+        : Number(uPnl) >= 0 ? 'var(--accent-lime)' : 'var(--danger)';
+      pnlSub.textContent = `Last Session P&L: ${fmtAvailablePKR(lastSessionPnl, true)} (${fmtAvailablePct(lastSessionPct)})`;
+      pnlSub.className = 'kpi-trend tabular';
+      updatePriceDataBanner(ov.live_state || {
+        holdings: {},
+        totals: { partial: ov.financial_summary.data_partial },
+        status: ov.financial_summary.data_status,
+        holdings_available: ov.financial_summary.data_status !== 'unavailable',
+        last_quote_received: ov.financial_summary.last_quote_received
+      });
 
       // Render Scraped Intelligence Cards
       renderScrapedIntelligenceCards(ov.live_engines_data, holdings);
@@ -3972,9 +4081,9 @@
       renderRecentActivity();
 
       // Row 3 Mini Accounts
-      document.getElementById('mini-custody-val').textContent = fmtPKR(custodyVal);
+      document.getElementById('mini-custody-val').textContent = fmtAvailablePKR(custodyVal);
       document.getElementById('mini-custody-tag').textContent = `••• ${holdings.length} STOCKS`;
-      document.getElementById('mini-cash-val').textContent = fmtPKR(cashVal);
+      document.getElementById('mini-cash-val').textContent = fmtAvailablePKR(cashVal);
       document.getElementById('mini-div-val').textContent = fmtPKR(divBank);
 
       const routerModels = ov.system_health?.model_router?.models || {};
@@ -4076,7 +4185,9 @@
       const h = APP_STATE.overview?.financial_summary?.holdings?.[idx];
       const tip = document.getElementById('chart-tooltip');
       if (!h || !tip) return;
-      const pnlColor = Number(h.unrealized_pnl) >= 0 ? 'var(--lime)' : 'var(--danger)';
+      const pnlColor = h.unrealized_pnl === null || h.unrealized_pnl === undefined
+        ? 'var(--muted)'
+        : Number(h.unrealized_pnl) >= 0 ? 'var(--lime)' : 'var(--danger)';
       tip.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
           <strong style="font-size:14px;color:var(--text);">${escapeHtml(h.ticker)}</strong>
@@ -4085,9 +4196,10 @@
         <div style="display:grid;grid-template-columns:minmax(0, 1fr) auto;gap:4px 14px;font-size:12px;">
           <span style="color:var(--muted);">Shares</span><span class="tabular" style="font-weight:700;">${h.shares}</span>
           <span style="color:var(--muted);">Avg Cost</span><span class="tabular">Rs. ${Number(h.avg_price).toFixed(2)}</span>
-          <span style="color:var(--muted);">Spot Price</span><span class="tabular" style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)} (${fmtPct(h.change_pct)})</span>
-          <span style="color:var(--muted);">Market Value</span><span class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</span>
-          <span style="color:var(--muted);">Unrealized P&amp;L</span><span class="tabular" style="font-weight:700;color:${pnlColor};">${fmtPKR(h.unrealized_pnl, true)} (${fmtPct(h.unrealized_pnl_pct)})</span>
+          <span style="color:var(--muted);">Spot Price (${escapeHtml(h.price_status || 'unavailable')})</span><span class="tabular" style="font-weight:700;">${fmtAvailablePKR(h.current_price)} (${fmtAvailablePct(h.change_pct)})</span>
+          <span style="color:var(--muted);">Last Quote</span><span class="tabular">${escapeHtml(fmtQuoteTime(h.price_timestamp))} · ${escapeHtml(h.price_source || 'source unavailable')}</span>
+          <span style="color:var(--muted);">Market Value</span><span class="tabular" style="font-weight:700;">${fmtAvailablePKR(h.market_value)}</span>
+          <span style="color:var(--muted);">Unrealized P&amp;L</span><span class="tabular" style="font-weight:700;color:${pnlColor};">${fmtAvailablePKR(h.unrealized_pnl, true)} (${fmtAvailablePct(h.unrealized_pnl_pct)})</span>
         </div>
       `;
       tip.style.display = 'block';
@@ -4271,7 +4383,7 @@
       if (!h) return;
       openDetailModal(
         `${h.ticker} — ${h.sector}`,
-        `Verdict: ${h.verdict} · Weight: ${Number(h.weight_pct).toFixed(2)}% of custody`,
+        `Verdict: ${h.verdict} · Weight: ${h.weight_pct == null ? 'unavailable' : Number(h.weight_pct).toFixed(2) + '% of custody'}`,
         `
           <div class="js-grid-2" style="gap:10px;margin-bottom:14px;">
             <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
@@ -4280,15 +4392,16 @@
             </div>
             <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">Live Spot &amp; Day</div>
-              <div class="tabular" style="font-weight:700;font-size:15px;margin-top:3px;">Rs. ${Number(h.current_price).toFixed(2)} (${fmtPct(h.change_pct)})</div>
+              <div class="tabular" style="font-weight:700;font-size:15px;margin-top:3px;">${fmtAvailablePKR(h.current_price)} (${fmtAvailablePct(h.change_pct)})</div>
+              <div style="font-size:10px;color:var(--muted);">${escapeHtml(h.price_status || 'unavailable')} · ${escapeHtml(fmtQuoteTime(h.price_timestamp))}</div>
             </div>
             <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">DCF Fair Value</div>
-              <div class="tabular" style="font-weight:700;font-size:15px;color:var(--lime);margin-top:3px;">Rs. ${Number(h.dcf_fair_value).toFixed(2)} (${fmtPct(h.margin_of_safety_pct)} MoS)</div>
+              <div class="tabular" style="font-weight:700;font-size:15px;color:var(--lime);margin-top:3px;">Rs. ${Number(h.dcf_fair_value).toFixed(2)} (${fmtAvailablePct(h.margin_of_safety_pct)} MoS)</div>
             </div>
             <div style="padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--border);">
               <div style="font-size:11.5px;color:var(--muted);">Unrealized P&amp;L</div>
-              <div class="tabular" style="font-weight:700;font-size:15px;color:${Number(h.unrealized_pnl) >= 0 ? 'var(--lime)' : 'var(--danger)'};margin-top:3px;">${fmtPKR(h.unrealized_pnl, true)} (${fmtPct(h.unrealized_pnl_pct)})</div>
+              <div class="tabular" style="font-weight:700;font-size:15px;color:${h.unrealized_pnl == null ? 'var(--muted)' : Number(h.unrealized_pnl) >= 0 ? 'var(--lime)' : 'var(--danger)'};margin-top:3px;">${fmtAvailablePKR(h.unrealized_pnl, true)} (${fmtAvailablePct(h.unrealized_pnl_pct)})</div>
             </div>
           </div>
           <div style="padding:13px;border-radius:11px;background:var(--bg);border:1px solid var(--border);margin-bottom:14px;">
@@ -4313,42 +4426,57 @@
       const cbEl = document.getElementById('pos-sum-cb');
       const pnlEl = document.getElementById('pos-sum-pnl');
       const dayEl = document.getElementById('pos-sum-day');
-      if (mvEl) mvEl.textContent = fmtPKR(kpis.portfolio_market_value || 0);
-      if (cbEl) cbEl.textContent = fmtPKR(kpis.portfolio_cost_basis || 0);
+      if (mvEl) mvEl.textContent = fmtAvailablePKR(kpis.portfolio_market_value);
+      if (cbEl) cbEl.textContent = fmtAvailablePKR(kpis.portfolio_cost_basis);
       if (pnlEl) {
-        const uPnl = Number(kpis.unrealized_pnl || 0);
-        const uPct = Number(kpis.unrealized_pnl_pct || 0);
-        pnlEl.textContent = `${fmtPKR(uPnl, true)} (${fmtPct(uPct)})`;
-        pnlEl.style.color = uPnl >= 0 ? 'var(--lime)' : 'var(--danger)';
+        const uPnl = kpis.unrealized_pnl;
+        const uPct = kpis.unrealized_pnl_pct;
+        pnlEl.textContent = uPnl === null || uPnl === undefined
+          ? 'Unavailable'
+          : `${fmtAvailablePKR(uPnl, true)} (${fmtAvailablePct(uPct)})`;
+        pnlEl.style.color = uPnl === null || uPnl === undefined
+          ? 'var(--muted)'
+          : Number(uPnl) >= 0 ? 'var(--lime)' : 'var(--danger)';
       }
       if (dayEl) {
-        const dPnl = Number(kpis.day_change_pkr || 0);
-        const dPct = Number(kpis.day_change_pct || 0);
-        dayEl.textContent = `${fmtPKR(dPnl, true)} (${fmtPct(dPct)})`;
-        dayEl.style.color = dPnl >= 0 ? 'var(--emerald)' : 'var(--danger)';
+        const dPnl = kpis.day_change_pkr;
+        const dPct = kpis.day_change_pct;
+        dayEl.textContent = dPnl === null || dPnl === undefined
+          ? 'Unavailable'
+          : `${fmtAvailablePKR(dPnl, true)} (${fmtAvailablePct(dPct)})`;
+        dayEl.style.color = dPnl === null || dPnl === undefined
+          ? 'var(--muted)'
+          : Number(dPnl) >= 0 ? 'var(--emerald)' : 'var(--danger)';
+      }
+
+      if (!holdings.length) {
+        tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px;">Holdings unavailable</td></tr>`;
+        return;
       }
 
       tbody.innerHTML = holdings.map((h, idx) => {
         const hasCostDelta = Math.abs(Number(h.avg_price) - Number(h.current_price)) > 0.01;
-        const dayPnl = Number(h.day_change_pkr || 0);
-        const dayPct = Number(h.change_pct || 0);
-        const uPnl = Number(h.unrealized_pnl || 0);
-        const uPct = Number(h.unrealized_pnl_pct || 0);
+        const dayPnl = h.day_change_pkr;
+        const dayPct = h.change_pct;
+        const uPnl = h.unrealized_pnl;
+        const uPct = h.unrealized_pnl_pct;
+        const priceStatus = h.price_status || 'unavailable';
+        const affected = priceStatus !== 'live';
         const vBadge = h.verdict === 'ACCUMULATE' ? 'badge-lime' : (h.verdict === 'HOLD' ? 'badge-emerald' : 'badge-warn');
 
         const invCost = Number(h.invested_cost ?? (h.shares * h.avg_price));
-        const isUpnlPos = uPnl >= 0;
+        const isUpnlPos = Number(uPnl) >= 0;
         const pnlDisplayHtml = `
-          <div style="font-weight:700;color:${isUpnlPos ? 'var(--accent-lime)' : 'var(--danger)'};">
-            ${fmtPKR(uPnl, true)}
+          <div style="font-weight:700;color:${uPnl === null || uPnl === undefined ? 'var(--muted)' : isUpnlPos ? 'var(--accent-lime)' : 'var(--danger)'};">
+            ${fmtAvailablePKR(uPnl, true)}
           </div>
-          <div style="font-size:11px;color:${isUpnlPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
-            ${fmtPct(uPct)}
+          <div style="font-size:11px;color:${uPnl === null || uPnl === undefined ? 'var(--muted)' : isUpnlPos ? 'var(--accent-emerald)' : 'var(--danger)'};">
+            ${fmtAvailablePct(uPct)}
           </div>
         `;
 
         return `
-          <tr data-ticker="${escapeHtml(h.ticker)}" data-last-price="${Number(h.current_price)}" style="cursor:pointer;" onclick="openHoldingDetail(${idx})">
+          <tr data-ticker="${escapeHtml(h.ticker)}" data-last-price="${h.current_price ?? ''}" data-price-status="${escapeHtml(priceStatus)}" style="cursor:pointer;${affected ? 'color:var(--muted);' : ''}" onclick="openHoldingDetail(${idx})">
             <td data-label="Asset">
               <div class="ticker-badge-row">
                 <div class="ticker-circle">${escapeHtml(h.ticker.slice(0, 4))}</div>
@@ -4365,17 +4493,19 @@
             <td data-label="Avg Buy Cost" class="tabular" title="Click to edit average buy cost" onclick="event.stopPropagation(); openEditPositionModal('${escapeHtml(h.ticker)}', ${h.shares}, ${h.avg_price});" style="cursor:pointer;text-decoration:underline;text-decoration-color:#2A3631;color:#7CE751;">Rs. ${Number(h.avg_price).toFixed(2)}</td>
             <td data-label="Invested (Inv)" class="tabular" style="font-weight:600;">${fmtPKR(invCost)}</td>
             <td data-label="Live Spot & Day" data-col="spot" class="tabular">
-              <div class="pos-spot-price" style="font-weight:700;">Rs. ${Number(h.current_price).toFixed(2)}</div>
-              <div class="pos-day-chg" style="font-size:11px;color:${dayPct >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtPct(dayPct)} (${fmtPKR(dayPnl, true)})</div>
+              <div class="pos-spot-price" style="font-weight:700;color:${affected ? 'var(--muted)' : 'var(--text)'};" title="${escapeHtml(priceStatus)}">${h.current_price === null || h.current_price === undefined ? 'Unavailable' : fmtPKR(h.current_price)}</div>
+              <div class="pos-day-chg" style="font-size:11px;color:${dayPct === null || dayPct === undefined ? 'var(--muted)' : Number(dayPct) >= 0 ? 'var(--emerald)' : 'var(--danger)'};">${fmtAvailablePct(dayPct)} (${fmtAvailablePKR(dayPnl, true)})</div>
+              <div class="pos-price-state" style="font-size:10px;color:var(--muted);">${escapeHtml(priceStatus)} · ${escapeHtml(h.price_source || 'source unavailable')}</div>
+              <div class="pos-quote-time" style="font-size:10px;color:var(--muted);">Last quote: ${escapeHtml(fmtQuoteTime(h.price_timestamp))} · ${escapeHtml(fmtQuoteAge(h.price_age_seconds))}</div>
             </td>
-            <td data-label="Market Value" data-col="mv" class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</td>
-            <td data-label="Weight" data-col="weight" class="tabular">${Number(h.weight_pct).toFixed(1)}%</td>
+            <td data-label="Market Value" data-col="mv" class="tabular" style="font-weight:700;color:${affected ? 'var(--muted)' : 'var(--text)'};">${fmtAvailablePKR(h.market_value)}</td>
+            <td data-label="Weight" data-col="weight" class="tabular">${h.weight_pct === null || h.weight_pct === undefined ? '—' : Number(h.weight_pct).toFixed(1) + '%'}</td>
             <td data-label="Unrealized P&L" data-col="pnl" class="tabular">
               ${pnlDisplayHtml}
             </td>
             <td data-label="DCF Fair Value" class="tabular">
               <div>Rs. ${Number(h.dcf_fair_value).toFixed(2)}</div>
-              <div style="font-size:11px;color:var(--muted);">${fmtPct(h.margin_of_safety_pct)} MoS</div>
+              <div style="font-size:11px;color:var(--muted);">${fmtAvailablePct(h.margin_of_safety_pct)} MoS</div>
             </td>
             <td data-label="Signal"><span class="badge ${vBadge}">${escapeHtml(h.verdict)}</span></td>
             <td data-label="Actions" class="full-width" onclick="event.stopPropagation();">
@@ -4398,8 +4528,7 @@
         return;
       }
       container.innerHTML = holdings.map(h => {
-        const spot = Number(h.current_price || h.avg_price || 0);
-        const avg = Number(h.avg_price || spot);
+        const avg = Number(h.avg_price || 0);
         return `
           <div style="background:#0B0E0D;border:1px solid #1E2623;border-radius:8px;padding:10px 12px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
@@ -4407,7 +4536,7 @@
                 <strong style="color:#F0F4F2;font-size:13px;">${escapeHtml(h.ticker)}</strong>
                 <span style="font-size:11px;color:var(--muted);">${escapeHtml(h.sector)}</span>
               </div>
-              <span style="font-size:11px;font-family:monospace;color:var(--muted);">${h.shares} shs · Spot: Rs. ${spot.toFixed(2)}</span>
+              <span style="font-size:11px;font-family:monospace;color:var(--muted);">${h.shares} shs · Spot: ${fmtAvailablePKR(h.current_price)}</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px;">
               <label style="font-size:11.5px;color:var(--muted);white-space:nowrap;">Avg Buy Cost (PKR):</label>
@@ -5688,10 +5817,10 @@
             <div class="ticker-circle">${escapeHtml(h.ticker.slice(0, 4))}</div>
             <div>
               <div class="activity-title">${escapeHtml(h.ticker)} · ${escapeHtml(h.sector)}</div>
-              <div class="activity-sub">${h.shares} shares · Spot Rs. ${Number(h.current_price).toFixed(2)} · DCF Rs. ${Number(h.dcf_fair_value).toFixed(2)}</div>
+              <div class="activity-sub">${h.shares} shares · ${escapeHtml(h.price_status || 'unavailable')} spot ${fmtAvailablePKR(h.current_price)} · DCF Rs. ${Number(h.dcf_fair_value).toFixed(2)}</div>
             </div>
           </div>
-          <span class="tabular" style="font-weight:700;">${fmtPKR(h.market_value)}</span>
+          <span class="tabular" style="font-weight:700;">${fmtAvailablePKR(h.market_value)}</span>
         </div>
       `).join('') || '<div style="color:var(--muted);padding:12px;">No matching holdings.</div>';
     }
