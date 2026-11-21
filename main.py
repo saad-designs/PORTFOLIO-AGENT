@@ -44,6 +44,7 @@ import subprocess
 import atexit
 import time
 import base64
+import hmac
 import uuid
 import json
 import re
@@ -897,24 +898,26 @@ async def ping():
     return "OK"
 
 @app.get("/api/live-prices/tick")
-async def get_live_prices_tick():
+async def get_live_prices_tick(request: Request):
     """
     Ultra-Fast Dedicated 1-Second PSX Price & P&L Tick Endpoint (<20ms).
     Returns real-time mark-to-market totals and per-holding valuations directly from memory.
     Guaranteed never to return empty holdings: {} or hardcoded market_open.
     """
+    verify_dashboard_auth(request)
     global LIVE_PORTFOLIO_STATE
     if not LIVE_PORTFOLIO_STATE or not LIVE_PORTFOLIO_STATE.get("holdings"):
         return init_default_live_portfolio_state()
     return LIVE_PORTFOLIO_STATE
 
 @app.get("/api/test/psx-scraper")
-async def test_psx_scraper_endpoint(force_refresh: bool = True):
+async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True):
     """
     Diagnostic verification endpoint: fetches live PSX quotes for all 9 KTrade holdings
     (SYS, FFC, OGDC, MARI, HUBC, LUCK, EFERT, MEBL, FABL), updates portfolio_holdings,
     and returns PASS/FAIL status, scrape latency in ms, and live prices for all 9 tickers.
     """
+    verify_dashboard_auth(request)
     from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker, fetch_psx_data_robust
     from portfolio_manager import get_db_connection, invalidate_financial_summary_cache
 
@@ -992,16 +995,30 @@ async def test_psx_scraper_endpoint(force_refresh: bool = True):
     }
 
 DASHBOARD_KEY = os.getenv("DASHBOARD_KEY", "").strip()
+INGEST_TOKEN = os.getenv("INGEST_TOKEN", "").strip()
+
+if not DASHBOARD_KEY:
+    print("⚠️ [Startup Warning] DASHBOARD_KEY is unset; dashboard/API access will fail closed.", flush=True)
+if not INGEST_TOKEN:
+    print("⚠️ [Startup Warning] INGEST_TOKEN is unset; WhatsApp/webhook ingestion remains unauthenticated.", flush=True)
 
 def verify_dashboard_auth(request: Request):
     if not DASHBOARD_KEY:
-        return True
-    key = request.headers.get("x-dashboard-key") or request.query_params.get("key")
+        raise HTTPException(status_code=503, detail="Dashboard authentication is not configured")
+    key = request.headers.get("x-dashboard-key", "")
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         key = auth_header[7:].strip()
-    if key != DASHBOARD_KEY:
+    if not hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
+    return True
+
+def verify_ingest_auth(request: Request):
+    if not INGEST_TOKEN:
+        return True
+    supplied_token = request.headers.get("x-ingest-token", "")
+    if not hmac.compare_digest(supplied_token.encode("utf-8"), INGEST_TOKEN.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing INGEST_TOKEN")
     return True
 
 class DividendCreatePayload(BaseModel):
@@ -1678,6 +1695,7 @@ async def test_all_system_features(request: Request):
     5. PSX Corporate Announcements Watchdog
     6. Database & Ledger Financial Integrity
     """
+    verify_dashboard_auth(request)
     t0 = time.perf_counter()
 
     async def _check_prices():
@@ -2530,7 +2548,8 @@ async def get_dashboard_chat_history_endpoint(request: Request, limit: int = 50)
     return {"status": "success", "history": history}
 
 @app.get("/api/dashboard/whatsapp-qr")
-async def get_dashboard_whatsapp_qr():
+async def get_dashboard_whatsapp_qr(request: Request):
+    verify_dashboard_auth(request)
     if not is_whatsapp_bridge_enabled():
         return {
             "status": "DISABLED",
@@ -2599,7 +2618,8 @@ async def trigger_dashboard_sweep(sweep_type: str, background_tasks: BackgroundT
     }
 
 @app.get("/whatsapp-qr", response_class=HTMLResponse)
-async def whatsapp_qr_page():
+async def whatsapp_qr_page(request: Request):
+    verify_dashboard_auth(request)
     qr_data = None
     status = "DISABLED" if not is_whatsapp_bridge_enabled() else "INITIALIZING"
     
@@ -2783,6 +2803,7 @@ async def process_webhook_alert(ticker: str, signal: str, price: float):
 
 @app.post("/webhook/market-alert")
 async def handle_market_alert(request: Request, background_tasks: BackgroundTasks):
+    verify_ingest_auth(request)
     try:
         data = await request.json()
     except Exception:
@@ -2811,11 +2832,12 @@ class WhatsAppMessagePayload(BaseModel):
     filename: Optional[str] = None
 
 @app.post("/api/ingest-whatsapp-message")
-async def ingest_whatsapp_message(payload: WhatsAppMessagePayload):
+async def ingest_whatsapp_message(request: Request, payload: WhatsAppMessagePayload):
     """
     Non-blocking endpoint: puts incoming payload into in-memory queue
     and returns {"status": "queued"} in < 5ms.
     """
+    verify_ingest_auth(request)
     try:
         whatsapp_queue.put_nowait(payload)
         return {"status": "queued"}
@@ -2825,11 +2847,13 @@ async def ingest_whatsapp_message(payload: WhatsAppMessagePayload):
 
 @app.post("/api/ingest-whatsapp-media")
 async def ingest_whatsapp_media_endpoint(
+    request: Request,
     file: UploadFile = File(...),
     caption: str = Form(""),
     source: str = Form("WhatsApp Feed"),
     timestamp: Optional[int] = Form(None)
 ):
+    verify_ingest_auth(request)
     try:
         file_bytes = await file.read()
         mimetype = file.content_type or "application/octet-stream"
@@ -2853,7 +2877,8 @@ class WhatsAppTextPayload(BaseModel):
     timestamp: Optional[int] = None
 
 @app.post("/api/ingest-whatsapp-text")
-async def ingest_whatsapp_text(payload: WhatsAppTextPayload):
+async def ingest_whatsapp_text(request: Request, payload: WhatsAppTextPayload):
+    verify_ingest_auth(request)
     try:
         return await process_whatsapp_text_payload(
             text=payload.text,
@@ -2865,15 +2890,14 @@ async def ingest_whatsapp_text(payload: WhatsAppTextPayload):
         return {"status": "failed", "error": str(e)}
 
 @app.post("/trigger")
-async def trigger_agent():
+async def trigger_agent(request: Request):
+    verify_dashboard_auth(request)
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     initial_state = {"tickers": ["SYS", "HBL", "LUCK"]}
     
     await app.state.graph.ainvoke(initial_state, config=config)
-    from portfolio_manager import publish_agent_event
-    publish_agent_event('SYSTEM_ALERT', 'Manual Agent Trigger: SYS', 'Buy signal detected for SYS at optimal execution price. KMI-30 Compliant.', {'ticker': 'SYS'})
-    return {"thread_id": thread_id, "status": "started", "message": "Triggered and published to agent feed"}
+    return {"thread_id": thread_id, "status": "completed", "message": "Agent run completed"}
 
 if __name__ == "__main__":
     import uvicorn
