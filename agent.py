@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import mplfinance as mpf
 import uuid
 import os
+import logging
 import psycopg
 import psycopg2
 import psycopg2.extras
@@ -17,6 +18,8 @@ import matplotlib.pyplot as plt
 from cachetools import cached, TTLCache
 from portfolio_manager import get_live_price_and_change
 from valuation_engine import calculate_graham_intrinsic
+
+logger = logging.getLogger(__name__)
 
 def get_screened_opportunities() -> list[dict]:
     """
