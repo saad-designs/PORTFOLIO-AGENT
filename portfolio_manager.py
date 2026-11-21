@@ -221,6 +221,8 @@ def get_db_connection(db_url=None):
         )
 
     conn_str = db_url if db_url else DATABASE_URL
+    if not conn_str:
+        raise RuntimeError("SUPABASE_DB_URL is not configured; portfolio data is unavailable")
     if not db_url and conn_str:
         for _ in range(2):
             try:
@@ -229,6 +231,8 @@ def get_db_connection(db_url=None):
                 if raw_conn.closed:
                     pool_inst.putconn(raw_conn, close=True)
                     raw_conn = pool_inst.getconn()
+                if raw_conn.autocommit:
+                    raw_conn.autocommit = False
                 return _PooledConnectionProxy(raw_conn, pool_inst)
             except Exception:
                 global _PG_POOL
@@ -410,6 +414,7 @@ def create_dashboard_and_ledger_tables():
                     invested_cost NUMERIC(14,4),
                     avg_display NUMERIC(12,4),
                     price_updated_at TIMESTAMPTZ,
+                    price_source TEXT,
                     dividend_yield NUMERIC(8,4),
                     research_sentiment TEXT DEFAULT 'NEUTRAL',
                     sentiment_updated_at TIMESTAMPTZ,
@@ -446,6 +451,7 @@ def create_dashboard_and_ledger_tables():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
+            cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS price_source TEXT;")
         except Exception as e:
             print(f"⚠️ [DDL Notice] core tables setup: {e}", flush=True)
 
@@ -2022,12 +2028,7 @@ def log_dividend(
                 pass
 
         if resolved_shares is None:
-            try:
-                from main import KTRADE_BASELINE_HOLDINGS
-                base_meta = KTRADE_BASELINE_HOLDINGS.get(clean_ticker.upper(), {})
-                resolved_shares = float(base_meta.get("shares", 0.0))
-            except Exception:
-                resolved_shares = 0.0
+            resolved_shares = 0.0
 
         shares_val = float(resolved_shares or 0.0)
 
@@ -2441,15 +2442,14 @@ def record_trade_execution(
                     UPDATE portfolio_holdings
                     SET shares = %s,
                         avg_buy_price = %s,
-                        last_price = COALESCE(NULLIF(last_price, 0), %s),
                         updated_at = NOW()
                     WHERE id = %s
-                """, (new_shares, new_avg, prc, existing_h[0]))
+                """, (new_shares, new_avg, existing_h[0]))
             else:
                 cur.execute("""
-                    INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, last_price, updated_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                """, (clean_ticker, qty, prc, prc))
+                    INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                """, (clean_ticker, qty, prc))
 
             # Cash flow deduction in unified capital_ledger
             cash_note = f"Trade Execution: BUY {qty:g} {clean_ticker} @ {prc}"
@@ -2568,10 +2568,15 @@ def sync_full_portfolio_state(
         existing_spot_map = {}
         try:
             cur.execute("SAVEPOINT sp_read_spot;")
-            cur.execute("SELECT ticker, last_price, last_change_pct, price_updated_at FROM portfolio_holdings;")
+            cur.execute("SELECT ticker, last_price, last_change_pct, price_updated_at, price_source FROM portfolio_holdings;")
             for r in cur.fetchall():
-                if r[0] and r[1] and float(r[1]) > 0:
-                    existing_spot_map[str(r[0]).upper()] = (float(r[1]), float(r[2] or 0.0), r[3])
+                if r[0]:
+                    existing_spot_map[str(r[0]).upper()] = (
+                        float(r[1]) if r[1] is not None and float(r[1]) > 0 else None,
+                        float(r[2] or 0.0),
+                        r[3],
+                        r[4],
+                    )
             cur.execute("RELEASE SAVEPOINT sp_read_spot;")
         except Exception:
             cur.execute("ROLLBACK TO SAVEPOINT sp_read_spot;")
@@ -2595,24 +2600,27 @@ def sync_full_portfolio_state(
             shs = h["shares"]
             avg_p = h["avg_buy_price"]
             prev_spot = existing_spot_map.get(sym)
-            init_spot = prev_spot[0] if prev_spot else avg_p
+            init_spot = prev_spot[0] if prev_spot else None
             init_chg = prev_spot[1] if prev_spot else 0.0
             init_ts = prev_spot[2] if prev_spot else None
+            init_source = prev_spot[3] if prev_spot else None
             gross_cost = round(shs * avg_p, 2)
 
             cur.execute("""
                 INSERT INTO portfolio_holdings (
-                    ticker, shares, avg_buy_price, last_price, last_change_pct, price_updated_at, updated_at
+                    ticker, shares, avg_buy_price, last_price, last_change_pct,
+                    price_updated_at, price_source, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, COALESCE(%s, NOW()), NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (ticker) DO UPDATE
                 SET shares = EXCLUDED.shares,
                     avg_buy_price = EXCLUDED.avg_buy_price,
                     last_price = EXCLUDED.last_price,
                     last_change_pct = EXCLUDED.last_change_pct,
                     price_updated_at = EXCLUDED.price_updated_at,
+                    price_source = EXCLUDED.price_source,
                     updated_at = NOW();
-            """, (sym, shs, avg_p, init_spot, init_chg, init_ts))
+            """, (sym, shs, avg_p, init_spot, init_chg, init_ts, init_source))
 
             cur.execute("""
                 INSERT INTO trade_history (
@@ -2710,192 +2718,14 @@ def sync_full_portfolio_state(
 
 
 def reset_ktrade_baseline_data() -> dict:
-    """
-    Hard-resets portfolio database to exact KTrade verified baseline:
-    - Liquid Trading Cash: Rs. 4,357.38
-    - Custody Market Value: Rs. 47,089.75
-    - Working Capital: Rs. 51,446.75
-    - Total Net Worth: Rs. 51,447.13
-    - Total Cost Basis (Inv): Rs. 50,919.36
-    - Total Unrealized P&L: -Rs. 3,829.61 (-7.52%)
-    - Last Session Day P&L: -Rs. 107.46 (-0.23%)
-    - 9 verified holdings (EFERT, FABL, FFC, HUBC, LUCK, MARI, MEBL, OGDC, SYS)
-    - Wipes test dividend ledger rows and syncs trade_history.
-    """
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        try:
-            cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
-        except Exception:
-            pass
-        cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS invested_cost NUMERIC(14,4);")
-        cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS avg_display NUMERIC(12,4);")
-        cur.execute("ALTER TABLE portfolio_holdings ADD COLUMN IF NOT EXISTS last_change_abs NUMERIC(12,4) DEFAULT 0;")
-        cur.execute("DELETE FROM portfolio_holdings;")
-        cur.execute("DELETE FROM trade_history;")
-        cur.execute("DELETE FROM capital_ledger;")
-        cur.execute("DELETE FROM dividend_ledger;")
-        try:
-            cur.execute("SAVEPOINT sp_clear_legacy_cash;")
-            cur.execute("DELETE FROM cash_ledger;")
-            cur.execute("RELEASE SAVEPOINT sp_clear_legacy_cash;")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT sp_clear_legacy_cash;")
-
-        for h in REAL_KTRADE_HOLDINGS:
-            sym = h["ticker"]
-            shs = h["shares"]
-            avg_p = h["avg_buy_price"]
-            inv_c = h["invested_cost"]
-            avg_d = h.get("avg_display") or round(inv_c / shs, 2)
-            cur_p = h.get("current_price", avg_p)
-            chg_pct = h.get("last_change_pct", 0.0)
-            chg_abs = h.get("last_change_abs", 0.0)
-
-            cur.execute("""
-                INSERT INTO portfolio_holdings (
-                    ticker, shares, avg_buy_price, invested_cost, avg_display, last_price, last_change_pct, last_change_abs, price_updated_at, updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                ON CONFLICT (ticker) DO UPDATE
-                SET shares = EXCLUDED.shares,
-                    avg_buy_price = EXCLUDED.avg_buy_price,
-                    invested_cost = EXCLUDED.invested_cost,
-                    avg_display = EXCLUDED.avg_display,
-                    last_price = EXCLUDED.last_price,
-                    last_change_pct = EXCLUDED.last_change_pct,
-                    last_change_abs = EXCLUDED.last_change_abs,
-                    price_updated_at = NOW(),
-                    updated_at = NOW();
-            """, (sym, shs, avg_p, inv_c, avg_d, cur_p, chg_pct, chg_abs))
-
-            cur.execute("""
-                INSERT INTO trade_history (
-                    ticker, side, quantity, price, fees, fees_and_tax, net_total, executed_at, notes
-                )
-                VALUES (%s, 'BUY', %s, %s, 0.00, 0.00, %s, NOW(), 'KTrade Custody Baseline Sync');
-            """, (sym, shs, avg_d, inv_c))
-
-            dcf_defaults = DEFAULT_WATCHLIST_DCF_TARGETS.get(sym)
-            default_tp = dcf_defaults["target_price"] if dcf_defaults else round(cur_p * 1.18, 2)
-            default_sl = dcf_defaults["stop_loss"] if dcf_defaults else round(cur_p * 0.91, 2)
-            default_fpe = dcf_defaults["fair_pe"] if dcf_defaults else 8.5
-            try:
-                cur.execute("SAVEPOINT sp_watchlist_seed;")
-                cur.execute("""
-                    INSERT INTO watchlist_targets (ticker, target_price, stop_loss, historical_fair_pe)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (ticker) DO UPDATE
-                    SET target_price = EXCLUDED.target_price,
-                        stop_loss = EXCLUDED.stop_loss,
-                        historical_fair_pe = EXCLUDED.historical_fair_pe;
-                """, (sym, default_tp, default_sl, default_fpe))
-                cur.execute("RELEASE SAVEPOINT sp_watchlist_seed;")
-            except Exception:
-                cur.execute("ROLLBACK TO SAVEPOINT sp_watchlist_seed;")
-
-        # Working Capital: 51,446.75 PKR
-        cur.execute("""
-            INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
-            VALUES ('DEPOSIT_TO_KTRADE', 51446.75, 'KTrade Verified Working Capital Initial Deposit', 'KTrade Baseline', NOW(), NOW());
-        """)
-        # Deployed adjustment: -47,089.37 PKR -> available cash = 4,357.38 PKR
-        cur.execute("""
-            INSERT INTO capital_ledger (tx_type, amount, notes, reference_note, created_at, tx_date)
-            VALUES ('FEE_ADJUSTMENT', -47089.37, 'Deployed Equity Custody Baseline Sync', 'KTrade Baseline Deployed', NOW(), NOW());
-        """)
-
-        # Checkpoint lock
-        try:
-            cur.execute("SAVEPOINT sp_ckpt_baseline;")
-            cur.execute("""
-                INSERT INTO agent_checkpoints (key, value, updated_at)
-                VALUES ('ktrade_real_baseline_locked_v3', %s, NOW())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
-            """, (str(int(datetime.datetime.now().timestamp())),))
-            cur.execute("RELEASE SAVEPOINT sp_ckpt_baseline;")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT sp_ckpt_baseline;")
-
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                conn.close()
-            except Exception:
-                pass
-
-    invalidate_financial_summary_cache()
-    return get_complete_financial_summary(use_cached_prices=True)
+    """Disabled legacy operation; the old implementation deleted live portfolio records."""
+    raise RuntimeError("The hardcoded baseline reset is disabled; use the reviewed migration.")
 
 reset_ktrade_baseline = reset_ktrade_baseline_data
 
 
 def ensure_real_ktrade_portfolio_seeded() -> bool:
-    """
-    Detects empty, mock, or uncalibrated portfolio rows on boot and seeds the user's real 9-position KTrade book
-    (Cash: 4,357.38 PKR, Working Capital: 51,446.75 PKR) deterministically.
-    """
-    real_tickers = {h["ticker"] for h in REAL_KTRADE_HOLDINGS}
-    known_mock_tickers = {"AAPL", "TSLA", "MSFT", "TEST", "MOCK", "DEMO", "XYZ"}
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    needs_seed = False
-    try:
-        cur.execute("SELECT value FROM agent_checkpoints WHERE key = 'ktrade_real_baseline_locked_v3';")
-        locked_v3 = cur.fetchone() is not None
-
-        cur.execute("SELECT ticker, shares FROM portfolio_holdings WHERE shares > 0;")
-        rows = cur.fetchall()
-        current_tickers = {str(r[0]).upper() for r in rows if r[0]}
-
-        cur.execute("SELECT COALESCE(SUM(amount), 0) FROM capital_ledger WHERE tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER');")
-        cap_row = cur.fetchone()
-        fresh_cap = float(cap_row[0]) if cap_row else 0.0
-
-        if not current_tickers:
-            needs_seed = True
-        elif current_tickers & known_mock_tickers:
-            needs_seed = True
-        elif not locked_v3 or current_tickers != real_tickers or fresh_cap <= 0:
-            needs_seed = True
-    except Exception as e:
-        print(f"⚠️ [Portfolio Seed Check] {e}", flush=True)
-        return False
-    finally:
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                conn.close()
-            except Exception:
-                pass
-
-    if needs_seed:
-        print("🔄 [KTrade Sync] Seeding verified 9-position KTrade book and locking baseline...", flush=True)
-        reset_ktrade_baseline_data()
-        return True
+    """Compatibility shim; startup seeding is disabled in favor of reviewed DB migration."""
     return False
 
 
@@ -2905,7 +2735,7 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     (cached in memory for 120s via fetch_all_psx_prices_bulk) and updates last_price,
     last_change_pct, and price_updated_at in portfolio_holdings for all active holdings.
     """
-    from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker
+    from market_data_scraper import fetch_all_psx_prices_bulk
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -2914,7 +2744,7 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
             cur.execute("SET statement_timeout = '5000'; SET lock_timeout = '2000';")
         except Exception:
             pass
-        cur.execute("SELECT ticker, avg_buy_price, last_price FROM portfolio_holdings WHERE shares > 0;")
+        cur.execute("SELECT ticker FROM portfolio_holdings WHERE shares > 0;")
         rows = cur.fetchall()
     finally:
         if cur:
@@ -2935,41 +2765,65 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
     if not rows:
         return {"updated": 0, "prices": {}}
 
-    bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=force_refresh)
-    scraped: Dict[str, tuple[float, float, float, bool]] = {}
+    target_tickers = [str(row[0]).upper() for row in rows]
+    bulk_quotes = fetch_all_psx_prices_bulk(
+        force_refresh=force_refresh,
+        target_tickers=target_tickers,
+    )
+    updates: Dict[str, Dict[str, Any]] = {}
 
     for r in rows:
         sym = str(r[0]).upper()
-        fallback_p = float(r[2]) if r[2] is not None and float(r[2]) > 0 else float(r[1])
         q = bulk_quotes.get(sym)
-        if q and q.get("price", 0.0) > 0:
-            cp = float(q["price"])
-            chg_pct = float(q.get("change_pct", 0.0))
-            chg_abs = float(q.get("change", 0.0))
-            scraped[sym] = (cp, chg_pct, chg_abs, True)
-        else:
-            cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
-            if cp > 0:
-                scraped[sym] = (float(cp), float(chg or 0.0), 0.0, True)
-            else:
-                scraped[sym] = (fallback_p, 0.0, 0.0, False)
+        if not q:
+            continue
+        try:
+            cp = float(q.get("price") or 0.0)
+            quote_ts = float(q.get("timestamp") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        source = q.get("source")
+        if (
+            cp > 0
+            and quote_ts > 0
+            and source
+            and str(source).strip().lower() not in {
+                "db_cached_last_price",
+                "database_stored",
+                "realtime_feed",
+                "unknown",
+            }
+        ):
+            updates[sym] = {
+                "price": cp,
+                "change_pct": float(q.get("change_pct") or 0.0),
+                "change_abs": float(q.get("change_abs", q.get("change")) or 0.0),
+                "source": source,
+                "timestamp": quote_ts,
+            }
 
     w_conn = get_db_connection()
     w_cur = w_conn.cursor()
     updated = 0
     try:
-        for sym, (cp, chg, chg_abs, ok) in scraped.items():
-            if cp > 0:
-                w_cur.execute("""
+        for sym, quote in updates.items():
+            w_cur.execute("""
                     UPDATE portfolio_holdings
                     SET last_price = %s,
                         last_change_pct = %s,
                         last_change_abs = %s,
-                        price_updated_at = NOW()
+                        price_source = %s,
+                        price_updated_at = to_timestamp(%s)
                     WHERE UPPER(ticker) = %s;
-                """, (cp, chg, chg_abs, sym))
-                if ok:
-                    updated += 1
+                """, (
+                    quote["price"],
+                    quote["change_pct"],
+                    quote["change_abs"],
+                    quote["source"],
+                    quote["timestamp"],
+                    sym,
+                ))
+            updated += 1
         w_conn.commit()
         invalidate_financial_summary_cache()
     except Exception:
@@ -2980,7 +2834,8 @@ def refresh_portfolio_live_prices(force_refresh: bool = False) -> dict:
 
     return {
         "updated": updated,
-        "prices": {k: {"price": v[0], "change_pct": v[1], "change_abs": v[2]} for k, v in scraped.items()},
+        "prices": updates,
+        "unavailable": [str(row[0]).upper() for row in rows if str(row[0]).upper() not in updates],
     }
 
 
@@ -3065,7 +2920,8 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 w.current_trailing_pe,
                 COALESCE(p.last_change_abs, 0.0) AS last_change_abs,
                 p.invested_cost,
-                p.avg_display
+                p.avg_display,
+                p.price_source
             FROM portfolio_holdings p
             LEFT JOIN watchlist_targets w ON UPPER(p.ticker) = UPPER(w.ticker)
             WHERE p.shares > 0
@@ -3104,69 +2960,100 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
         if not kmi_set:
             kmi_set = {"SYS", "HUBC", "LUCK", "FFC", "EFERT", "MEBL", "MARI", "OGDC", "PPL", "POL", "FABL"}
 
-        price_map: Dict[str, tuple[float, float, float]] = {}
-        if use_cached_prices:
-            for row in holdings_rows:
-                sym = str(row[0]).upper()
-                avg_p = float(row[2])
-                cached_p = float(row[5]) if row[5] is not None and float(row[5]) > 0 else avg_p
-                cached_chg = float(row[6]) if row[6] is not None else 0.0
-                cached_abs = float(row[12]) if len(row) > 12 and row[12] is not None else 0.0
-                if cached_abs == 0.0 and cached_chg != 0.0:
-                    denom = 1.0 + (cached_chg / 100.0)
-                    prev_p = (cached_p / denom) if abs(denom) > 1e-6 else cached_p
-                    cached_abs = round(cached_p - prev_p, 2)
-                price_map[sym] = (cached_p, cached_chg, cached_abs)
-        else:
-            from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker
-            bulk_quotes = fetch_all_psx_prices_bulk(force_refresh=True)
-            scraped_updates = []
-            for r in holdings_rows:
-                sym = str(r[0]).upper()
-                default_p = float(r[5]) if r[5] is not None and float(r[5]) > 0 else float(r[2])
-                q = bulk_quotes.get(sym)
-                if q and q.get("price", 0.0) > 0:
-                    cp = float(q["price"])
-                    chg_pct = float(q.get("change_pct", 0.0))
-                    chg_abs = float(q.get("change", 0.0))
-                    dy = q.get("dividend_yield")
-                    price_map[sym] = (cp, chg_pct, chg_abs)
-                    scraped_updates.append((cp, chg_pct, chg_abs, dy, sym))
-                else:
-                    cp, chg = get_bulk_quote_for_ticker(sym, allow_single_fallback=True)
-                    if cp > 0:
-                        chg_p = float(chg or 0.0)
-                        denom = 1.0 + (chg_p / 100.0)
-                        prev_p = (cp / denom) if abs(denom) > 1e-6 else cp
-                        c_abs = round(cp - prev_p, 2)
-                        price_map[sym] = (float(cp), chg_p, c_abs)
-                        scraped_updates.append((float(cp), chg_p, c_abs, None, sym))
-                    else:
-                        price_map[sym] = (default_p, float(r[6] or 0.0), float(r[12] if len(r) > 12 and r[12] is not None else 0.0))
+        quote_map: Dict[str, Dict[str, Any]] = {}
+        if not use_cached_prices:
+            from market_data_scraper import fetch_all_psx_prices_bulk
+            quote_map = fetch_all_psx_prices_bulk(
+                force_refresh=True,
+                target_tickers=[str(row[0]).upper() for row in holdings_rows],
+            )
 
-            if scraped_updates:
-                try:
-                    cur.execute("SAVEPOINT sp_persist_spot;")
-                    for cp, chg, chg_abs, dy, sym in scraped_updates:
-                        if dy is not None and dy > 0:
-                            cur.execute("""
-                                UPDATE portfolio_holdings
-                                SET last_price = %s, last_change_pct = %s, last_change_abs = %s, dividend_yield = %s, price_updated_at = NOW()
-                                WHERE UPPER(ticker) = %s;
-                            """, (cp, chg, chg_abs, dy, sym))
-                        else:
-                            cur.execute("""
-                                UPDATE portfolio_holdings
-                                SET last_price = %s, last_change_pct = %s, last_change_abs = %s, price_updated_at = NOW()
-                                WHERE UPPER(ticker) = %s;
-                            """, (cp, chg, chg_abs, sym))
-                    cur.execute("RELEASE SAVEPOINT sp_persist_spot;")
-                    conn.commit()
-                except Exception:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_persist_spot;")
+        holdings_meta = {}
+        for row in holdings_rows:
+            sym = str(row[0]).upper()
+            holdings_meta[sym] = {
+                "shares": float(row[1]),
+                "avg_display": float(row[14]) if row[14] is not None else None,
+                "invested_cost": float(row[13]) if row[13] is not None else float(row[1]) * float(row[2]),
+                "last_price": float(row[5]) if row[5] is not None else None,
+                "price_timestamp": row[7],
+                "price_source": row[15],
+            }
+
+        from live_portfolio import build_live_state
+        now_ts = _time.time()
+        pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+        market_open = is_psx_market_open(datetime.datetime.fromtimestamp(now_ts, pkt_tz))
+        price_state = build_live_state(
+            holdings_meta,
+            quote_map,
+            available_cash,
+            True,
+            market_open,
+            now_ts,
+            0,
+        )
+        price_map = {
+            sym: (
+                item["price"],
+                item["change_pct"],
+                item["change_abs"],
+            )
+            for sym, item in price_state["holdings"].items()
+        }
+
+        scraped_updates = []
+        if not use_cached_prices:
+            for sym, quote in quote_map.items():
+                if (
+                    sym in holdings_meta
+                    and quote.get("price") is not None
+                    and quote.get("timestamp")
+                    and quote.get("source")
+                    and not quote.get("stored")
+                    and str(quote.get("source")).strip().lower() not in {
+                        "db_cached_last_price",
+                        "database_stored",
+                        "realtime_feed",
+                        "unknown",
+                    }
+                ):
+                    scraped_updates.append((
+                        float(quote["price"]),
+                        float(quote.get("change_pct") or 0.0),
+                        float(quote.get("change_abs", quote.get("change")) or 0.0),
+                        quote.get("dividend_yield"),
+                        sym,
+                        quote["source"],
+                        float(quote["timestamp"]),
+                    ))
+
+        if scraped_updates:
+            try:
+                cur.execute("SAVEPOINT sp_persist_spot;")
+                for cp, chg, chg_abs, dy, sym, source, quote_timestamp in scraped_updates:
+                    if dy is not None and dy > 0:
+                        cur.execute("""
+                            UPDATE portfolio_holdings
+                            SET last_price = %s, last_change_pct = %s, last_change_abs = %s,
+                                dividend_yield = %s, price_source = %s, price_updated_at = to_timestamp(%s)
+                            WHERE UPPER(ticker) = %s;
+                        """, (cp, chg, chg_abs, dy, source, quote_timestamp, sym))
+                    else:
+                        cur.execute("""
+                            UPDATE portfolio_holdings
+                            SET last_price = %s, last_change_pct = %s, last_change_abs = %s,
+                                price_source = %s, price_updated_at = to_timestamp(%s)
+                            WHERE UPPER(ticker) = %s;
+                        """, (cp, chg, chg_abs, source, quote_timestamp, sym))
+                cur.execute("RELEASE SAVEPOINT sp_persist_spot;")
+                conn.commit()
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_persist_spot;")
 
         portfolio_market_val = 0.0
         portfolio_cost = 0.0
+        portfolio_included_cost = 0.0
         holdings_detail = []
         sector_totals: Dict[str, float] = {}
 
@@ -3193,28 +3080,39 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
             fair_pe = float(row[10]) if row[10] is not None else defaults.get("fair_pe")
             trailing_pe = float(row[11]) if row[11] is not None else None
 
-            curr_price, change_pct, change_abs = price_map.get(tick, (avg_price, 0.0, 0.0))
-            if curr_price <= 0:
-                curr_price = avg_price
+            curr_price, change_pct, change_abs = price_map.get(tick, (None, None, None))
+            holding_state = price_state["holdings"].get(tick, {})
 
             invested_c = float(row[13]) if len(row) > 13 and row[13] is not None else round(shares * avg_price, 2)
             avg_disp = float(row[14]) if len(row) > 14 and row[14] is not None else round(invested_c / shares, 2)
 
-            mv = round(shares * curr_price, 2)
+            mv = round(shares * curr_price, 2) if curr_price is not None else None
             cb = round(invested_c, 2)
-            pnl = round(mv - cb, 2)
-            pnl_pct = round((pnl / cb * 100), 2) if cb > 0 else 0.0
+            pnl = round(mv - cb, 2) if mv is not None else None
+            pnl_pct = round((pnl / cb * 100), 2) if pnl is not None and cb > 0 else None
 
-            mos_pct = round(((dcf_fair_val - curr_price) / dcf_fair_val) * 100.0, 2) if dcf_fair_val > 0 else 0.0
-            stop_dist_pct = round(((curr_price - stop_loss_val) / curr_price) * 100.0, 2) if curr_price > 0 and stop_loss_val > 0 else 0.0
+            mos_pct = (
+                round(((dcf_fair_val - curr_price) / dcf_fair_val) * 100.0, 2)
+                if curr_price is not None and dcf_fair_val > 0
+                else None
+            )
+            stop_dist_pct = (
+                round(((curr_price - stop_loss_val) / curr_price) * 100.0, 2)
+                if curr_price is not None and curr_price > 0 and stop_loss_val > 0
+                else None
+            )
             sector = PSX_SECTOR_MAP.get(tick, "PSX Core Equity")
 
-            portfolio_market_val += mv
+            if mv is not None:
+                portfolio_market_val += mv
+                portfolio_included_cost += cb
+                sector_totals[sector] = sector_totals.get(sector, 0.0) + mv
             portfolio_cost += cb
-            sector_totals[sector] = sector_totals.get(sector, 0.0) + mv
 
-            if change_abs != 0.0:
+            if change_abs is not None and change_abs != 0.0:
                 day_chg_pkr = round(shares * change_abs, 2)
+            elif curr_price is None or change_pct is None:
+                day_chg_pkr = None
             else:
                 denom_day = 1.0 + (change_pct / 100.0)
                 prev_mv = (mv / denom_day) if abs(denom_day) > 1e-6 else mv
@@ -3241,6 +3139,10 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "market_value": mv,
                 "unrealized_pnl": pnl,
                 "unrealized_pnl_pct": pnl_pct,
+                "price_status": holding_state.get("status", "unavailable"),
+                "price_source": holding_state.get("price_source"),
+                "price_timestamp": holding_state.get("price_timestamp"),
+                "price_age_seconds": holding_state.get("price_age_seconds"),
                 "dividend_yield": div_yield,
                 "sentiment": sentiment,
                 "is_kmi30": tick in kmi_set,
@@ -3258,37 +3160,57 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
         sector_cap_limit = 30.0
 
         for h in holdings_detail:
-            h["weight_pct"] = round((h["market_value"] / portfolio_market_val * 100), 2) if portfolio_market_val > 0 else 0.0
-            sec_val = sector_totals.get(h["sector"], h["market_value"])
+            h["weight_pct"] = (
+                round((h["market_value"] / portfolio_market_val * 100), 2)
+                if h["market_value"] is not None and portfolio_market_val > 0
+                else None
+            )
+            sec_val = sector_totals.get(h["sector"], h["market_value"] or 0.0)
             sec_wt = round((sec_val / total_equity_pool * 100.0), 2) if total_equity_pool > 0 else h["weight_pct"]
             h["sector_weight_pct"] = sec_wt
             h["sector_cap_pct"] = sector_cap_limit
-            h["sector_cap_utilization_pct"] = round(min(150.0, (sec_wt / sector_cap_limit) * 100.0), 1)
+            h["sector_cap_utilization_pct"] = (
+                round(min(150.0, (sec_wt / sector_cap_limit) * 100.0), 1)
+                if sec_wt is not None
+                else None
+            )
 
-            if h["stop_loss"] > 0 and h["current_price"] <= h["stop_loss"]:
+            if h["price_status"] != "live":
+                verdict = "NO FRESH PRICE"
+            elif h["stop_loss"] > 0 and h["current_price"] <= h["stop_loss"]:
                 verdict = "STOP_RISK"
-            elif h["weight_pct"] > 30.0 and h["margin_of_safety_pct"] < 10.0:
+            elif h["weight_pct"] is not None and h["margin_of_safety_pct"] is not None and h["weight_pct"] > 30.0 and h["margin_of_safety_pct"] < 10.0:
                 verdict = "TRIM"
-            elif h["margin_of_safety_pct"] >= 18.0:
+            elif h["margin_of_safety_pct"] is not None and h["margin_of_safety_pct"] >= 18.0:
                 verdict = "ACCUMULATE"
-            elif h["margin_of_safety_pct"] <= -8.0 and h["ticker"] not in {"FFC", "EFERT", "MEBL", "HUBC"}:
+            elif h["margin_of_safety_pct"] is not None and h["margin_of_safety_pct"] <= -8.0 and h["ticker"] not in {"FFC", "EFERT", "MEBL", "HUBC"}:
                 verdict = "TRIM"
             else:
                 verdict = "HOLD"
             h["verdict"] = verdict
 
         # Sort holdings by market_value DESC
-        holdings_detail.sort(key=lambda x: x["market_value"], reverse=True)
+        holdings_detail.sort(key=lambda x: x["market_value"] or 0.0, reverse=True)
 
-        total_day_change_pkr = round(sum(float(h.get("day_change_pkr", 0.0)) for h in holdings_detail), 2)
-        prev_custody_val = portfolio_market_val - total_day_change_pkr
-        total_day_change_pct = round((total_day_change_pkr / prev_custody_val * 100.0), 2) if prev_custody_val > 0 else 0.0
+        day_values = [float(h["day_change_pkr"]) for h in holdings_detail if h.get("day_change_pkr") is not None]
+        total_day_change_pkr = round(sum(day_values), 2) if day_values else None
+        prev_custody_val = portfolio_market_val - (total_day_change_pkr or 0.0)
+        total_day_change_pct = (
+            round((total_day_change_pkr / prev_custody_val * 100.0), 2)
+            if total_day_change_pkr is not None and prev_custody_val > 0
+            else None
+        )
 
-        unrealized_pnl = round(portfolio_market_val - portfolio_cost, 2)
-        unrealized_pnl_pct = round((unrealized_pnl / portfolio_cost * 100), 2) if portfolio_cost > 0 else 0.0
-        net_worth = round(portfolio_market_val + available_cash, 2)
-        true_total_return = round((net_worth + net_div_bank) - fresh_capital, 2)
-        true_roi_pct = round((true_total_return / fresh_capital * 100), 2) if fresh_capital > 0 else 0.0
+        unrealized_pnl = round(portfolio_market_val - portfolio_included_cost, 2) if price_state["totals"]["included_holdings"] else None
+        unrealized_pnl_pct = (
+            round((unrealized_pnl / portfolio_included_cost * 100), 2)
+            if unrealized_pnl is not None and portfolio_included_cost > 0
+            else None
+        )
+        custody_value = round(portfolio_market_val, 2) if price_state["totals"]["included_holdings"] else None
+        net_worth = round(custody_value + available_cash, 2) if custody_value is not None else None
+        true_total_return = round((net_worth + net_div_bank) - fresh_capital, 2) if net_worth is not None else None
+        true_roi_pct = round((true_total_return / fresh_capital * 100), 2) if true_total_return is not None and fresh_capital > 0 else None
 
         result_payload = {
             "financial_kpis": {
@@ -3300,8 +3222,8 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "working_capital": fresh_capital,
                 "ktrade_available_cash": round(available_cash, 2),
                 "ktrade_cash_balance": round(available_cash, 2),
-                "portfolio_market_value": round(portfolio_market_val, 2),
-                "portfolio_custody_value": round(portfolio_market_val, 2),
+                "portfolio_market_value": custody_value,
+                "portfolio_custody_value": custody_value,
                 "portfolio_cost_basis": round(portfolio_cost, 2),
                 "total_cost_basis": round(portfolio_cost, 2),
                 "day_change_pkr": total_day_change_pkr,
@@ -3323,11 +3245,16 @@ def get_complete_financial_summary(use_cached_prices: bool = False, force_live: 
                 "total_net_dividends": round(net_div_bank + net_div_reinvested, 2),
                 "true_total_return": true_total_return,
                 "true_roi_pct": true_roi_pct,
-                "price_mode": "CACHED" if use_cached_prices else "LIVE",
+                "price_mode": "CACHED" if use_cached_prices else "VERIFIED_QUOTES",
             },
             "holdings": holdings_detail,
             "holdings_count": len(holdings_detail),
             "dividends": get_all_dividends(50),
+            "data_status": price_state["status"],
+            "data_partial": price_state["partial"],
+            "included_holdings": price_state["totals"]["included_holdings"],
+            "excluded_holdings": price_state["totals"]["excluded_holdings"],
+            "last_quote_received": price_state["last_quote_received"],
         }
         _CACHED_FIN_SUMMARY = {
             **result_payload,
@@ -3765,7 +3692,7 @@ def get_chat_history(limit: int = 50) -> list[dict]:
 # ==============================================================================
 
 def get_cached_db_prices() -> dict:
-    """Tier 3 live-price fallback: returns {TICKER: (last_price_or_avg, last_change_pct)} from portfolio_holdings."""
+    """Returns stored prices with their acquisition timestamp and source; never substitutes cost basis."""
     out = {}
     conn = get_db_connection()
     cur = conn.cursor()
@@ -3775,13 +3702,19 @@ def get_cached_db_prices() -> dict:
         except Exception:
             pass
         cur.execute("""
-            SELECT UPPER(ticker), COALESCE(NULLIF(last_price, 0), avg_buy_price), COALESCE(last_change_pct, 0)
+            SELECT UPPER(ticker), last_price, COALESCE(last_change_pct, 0),
+                   price_updated_at, price_source
             FROM portfolio_holdings
-            WHERE shares > 0;
+            WHERE shares > 0 AND last_price > 0;
         """)
         for r in cur.fetchall():
             if r[0] and r[1] and float(r[1]) > 0:
-                out[str(r[0]).upper()] = (round(float(r[1]), 2), round(float(r[2] or 0.0), 2))
+                out[str(r[0]).upper()] = (
+                    round(float(r[1]), 2),
+                    round(float(r[2] or 0.0), 2),
+                    r[3].timestamp() if r[3] else None,
+                    r[4] or "database_stored",
+                )
     except Exception:
         pass
     finally:
@@ -3827,20 +3760,19 @@ def update_portfolio_position(ticker: str, shares: float, avg_price: float) -> d
             return {"status": "deleted", "ticker": clean_ticker, "shares": 0.0, "avg_price": avg_p}
 
         cur.execute("""
-            INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, last_price, updated_at)
-            VALUES (%s, %s, %s, %s, NOW())
+            INSERT INTO portfolio_holdings (ticker, shares, avg_buy_price, updated_at)
+            VALUES (%s, %s, %s, NOW())
             ON CONFLICT (ticker) DO UPDATE
             SET shares = EXCLUDED.shares,
                 avg_buy_price = EXCLUDED.avg_buy_price,
-                last_price = COALESCE(NULLIF(portfolio_holdings.last_price, 0), EXCLUDED.avg_buy_price),
                 updated_at = NOW()
             RETURNING ticker, shares, avg_buy_price, last_price, last_change_pct;
-        """, (clean_ticker, shs, avg_p, avg_p))
+        """, (clean_ticker, shs, avg_p))
         row = cur.fetchone()
         conn.commit()
         invalidate_financial_summary_cache()
-        spot = float(row[3] or avg_p)
-        mv = round(float(row[1]) * spot, 2)
+        spot = float(row[3]) if row[3] is not None and float(row[3]) > 0 else None
+        mv = round(float(row[1]) * spot, 2) if spot is not None else None
         cb = round(float(row[1]) * float(row[2]), 2)
         return {
             "status": "updated",
@@ -3850,7 +3782,7 @@ def update_portfolio_position(ticker: str, shares: float, avg_price: float) -> d
             "last_price": spot,
             "market_value": mv,
             "cost_basis": cb,
-            "unrealized_pnl": round(mv - cb, 2),
+            "unrealized_pnl": round(mv - cb, 2) if mv is not None else None,
         }
     except Exception as e:
         conn.rollback()

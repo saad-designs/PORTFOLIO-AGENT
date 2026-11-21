@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import json
+import math
 import random
 import re
 import threading
@@ -129,6 +130,7 @@ def fetch_dps_company_quote(ticker: str, timeout: float = 3.5) -> Optional[Dict[
         if resp.status_code != 200:
             return None
         html = resp.text
+        quote_timestamp = time.time()
 
         m_price = re.search(r'<div class="quote__close">Rs\.?\s*([0-9.,]+)</div>', html)
         if not m_price:
@@ -178,7 +180,7 @@ def fetch_dps_company_quote(ticker: str, timeout: float = 3.5) -> Optional[Dict[
             "low": round(low_p, 2) if low_p > 0 else round(price, 2),
             "volume": vol,
             "source": "dps_company_realtime",
-            "timestamp": time.time(),
+            "timestamp": quote_timestamp,
         }
     except Exception:
         return None
@@ -760,8 +762,10 @@ def fetch_realtime_psx_quotes(
                     "change_abs": 0.0,
                     "prev_close": pr,
                     "volume": 0.0,
-                    "source": "db_cached_last_price",
-                    "timestamp": time.time(),
+                    "source": "database_stored",
+                    "price_source": db_quotes[s].get("price_source", "database_stored"),
+                    "timestamp": db_quotes[s].get("timestamp"),
+                    "stored": True,
                 }
 
     # Atomic cache update
@@ -862,6 +866,7 @@ def _fetch_single_yahoo_ka_quote(ticker: str, timeout: float = 5.0) -> Optional[
                 "change": change,
                 "change_pct": change_pct,
                 "source": "yahoo_v8_ka",
+                "timestamp": mkt_ts if mkt_ts > 0 else None,
             }
         except Exception:
             continue
@@ -971,7 +976,7 @@ def _fetch_psx_market_watch_tier2(timeout: int = 10) -> Dict[str, Dict[str, Any]
 # ==============================================================================
 
 def _get_tier3_db_cached_quotes() -> Dict[str, Dict[str, Any]]:
-    """Reads portfolio_holdings.last_price so spot price never drops to 0.0 during network blips."""
+    """Returns stored prices with their original timestamps, marked as database-stored."""
     try:
         from portfolio_manager import get_cached_db_prices
         db_map = get_cached_db_prices()
@@ -980,7 +985,10 @@ def _get_tier3_db_cached_quotes() -> Dict[str, Dict[str, Any]]:
                 "price": float(val[0]),
                 "change": 0.0,
                 "change_pct": float(val[1]),
-                "source": "db_cached_last_price",
+                "source": "database_stored",
+                "price_source": val[3] if len(val) > 3 and val[3] else "database_stored",
+                "timestamp": val[2] if len(val) > 2 else None,
+                "stored": True,
             }
             for sym, val in db_map.items()
             if val and float(val[0]) > 0
@@ -1003,7 +1011,7 @@ def fetch_all_psx_prices_bulk(
     - Tier 1: Yahoo Finance v8 Chart API (<TICKER>.KA) + Google Finance KAR CDN (0% 462 blocks on Cloud IPs)
     - Tier 2: PSX Market-Watch (https://dps.psx.com.pk/market-watch with Chrome headers & verify=False)
               for any ticker missing from Tier 1
-    - Tier 3: Supabase portfolio_holdings.last_price fallback so no holding ever returns 0.0
+    - Tier 3: Stored database prices, retained only for consumers that explicitly label them stale/closed.
     """
     global _BULK_QUOTES_CACHE, _BULK_QUOTES_TS
 
@@ -1059,39 +1067,62 @@ async def fetch_bulk_psx_quotes_async(force_refresh: bool = False, timeout: int 
     return await asyncio.to_thread(fetch_all_psx_prices_bulk, force_refresh, timeout)
 
 
+def _is_psx_market_open_now() -> bool:
+    from portfolio_manager import is_psx_market_open
+    return is_psx_market_open()
+
+
+def _is_fresh_verified_quote(quote: Dict[str, Any]) -> bool:
+    source = str(quote.get("source") or "").strip().lower()
+    if (
+        not source
+        or source in {"database_stored", "db_cached_last_price", "realtime_feed", "unknown"}
+        or quote.get("stored")
+    ):
+        return False
+    try:
+        price = float(quote.get("price") or 0.0)
+        timestamp = float(quote.get("timestamp") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    now_ts = time.time()
+    return (
+        math.isfinite(price)
+        and price > 0
+        and timestamp > 0
+        and timestamp <= now_ts + 1
+        and now_ts - timestamp <= 20
+    )
+
+
 def get_live_price_and_change(ticker: str, allow_single_fallback: bool = True) -> Tuple[float, float]:
     """
     Geo-Proof 3-Tier lookup for (spot_price, daily_change_pct):
     Tier 1: Yahoo Finance .KA / Google Finance KAR
     Tier 2: PSX Market-Watch bulk table
-    Tier 3: portfolio_holdings.last_price cached in Supabase
+    Stored database prices are not returned by this live-only interface.
     """
     sym = normalize_ticker(ticker)
-    if not sym:
+    if not sym or not _is_psx_market_open_now():
         return 0.0, 0.0
 
     bulk = fetch_all_psx_prices_bulk(force_refresh=False, target_tickers=[sym])
     entry = bulk.get(sym)
-    if entry and float(entry.get("price", 0.0)) > 0:
+    if entry and _is_fresh_verified_quote(entry):
         return float(entry["price"]), float(entry.get("change_pct", 0.0))
 
     if allow_single_fallback:
         dps_q = fetch_dps_company_quote(sym, timeout=4.0)
-        if dps_q and float(dps_q.get("price", 0.0)) > 0:
+        if dps_q and _is_fresh_verified_quote(dps_q):
             with _BULK_LOCK:
                 _BULK_QUOTES_CACHE[sym] = dps_q
             return float(dps_q["price"]), float(dps_q.get("change_pct", 0.0))
 
         t1 = _fetch_single_yahoo_ka_quote(sym, timeout=5.5)
-        if t1 and float(t1.get("price", 0.0)) > 0:
+        if t1 and _is_fresh_verified_quote(t1):
             with _BULK_LOCK:
                 _BULK_QUOTES_CACHE[sym] = t1
             return float(t1["price"]), float(t1.get("change_pct", 0.0))
-
-    # Tier 3 DB fallback
-    db_quotes = _get_tier3_db_cached_quotes()
-    if sym in db_quotes and float(db_quotes[sym]["price"]) > 0:
-        return float(db_quotes[sym]["price"]), float(db_quotes[sym].get("change_pct", 0.0))
 
     return 0.0, 0.0
 
@@ -1101,7 +1132,7 @@ get_bulk_quote_for_ticker = get_live_price_and_change
 
 
 def fetch_live_price(ticker: str) -> float:
-    """Returns live PSX spot price via the Geo-Proof 3-Tier Engine (never 0.0 for held stocks)."""
+    """Returns a fresh verified PSX quote or 0.0 when no live quote is available."""
     price, _ = get_live_price_and_change(ticker, allow_single_fallback=True)
     return price
 

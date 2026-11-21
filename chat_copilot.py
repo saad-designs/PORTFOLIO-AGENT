@@ -31,9 +31,6 @@ from portfolio_manager import (
     record_dividend,
     transfer_dividend_to_ktrade,
     sync_full_portfolio_state,
-    REAL_KTRADE_CASH_BALANCE,
-    REAL_KTRADE_WORKING_CAPITAL,
-    REAL_KTRADE_HOLDINGS,
     save_chat_message,
     get_chat_history,
     get_db_connection
@@ -290,16 +287,22 @@ def parse_copilot_response(raw_response: str, persisted_user_msg: str = "User qu
 
         if action_type == "SYNC_PORTFOLIO":
             raw_holdings = action_data.get("holdings")
-            holdings_list = raw_holdings if isinstance(raw_holdings, list) and len(raw_holdings) > 0 else REAL_KTRADE_HOLDINGS
-            cash_bal = (
-                float(action_data["cash_balance"])
-                if action_data.get("cash_balance") is not None
-                else REAL_KTRADE_CASH_BALANCE
-            )
+            if not isinstance(raw_holdings, list) or not raw_holdings or action_data.get("cash_balance") is None:
+                actions_taken.append({
+                    "type": "SYNC_PORTFOLIO",
+                    "label": "SYNC REJECTED",
+                    "details": "Explicit holdings and cash are required; stored portfolio data was not replaced.",
+                    "status": "REJECTED",
+                })
+                if not reply_text:
+                    reply_text = "Portfolio sync was not performed because explicit holdings and cash were not provided."
+                return
+            holdings_list = raw_holdings
+            cash_bal = float(action_data["cash_balance"])
             working_cap = (
                 float(action_data["total_working_capital"])
                 if action_data.get("total_working_capital") is not None
-                else (REAL_KTRADE_WORKING_CAPITAL if holdings_list is REAL_KTRADE_HOLDINGS else None)
+                else None
             )
             sync_res = sync_full_portfolio_state(
                 cash_balance=cash_bal,

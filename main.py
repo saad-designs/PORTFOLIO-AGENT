@@ -450,133 +450,107 @@ KTRADE_BASELINE_HOLDINGS: Dict[str, Dict[str, Any]] = {
 KTRADE_LOCKED_CASH = 4357.38
 KTRADE_LOCKED_INVESTED_COST = 50919.36
 
-_ACTIVE_HOLDINGS_META: Dict[str, Dict[str, Any]] = dict(KTRADE_BASELINE_HOLDINGS)
-_ACTIVE_CASH_BALANCE: float = KTRADE_LOCKED_CASH
+_ACTIVE_HOLDINGS_META: Dict[str, Dict[str, Any]] = {}
+_ACTIVE_CASH_BALANCE: Optional[float] = None
+_PORTFOLIO_DB_AVAILABLE = False
+_PORTFOLIO_DB_ERROR: Optional[str] = None
 LIVE_PORTFOLIO_STATE: Dict[str, Any] = {}
 _TICK_SEQ: int = 0
 _LAST_DB_SYNC_TS: float = 0.0
+_LAST_PORTFOLIO_DB_REFRESH_TS: float = 0.0
 _LATEST_QUOTES: Dict[str, Dict[str, Any]] = {}
-_PRICE_HISTORY_MAP: Dict[str, List[float]] = {k: [v["last_price"]] for k, v in KTRADE_BASELINE_HOLDINGS.items()}
+_PRICE_HISTORY_MAP: Dict[str, List[float]] = {}
+
+from live_portfolio import build_live_state, mark_live_state_stale
 
 
-def init_default_live_portfolio_state() -> Dict[str, Any]:
-    """Pre-populates LIVE_PORTFOLIO_STATE with all 9 KTrade custody holdings and baseline numbers on boot."""
-    global LIVE_PORTFOLIO_STATE, _TICK_SEQ
-    pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
-    pkt_now = datetime.datetime.now(pkt_tz)
-    market_open = is_psx_market_open(pkt_now)
-
-    total_custody = 0.0
-    total_inv = 0.0
-    holdings_out = {}
-    for sym, meta in KTRADE_BASELINE_HOLDINGS.items():
-        shs = float(meta["shares"])
-        inv = float(meta["invested_cost"])
-        avg_d = float(meta["avg_display"])
-        lp = float(meta["last_price"])
-        mv = round(shs * lp, 2)
-        u_pnl = round(mv - inv, 2)
-        u_pct = round((u_pnl / inv) * 100.0, 2) if inv > 0 else 0.0
-        total_custody += mv
-        total_inv += inv
-        holdings_out[sym] = {
-            "ticker": sym,
-            "shares": shs,
-            "price": lp,
-            "change_pct": 0.0,
-            "change_abs": 0.0,
-            "prev_close": lp,
-            "market_value": mv,
-            "invested_cost": inv,
-            "avg_display": avg_d,
-            "unrealized_pnl": u_pnl,
-            "unrealized_pnl_pct": u_pct,
-            "day_pnl": 0.0,
-            "volume": 0.0,
-            "pe_ttm": None,
-            "dividend_yield": None,
-            "source": "baseline_seed",
-            "sparkline": [lp],
-        }
-
-    total_custody = round(total_custody, 2)
-    total_inv = round(total_inv, 2)
-    u_tot = round(total_custody - total_inv, 2)
-    u_pct_tot = round((u_tot / total_inv) * 100.0, 2) if total_inv > 0 else 0.0
-    _TICK_SEQ = max(1, _TICK_SEQ)
-    LIVE_PORTFOLIO_STATE = {
-        "source": "chromium_psx_live",
-        "timestamp": pkt_now.isoformat(),
-        "market_open": market_open,
-        "tick_seq": _TICK_SEQ,
-        "latency_ms": 0.1,
-        "totals": {
-            "total_net_worth": round(total_custody + KTRADE_LOCKED_CASH, 2),
-            "portfolio_custody_value": total_custody,
-            "invested_cost": total_inv,
-            "ktrade_cash_balance": KTRADE_LOCKED_CASH,
-            "unrealized_pnl": u_tot,
-            "unrealized_pnl_pct": u_pct_tot,
-            "day_pnl": 0.0,
-            "day_pnl_pct": 0.0,
-        },
-        "holdings": holdings_out,
-    }
+def _refresh_live_portfolio_snapshot(error: Optional[str] = None) -> Dict[str, Any]:
+    global LIVE_PORTFOLIO_STATE
+    now_ts = time.time()
+    pkt_now = datetime.datetime.fromtimestamp(
+        now_ts,
+        datetime.timezone(datetime.timedelta(hours=5)),
+    )
+    LIVE_PORTFOLIO_STATE = build_live_state(
+        _ACTIVE_HOLDINGS_META,
+        _LATEST_QUOTES,
+        _ACTIVE_CASH_BALANCE,
+        _PORTFOLIO_DB_AVAILABLE,
+        is_psx_market_open(pkt_now),
+        now_ts,
+        _TICK_SEQ,
+        error or _PORTFOLIO_DB_ERROR,
+    )
     return LIVE_PORTFOLIO_STATE
 
 
-# Pre-seed on second zero so /api/live-prices/tick never returns empty holdings
-init_default_live_portfolio_state()
+_refresh_live_portfolio_snapshot()
 
 
 def refresh_active_holdings_meta():
     """Refreshes active holdings metadata and cash balance from DB into memory."""
-    global _ACTIVE_HOLDINGS_META, _ACTIVE_CASH_BALANCE
+    global _ACTIVE_HOLDINGS_META, _ACTIVE_CASH_BALANCE, _PORTFOLIO_DB_AVAILABLE, _PORTFOLIO_DB_ERROR
+    conn = None
+    cur = None
     try:
         from portfolio_manager import get_db_connection
         conn = get_db_connection()
         cur = conn.cursor()
-        try:
-            cur.execute("""
-                SELECT ticker, shares, avg_buy_price, invested_cost, avg_display, last_price
-                FROM portfolio_holdings
-                WHERE shares > 0;
-            """)
-            rows = cur.fetchall()
-            meta = {}
-            for r in rows:
-                sym = str(r[0]).upper()
-                meta[sym] = {
-                    "shares": float(r[1]),
-                    "avg_buy_price": float(r[2]),
-                    "invested_cost": float(r[3]) if r[3] is not None else float(r[1]) * float(r[2]),
-                    "avg_display": float(r[4]) if r[4] is not None else float(r[2]),
-                    "last_price": float(r[5]) if r[5] is not None and float(r[5]) > 0 else float(r[2]),
-                }
-            if meta:
-                _ACTIVE_HOLDINGS_META = meta
+        cur.execute("""
+            SELECT ticker, shares, avg_buy_price, invested_cost, avg_display, last_price,
+                   price_updated_at, price_source, last_change_pct, last_change_abs
+            FROM portfolio_holdings
+            WHERE shares > 0;
+        """)
+        meta = {}
+        for r in cur.fetchall():
+            sym = str(r[0]).upper()
+            meta[sym] = {
+                "shares": float(r[1]),
+                "avg_buy_price": float(r[2]),
+                "invested_cost": float(r[3]) if r[3] is not None else float(r[1]) * float(r[2]),
+                "avg_display": float(r[4]) if r[4] is not None else None,
+                "last_price": float(r[5]) if r[5] is not None and float(r[5]) > 0 else None,
+                "price_timestamp": r[6],
+                "price_source": r[7],
+                "last_change_pct": float(r[8]) if r[8] is not None else None,
+                "last_change_abs": float(r[9]) if r[9] is not None else None,
+            }
+        cur.execute("""
+            SELECT COALESCE(SUM(CASE
+                WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER', 'DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
+                WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
+                WHEN tx_type = 'FEE_ADJUSTMENT' THEN amount
+                ELSE 0
+            END), 0) FROM capital_ledger;
+        """)
+        cash_row = cur.fetchone()
+        if cash_row is None or cash_row[0] is None:
+            raise RuntimeError("Cash balance query returned no value")
+        _ACTIVE_HOLDINGS_META = meta
+        _ACTIVE_CASH_BALANCE = float(cash_row[0])
+        _PORTFOLIO_DB_AVAILABLE = True
+        _PORTFOLIO_DB_ERROR = None
+    except Exception as exc:
+        _ACTIVE_HOLDINGS_META = {}
+        _ACTIVE_CASH_BALANCE = None
+        _PORTFOLIO_DB_AVAILABLE = False
+        _PORTFOLIO_DB_ERROR = str(exc)
+        print(f"⚠️ [Portfolio State] Database unavailable: {exc}", flush=True)
+    finally:
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
-            cur.execute("""
-                SELECT COALESCE(SUM(CASE
-                    WHEN tx_type IN ('DEPOSIT_TO_KTRADE', 'DEPOSIT_TO_BROKER', 'DIVIDEND_SENT_TO_KTRADE', 'DIVIDEND_BANK_TO_BROKER') THEN amount
-                    WHEN tx_type IN ('WITHDRAWAL_FROM_KTRADE', 'WITHDRAWAL_FROM_BROKER') THEN -amount
-                    WHEN tx_type = 'FEE_ADJUSTMENT' THEN amount
-                    ELSE 0
-                END), 0) FROM capital_ledger;
-            """)
-            c_row = cur.fetchone()
-            if c_row and float(c_row[0]) > 0:
-                _ACTIVE_CASH_BALANCE = float(c_row[0])
-            else:
-                _ACTIVE_CASH_BALANCE = KTRADE_LOCKED_CASH
-        except Exception:
-            pass
-        finally:
-            cur.close()
-            conn.close()
-    except Exception:
-        _ACTIVE_HOLDINGS_META = dict(KTRADE_BASELINE_HOLDINGS)
-        _ACTIVE_CASH_BALANCE = KTRADE_LOCKED_CASH
+    _refresh_live_portfolio_snapshot()
+    return _PORTFOLIO_DB_AVAILABLE
 
 
 async def _sync_live_prices_to_db(quotes: Dict[str, Dict[str, Any]]):
@@ -591,22 +565,34 @@ async def _sync_live_prices_to_db(quotes: Dict[str, Dict[str, Any]]):
                     pr = float(q.get("price") or 0.0)
                     chg_pct = float(q.get("change_pct") or 0.0)
                     chg_abs = float(q.get("change_abs") or q.get("change") or 0.0)
+                    source = q.get("source")
+                    quote_timestamp = q.get("timestamp")
                     dy = q.get("dividend_yield")
-                    if pr > 0:
+                    if (
+                        pr > 0
+                        and source
+                        and str(source).strip().lower() not in {
+                            "db_cached_last_price",
+                            "database_stored",
+                            "realtime_feed",
+                            "unknown",
+                        }
+                        and quote_timestamp
+                    ):
                         if dy is not None and float(dy) > 0:
                             cur.execute("""
                                 UPDATE portfolio_holdings
                                 SET last_price = %s, last_change_pct = %s, last_change_abs = %s,
-                                    dividend_yield = %s, price_updated_at = NOW()
+                                    dividend_yield = %s, price_source = %s, price_updated_at = to_timestamp(%s)
                                 WHERE UPPER(ticker) = %s;
-                            """, (pr, chg_pct, chg_abs, float(dy), sym.upper()))
+                            """, (pr, chg_pct, chg_abs, float(dy), source, float(quote_timestamp), sym.upper()))
                         else:
                             cur.execute("""
                                 UPDATE portfolio_holdings
                                 SET last_price = %s, last_change_pct = %s, last_change_abs = %s,
-                                    price_updated_at = NOW()
+                                    price_source = %s, price_updated_at = to_timestamp(%s)
                                 WHERE UPPER(ticker) = %s;
-                            """, (pr, chg_pct, chg_abs, sym.upper()))
+                            """, (pr, chg_pct, chg_abs, source, float(quote_timestamp), sym.upper()))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -626,111 +612,22 @@ async def fast_1s_heartbeat_loop():
     - Recalculates mark-to-market totals and individual holding P&Ls from _LATEST_QUOTES.
     - Zero blocking network I/O, guaranteed <1ms response time.
     """
-    global LIVE_PORTFOLIO_STATE, _TICK_SEQ, _PRICE_HISTORY_MAP
+    global LIVE_PORTFOLIO_STATE, _TICK_SEQ
     await asyncio.sleep(0.5)
     print("🚀 [PSX Heartbeat Engine] Fast 1-Second Heartbeat loop initialized.", flush=True)
 
     while True:
         try:
-            t0 = time.perf_counter()
             _TICK_SEQ += 1
-            pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
-            pkt_now = datetime.datetime.now(pkt_tz)
-            is_market_open = is_psx_market_open(pkt_now)
-
-            total_custody_val = 0.0
-            total_invested_cost = 0.0
-            total_day_pnl = 0.0
-            holdings_out = {}
-
-            active_meta = _ACTIVE_HOLDINGS_META or KTRADE_BASELINE_HOLDINGS
-
-            for sym, meta in active_meta.items():
-                shs = float(meta.get("shares", 0.0))
-                inv_cost = float(meta.get("invested_cost", 0.0))
-                avg_disp = float(meta.get("avg_display") or (inv_cost / shs if shs > 0 else 0.0))
-
-                q = _LATEST_QUOTES.get(sym, {})
-                price = float(q.get("price") or meta.get("last_price") or avg_disp)
-                chg_abs = float(q.get("change_abs") or q.get("change") or 0.0)
-                chg_pct = float(q.get("change_pct") or 0.0)
-                prev_close = float(q.get("prev_close") or (round(price - chg_abs, 2) if chg_abs != 0 else price))
-
-                mv = round(shs * price, 2)
-                u_pnl = round(mv - inv_cost, 2)
-                u_pnl_pct = round((u_pnl / inv_cost) * 100.0, 2) if inv_cost > 0 else 0.0
-                day_pnl = round(shs * chg_abs, 2) if chg_abs != 0 else round(mv - (shs * prev_close), 2)
-
-                total_custody_val += mv
-                total_invested_cost += inv_cost
-                total_day_pnl += day_pnl
-
-                if sym not in _PRICE_HISTORY_MAP:
-                    _PRICE_HISTORY_MAP[sym] = []
-                _PRICE_HISTORY_MAP[sym].append(price)
-                if len(_PRICE_HISTORY_MAP[sym]) > 25:
-                    _PRICE_HISTORY_MAP[sym].pop(0)
-
-                holdings_out[sym] = {
-                    "ticker": sym,
-                    "shares": shs,
-                    "price": price,
-                    "change_pct": chg_pct,
-                    "change_abs": chg_abs,
-                    "prev_close": prev_close,
-                    "market_value": mv,
-                    "invested_cost": inv_cost,
-                    "avg_display": avg_disp,
-                    "unrealized_pnl": u_pnl,
-                    "unrealized_pnl_pct": u_pnl_pct,
-                    "day_pnl": day_pnl,
-                    "volume": float(q.get("volume", 0.0)),
-                    "pe_ttm": q.get("pe_ttm"),
-                    "dividend_yield": q.get("dividend_yield"),
-                    "source": q.get("source", "realtime_feed"),
-                    "sparkline": list(_PRICE_HISTORY_MAP[sym]),
-                }
-
-            total_custody_val = round(total_custody_val, 2)
-            total_invested_cost = round(total_invested_cost, 2)
-            total_day_pnl = round(total_day_pnl, 2)
-            cash_bal = float(_ACTIVE_CASH_BALANCE if _ACTIVE_CASH_BALANCE is not None else KTRADE_LOCKED_CASH)
-            total_net_worth = round(total_custody_val + cash_bal, 2)
-            total_unrealized_pnl = round(total_custody_val - total_invested_cost, 2)
-            total_unrealized_pnl_pct = round((total_unrealized_pnl / total_invested_cost) * 100.0, 2) if total_invested_cost > 0 else 0.0
-            prev_custody_val = total_custody_val - total_day_pnl
-            total_day_pnl_pct = round((total_day_pnl / prev_custody_val) * 100.0, 2) if prev_custody_val > 0 else 0.0
-
-            dominant_source = "chromium_psx_live" if any(q.get("source") == "chromium_psx_live" for q in _LATEST_QUOTES.values()) else (
-                "psx_dps_realtime" if any(q.get("source") in ("dps_company_realtime", "psx_market_watch") for q in _LATEST_QUOTES.values()) else (
-                    "tradingview_psx_live" if any("tradingview" in str(q.get("source")) for q in _LATEST_QUOTES.values()) else "realtime_feed"
-                )
-            )
-
-            LIVE_PORTFOLIO_STATE = {
-                "source": dominant_source,
-                "timestamp": pkt_now.isoformat(),
-                "market_open": is_market_open,
-                "tick_seq": _TICK_SEQ,
-                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-                "totals": {
-                    "total_net_worth": total_net_worth,
-                    "portfolio_custody_value": total_custody_val,
-                    "invested_cost": total_invested_cost,
-                    "ktrade_cash_balance": cash_bal,
-                    "unrealized_pnl": total_unrealized_pnl,
-                    "unrealized_pnl_pct": total_unrealized_pnl_pct,
-                    "day_pnl": total_day_pnl,
-                    "day_pnl_pct": total_day_pnl_pct,
-                },
-                "holdings": holdings_out,
-            }
+            _refresh_live_portfolio_snapshot()
         except Exception as heartbeat_err:
             print(f"⚠️ [Fast Heartbeat Loop Error] {heartbeat_err}", flush=True)
             if LIVE_PORTFOLIO_STATE:
-                pkt_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
-                LIVE_PORTFOLIO_STATE["timestamp"] = pkt_now.isoformat()
-                LIVE_PORTFOLIO_STATE["tick_seq"] = _TICK_SEQ
+                LIVE_PORTFOLIO_STATE = mark_live_state_stale(
+                    LIVE_PORTFOLIO_STATE,
+                    str(heartbeat_err),
+                    time.time(),
+                )
 
         await asyncio.sleep(1.0)
 
@@ -741,7 +638,7 @@ async def background_quote_fetcher_loop():
     Updates shared _LATEST_QUOTES cache and syncs spot prices to database every 15 seconds.
     Completely decoupled from fast_1s_heartbeat_loop so network pauses never freeze tick_seq.
     """
-    global _LATEST_QUOTES, _LAST_DB_SYNC_TS
+    global _LATEST_QUOTES, _LAST_DB_SYNC_TS, _LAST_PORTFOLIO_DB_REFRESH_TS
     from market_data_scraper import fetch_realtime_psx_quotes
 
     await asyncio.sleep(0.1)
@@ -749,9 +646,14 @@ async def background_quote_fetcher_loop():
 
     while True:
         try:
-            target_tickers = list(_ACTIVE_HOLDINGS_META.keys()) if _ACTIVE_HOLDINGS_META else [
-                "SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"
-            ]
+            now_ts = time.time()
+            if now_ts - _LAST_PORTFOLIO_DB_REFRESH_TS >= 15.0:
+                _LAST_PORTFOLIO_DB_REFRESH_TS = now_ts
+                await asyncio.to_thread(refresh_active_holdings_meta)
+            target_tickers = list(_ACTIVE_HOLDINGS_META.keys())
+            if not _PORTFOLIO_DB_AVAILABLE or not target_tickers:
+                await asyncio.sleep(1.5)
+                continue
             quotes = await asyncio.to_thread(fetch_realtime_psx_quotes, target_tickers, 3.0)
             if quotes and isinstance(quotes, dict):
                 _LATEST_QUOTES.update(quotes)
@@ -782,26 +684,20 @@ async def lifespan(app: FastAPI):
     try:
         from portfolio_manager import (
             create_dashboard_and_ledger_tables,
-            ensure_real_ktrade_portfolio_seeded,
-            refresh_portfolio_live_prices,
         )
         from learning_engine import init_learning_tables, seed_initial_predictions_if_empty
         create_dashboard_and_ledger_tables()
         init_learning_tables()
-        ensure_real_ktrade_portfolio_seeded()
         seed_initial_predictions_if_empty()
         refresh_active_holdings_meta()
-
-        async def _initial_price_warm():
-            await asyncio.sleep(1.5)
-            try:
-                await asyncio.to_thread(refresh_portfolio_live_prices)
-            except Exception as warm_err:
-                print(f"⚠️ [Startup Price Warmup] {warm_err}", flush=True)
-
-        app.state.price_warm_task = asyncio.create_task(_initial_price_warm())
     except Exception as db_init_err:
+        global _PORTFOLIO_DB_AVAILABLE, _PORTFOLIO_DB_ERROR, _ACTIVE_HOLDINGS_META, _ACTIVE_CASH_BALANCE
+        _PORTFOLIO_DB_AVAILABLE = False
+        _PORTFOLIO_DB_ERROR = str(db_init_err)
+        _ACTIVE_HOLDINGS_META = {}
+        _ACTIVE_CASH_BALANCE = None
         print(f"⚠️ [Startup] DB Table init error: {db_init_err}", flush=True)
+        _refresh_live_portfolio_snapshot()
 
     app.state.graph = await agent.get_agent()
     print("ℹ️ [Decommissioned] Discord bot is offline; persistent Agent Feed and Matte Dark Web Dashboard active.", flush=True)
@@ -906,52 +802,68 @@ async def get_live_prices_tick(request: Request):
     Guaranteed never to return empty holdings: {} or hardcoded market_open.
     """
     verify_dashboard_auth(request)
-    global LIVE_PORTFOLIO_STATE
-    if not LIVE_PORTFOLIO_STATE or not LIVE_PORTFOLIO_STATE.get("holdings"):
-        return init_default_live_portfolio_state()
     return LIVE_PORTFOLIO_STATE
 
 @app.get("/api/test/psx-scraper")
 async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True):
     """
-    Diagnostic verification endpoint: fetches live PSX quotes for all 9 KTrade holdings
-    (SYS, FFC, OGDC, MARI, HUBC, LUCK, EFERT, MEBL, FABL), updates portfolio_holdings,
-    and returns PASS/FAIL status, scrape latency in ms, and live prices for all 9 tickers.
+    Diagnostic verification endpoint for database-backed holdings.
     """
     verify_dashboard_auth(request)
-    from market_data_scraper import fetch_all_psx_prices_bulk, get_bulk_quote_for_ticker, fetch_psx_data_robust
+    from market_data_scraper import fetch_all_psx_prices_bulk
     from portfolio_manager import get_db_connection, invalidate_financial_summary_cache
 
-    target_tickers = ["SYS", "FFC", "OGDC", "MARI", "HUBC", "LUCK", "EFERT", "MEBL", "FABL"]
+    target_tickers = list(_ACTIVE_HOLDINGS_META) if _PORTFOLIO_DB_AVAILABLE else []
     t_start = time.perf_counter()
 
-    bulk_quotes = await asyncio.to_thread(fetch_all_psx_prices_bulk, force_refresh)
+    bulk_quotes = (
+        await asyncio.to_thread(fetch_all_psx_prices_bulk, force_refresh, 10, target_tickers)
+        if target_tickers
+        else {}
+    )
     scrape_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
 
     prices_out: Dict[str, Dict[str, Any]] = {}
-    for sym in target_tickers:
-        q = bulk_quotes.get(sym)
-        if q and float(q.get("price", 0.0)) > 0:
-            prices_out[sym] = {
-                "price": round(float(q["price"]), 2),
-                "change_pct": round(float(q.get("change_pct", 0.0)), 2),
-                "source": q.get("source", "psx_3tier_bulk"),
+    now_ts = time.time()
+    pkt_now = datetime.datetime.fromtimestamp(
+        now_ts,
+        datetime.timezone(datetime.timedelta(hours=5)),
+    )
+    diagnostic_state = build_live_state(
+        _ACTIVE_HOLDINGS_META,
+        bulk_quotes,
+        _ACTIVE_CASH_BALANCE,
+        _PORTFOLIO_DB_AVAILABLE,
+        is_psx_market_open(pkt_now),
+        now_ts,
+        _TICK_SEQ,
+        _PORTFOLIO_DB_ERROR,
+    )
+    for sym, holding in diagnostic_state["holdings"].items():
+        quote = bulk_quotes.get(sym, {})
+        source = quote.get("source")
+        quote_timestamp = quote.get("timestamp")
+        verified_quote = (
+            bool(source)
+            and str(source).strip().lower() not in {
+                "db_cached_last_price",
+                "database_stored",
+                "realtime_feed",
+                "unknown",
             }
-        else:
-            robust_data = await fetch_psx_data_robust(f"https://dps.psx.com.pk/company/{sym}", is_json=True)
-            if isinstance(robust_data, dict) and float(robust_data.get("price", 0.0)) > 0:
-                prices_out[sym] = {
-                    "price": round(float(robust_data["price"]), 2),
-                    "change_pct": round(float(robust_data.get("change_pct", 0.0)), 2),
-                    "source": "company_html_fallback",
-                }
-            else:
-                cp, chg = await asyncio.to_thread(get_bulk_quote_for_ticker, sym, True)
-                prices_out[sym] = {
-                    "price": round(float(cp or 0.0), 2),
-                    "change_pct": round(float(chg or 0.0), 2),
-                    "source": "requests_company_fallback" if cp > 0 else "failed",
-                }
+            and not quote.get("stored")
+            and quote_timestamp is not None
+            and holding.get("price") is not None
+        )
+        prices_out[sym] = {
+            "price": holding.get("price"),
+            "change_pct": holding.get("change_pct"),
+            "source": holding.get("price_source"),
+            "timestamp": holding.get("price_timestamp"),
+            "age_seconds": holding.get("price_age_seconds"),
+            "status": holding.get("status"),
+            "verified_quote": verified_quote,
+        }
 
     def _persist_quotes():
         conn = get_db_connection()
@@ -959,16 +871,23 @@ async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True
         updated_rows = 0
         try:
             for sym, info in prices_out.items():
-                if info["price"] > 0:
+                if info["verified_quote"]:
                     cur.execute(
                         """
                         UPDATE portfolio_holdings
                         SET last_price = %s,
                             last_change_pct = %s,
-                            price_updated_at = NOW()
+                            price_source = %s,
+                            price_updated_at = to_timestamp(%s)
                         WHERE UPPER(ticker) = %s;
                         """,
-                        (info["price"], info["change_pct"], sym),
+                        (
+                            info["price"],
+                            info["change_pct"] or 0.0,
+                            info["source"],
+                            float(bulk_quotes[sym]["timestamp"]),
+                            sym,
+                        ),
                     )
                     updated_rows += cur.rowcount
             conn.commit()
@@ -980,12 +899,17 @@ async def test_psx_scraper_endpoint(request: Request, force_refresh: bool = True
             conn.close()
         return updated_rows
 
-    db_updated = await asyncio.to_thread(_persist_quotes)
+    db_updated = await asyncio.to_thread(_persist_quotes) if target_tickers else 0
     total_latency_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
-    passed_count = sum(1 for v in prices_out.values() if v["price"] > 0)
+    passed_count = sum(1 for v in prices_out.values() if v["verified_quote"])
 
     return {
-        "status": "PASS" if passed_count == len(target_tickers) else ("PARTIAL" if passed_count > 0 else "FAIL"),
+        "status": (
+            "UNAVAILABLE" if not target_tickers
+            else "PASS" if passed_count == len(target_tickers)
+            else "PARTIAL" if passed_count > 0
+            else "FAIL"
+        ),
         "latency_ms": scrape_latency_ms,
         "total_with_db_ms": total_latency_ms,
         "holdings_tested": len(target_tickers),
@@ -1036,15 +960,17 @@ async def create_dashboard_session(request: Request, response: Response):
         key = auth_header[7:].strip()
     if not hmac.compare_digest(key.encode("utf-8"), DASHBOARD_KEY.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing DASHBOARD_KEY")
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
     response.set_cookie(
         key="dashboard_session",
         value=_dashboard_session_token(),
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=request.url.scheme == "https" or forwarded_proto == "https",
         samesite="strict",
         max_age=12 * 60 * 60,
         path="/",
     )
+    response.headers["Cache-Control"] = "no-store"
     return {"status": "authenticated"}
 
 def verify_ingest_auth(request: Request):
@@ -1367,14 +1293,10 @@ _OVERVIEW_ENGINES_CACHE = {"ts": 0.0, "data": None}
 @app.post("/api/dashboard/reset-ktrade-baseline")
 async def reset_ktrade_baseline_endpoint(request: Request):
     verify_dashboard_auth(request)
-    from portfolio_manager import reset_ktrade_baseline_data
-    summary = await asyncio.to_thread(reset_ktrade_baseline_data)
-    refresh_active_holdings_meta()
-    return {
-        "status": "success",
-        "message": "Portfolio database successfully reset and locked to exact KTrade baseline.",
-        "summary": summary
-    }
+    raise HTTPException(
+        status_code=410,
+        detail="Hardcoded baseline reset is disabled; use the reviewed portfolio migration instead.",
+    )
 
 @app.get("/api/dashboard/overview")
 async def get_dashboard_overview(request: Request, refresh: bool = False):
@@ -1517,8 +1439,20 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
         _OVERVIEW_BRIDGE_CACHE["data"] = res_offline
         return res_offline
 
+    def _fetch_financial_summary():
+        try:
+            return get_complete_financial_summary(not refresh, refresh)
+        except Exception as summary_error:
+            print(f"⚠️ [Dashboard Overview] Financial summary unavailable: {summary_error}", flush=True)
+            return {
+                "financial_kpis": {},
+                "holdings": [],
+                "data_status": "unavailable",
+                "data_error": str(summary_error),
+            }
+
     summary, (checkpoints, desk_thought), (bridge_status, monitored_chats, bridge_mem_mb), live_engines = await asyncio.gather(
-        asyncio.to_thread(get_complete_financial_summary, not refresh, refresh),
+        asyncio.to_thread(_fetch_financial_summary),
         asyncio.to_thread(_fetch_checkpoints_and_thought),
         _probe_bridge(),
         asyncio.to_thread(_fetch_live_engines_data),
@@ -1529,49 +1463,96 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
     if LIVE_PORTFOLIO_STATE and LIVE_PORTFOLIO_STATE.get("totals"):
         lt = LIVE_PORTFOLIO_STATE["totals"]
         lh = LIVE_PORTFOLIO_STATE.get("holdings", {})
+        summary["data_status"] = LIVE_PORTFOLIO_STATE.get("status", "unavailable")
+        summary["data_partial"] = LIVE_PORTFOLIO_STATE.get("partial", True)
+        summary["data_error"] = LIVE_PORTFOLIO_STATE.get("error")
+        summary["included_holdings"] = lt.get("included_holdings", [])
+        summary["excluded_holdings"] = lt.get("excluded_holdings", [])
+        summary["last_quote_received"] = LIVE_PORTFOLIO_STATE.get("last_quote_received")
 
         # Overlay financial KPIs
         kpis = summary.setdefault("financial_kpis", {})
-        kpis["total_net_worth"] = lt.get("total_net_worth", kpis.get("total_net_worth"))
-        kpis["portfolio_market_value"] = lt.get("portfolio_custody_value", kpis.get("portfolio_market_value"))
-        kpis["portfolio_custody_value"] = lt.get("portfolio_custody_value", kpis.get("portfolio_custody_value"))
-        kpis["portfolio_cost_basis"] = lt.get("invested_cost", kpis.get("portfolio_cost_basis"))
-        kpis["ktrade_available_cash"] = lt.get("ktrade_cash_balance", kpis.get("ktrade_available_cash"))
-        kpis["ktrade_cash_balance"] = lt.get("ktrade_cash_balance", kpis.get("ktrade_cash_balance"))
-        kpis["unrealized_pnl"] = lt.get("unrealized_pnl", kpis.get("unrealized_pnl"))
-        kpis["total_unrealized_pnl"] = lt.get("unrealized_pnl", kpis.get("total_unrealized_pnl"))
-        kpis["unrealized_pnl_pct"] = lt.get("unrealized_pnl_pct", kpis.get("unrealized_pnl_pct"))
-        kpis["day_change_pkr"] = lt.get("day_pnl", kpis.get("day_change_pkr"))
-        kpis["day_change_pct"] = lt.get("day_pnl_pct", kpis.get("day_change_pct"))
-        kpis["today_day_pnl"] = lt.get("day_pnl", kpis.get("today_day_pnl"))
-        kpis["today_change_pct"] = lt.get("day_pnl_pct", kpis.get("today_change_pct"))
-        kpis["last_session_pnl_pkr"] = lt.get("day_pnl", kpis.get("last_session_pnl_pkr"))
-        kpis["last_session_pnl_pct"] = lt.get("day_pnl_pct", kpis.get("last_session_pnl_pct"))
+        kpis["total_net_worth"] = lt.get("total_net_worth")
+        kpis["portfolio_market_value"] = lt.get("portfolio_custody_value")
+        kpis["portfolio_custody_value"] = lt.get("portfolio_custody_value")
+        kpis["portfolio_cost_basis"] = lt.get("invested_cost")
+        kpis["ktrade_available_cash"] = lt.get("ktrade_cash_balance")
+        kpis["ktrade_cash_balance"] = lt.get("ktrade_cash_balance")
+        kpis["unrealized_pnl"] = lt.get("unrealized_pnl")
+        kpis["total_unrealized_pnl"] = lt.get("unrealized_pnl")
+        kpis["unrealized_pnl_pct"] = lt.get("unrealized_pnl_pct")
+        kpis["day_change_pkr"] = lt.get("day_pnl")
+        kpis["day_change_pct"] = lt.get("day_pnl_pct")
+        kpis["today_day_pnl"] = lt.get("day_pnl")
+        kpis["today_change_pct"] = lt.get("day_pnl_pct")
+        kpis["last_session_pnl_pkr"] = lt.get("day_pnl")
+        kpis["last_session_pnl_pct"] = lt.get("day_pnl_pct")
 
         # Overlay holdings
         if "holdings" in summary and isinstance(summary["holdings"], list):
+            if not summary["holdings"] and lh:
+                summary["holdings"] = [
+                    {
+                        "ticker": item["ticker"],
+                        "shares": item["shares"],
+                        "avg_price": item.get("avg_display"),
+                        "invested_cost": item.get("invested_cost"),
+                        "current_price": item.get("price"),
+                        "market_value": item.get("market_value"),
+                        "unrealized_pnl": item.get("unrealized_pnl"),
+                        "unrealized_pnl_pct": item.get("unrealized_pnl_pct"),
+                        "change_pct": item.get("change_pct"),
+                        "change_abs": item.get("change_abs"),
+                        "day_change_pkr": item.get("day_pnl"),
+                        "price_status": item.get("status"),
+                        "price_source": item.get("price_source"),
+                        "price_timestamp": item.get("price_timestamp"),
+                        "price_age_seconds": item.get("price_age_seconds"),
+                        "verdict": "UNAVAILABLE",
+                        "sector": "Unknown",
+                    }
+                    for item in lh.values()
+                ]
             for h in summary["holdings"]:
                 sym = str(h.get("ticker", "")).upper().strip()
                 if sym in lh:
                     live_item = lh[sym]
-                    pr = float(live_item.get("price") or 0.0)
-                    if pr > 0:
-                        h["last_price"] = pr
-                        h["current_price"] = pr
-                        h["price"] = pr
-                        h["market_value"] = live_item.get("market_value", h.get("market_value"))
-                        h["unrealized_pnl"] = live_item.get("unrealized_pnl", h.get("unrealized_pnl"))
-                        h["unrealized_pnl_pct"] = live_item.get("unrealized_pnl_pct", h.get("unrealized_pnl_pct"))
-                        h["change_pct"] = live_item.get("change_pct", h.get("change_pct"))
-                        h["change_abs"] = live_item.get("change_abs", h.get("change_abs"))
-                        h["last_change_pct"] = live_item.get("change_pct", h.get("last_change_pct"))
-                        h["last_change_abs"] = live_item.get("change_abs", h.get("last_change_abs"))
-                        h["day_change_pkr"] = live_item.get("day_pnl", h.get("day_change_pkr"))
-                        h["prev_close"] = live_item.get("prev_close", h.get("prev_close"))
-                        h["source"] = live_item.get("source", "realtime_feed")
-                        tot_cust = float(lt.get("portfolio_custody_value") or 0.0)
-                        if tot_cust > 0:
-                            h["weight_pct"] = round((float(h["market_value"]) / tot_cust) * 100.0, 1)
+                    for target, source_key in (
+                        ("last_price", "price"),
+                        ("current_price", "price"),
+                        ("price", "price"),
+                        ("market_value", "market_value"),
+                        ("unrealized_pnl", "unrealized_pnl"),
+                        ("unrealized_pnl_pct", "unrealized_pnl_pct"),
+                        ("change_pct", "change_pct"),
+                        ("change_abs", "change_abs"),
+                        ("last_change_pct", "change_pct"),
+                        ("last_change_abs", "change_abs"),
+                        ("day_change_pkr", "day_pnl"),
+                        ("prev_close", "prev_close"),
+                    ):
+                        h[target] = live_item.get(source_key)
+                    h["source"] = live_item.get("price_source")
+                    h["price_source"] = live_item.get("price_source")
+                    h["price_timestamp"] = live_item.get("price_timestamp")
+                    h["price_age_seconds"] = live_item.get("price_age_seconds")
+                    h["price_status"] = live_item.get("status")
+                    tot_cust = lt.get("portfolio_custody_value")
+                    if tot_cust and h.get("market_value") is not None:
+                        h["weight_pct"] = round((float(h["market_value"]) / float(tot_cust)) * 100.0, 1)
+                else:
+                    h.update({
+                        "last_price": None,
+                        "current_price": None,
+                        "price": None,
+                        "market_value": None,
+                        "unrealized_pnl": None,
+                        "unrealized_pnl_pct": None,
+                        "price_source": None,
+                        "price_timestamp": None,
+                        "price_age_seconds": None,
+                        "price_status": "unavailable",
+                    })
 
         # Dynamic Top Movers for Scraped Intelligence card
         if isinstance(live_engines, dict) and "prices" in live_engines:
@@ -1590,10 +1571,15 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
                     "day_change_pkr": dp,
                     "type": "gainer" if cp >= 0 else "loser"
                 })
-            dom_src = LIVE_PORTFOLIO_STATE.get("source", "dps_realtime")
-            live_engines["prices"]["status"] = "ONLINE"
+            dom_src = LIVE_PORTFOLIO_STATE.get("source") or "unavailable"
+            live_engines["prices"]["status"] = (
+                "ONLINE" if LIVE_PORTFOLIO_STATE.get("last_quote_received") else "UNAVAILABLE"
+            )
             live_engines["prices"]["engine_name"] = "PSX Official Data Portal (dps.psx.com.pk) & Chromium Live Engine"
-            live_engines["prices"]["last_poll"] = f"Live PSX Stream ({dom_src}) · Tick #{LIVE_PORTFOLIO_STATE.get('tick_seq', 1)}"
+            live_engines["prices"]["last_poll"] = (
+                f"Last quote: {LIVE_PORTFOLIO_STATE.get('last_quote_received') or 'unavailable'} · "
+                f"Heartbeat #{LIVE_PORTFOLIO_STATE.get('tick_seq', 0)} · {dom_src}"
+            )
             if top_movers_list:
                 live_engines["prices"]["top_movers"] = top_movers_list
 
@@ -1605,6 +1591,7 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
     return {
         "status": "success",
         "financial_summary": summary,
+        "live_state": LIVE_PORTFOLIO_STATE,
         "dividends": summary.get("dividends", []),
         "total_dividends_received": summary.get("financial_kpis", {}).get("total_dividends_received", 0.0),
         "live_engines_data": live_engines,
@@ -1636,28 +1623,21 @@ async def sync_dashboard_portfolio(
     payload: Optional[PortfolioSyncPayload] = None
 ):
     verify_dashboard_auth(request)
+    if payload is None or not payload.holdings or payload.cash_balance is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit holdings and cash_balance are required; database sync never uses code defaults.",
+        )
     from portfolio_manager import (
         sync_full_portfolio_state,
         refresh_portfolio_live_prices,
         publish_agent_event,
-        REAL_KTRADE_CASH_BALANCE,
-        REAL_KTRADE_WORKING_CAPITAL,
-        REAL_KTRADE_HOLDINGS,
     )
     from learning_engine import seed_initial_predictions_if_empty
 
-    use_default = payload is None or not payload.holdings
-    holdings_in = REAL_KTRADE_HOLDINGS if use_default else payload.holdings
-    cash_in = (
-        REAL_KTRADE_CASH_BALANCE
-        if (payload is None or payload.cash_balance is None)
-        else float(payload.cash_balance)
-    )
-    working_cap_in = (
-        REAL_KTRADE_WORKING_CAPITAL
-        if (payload is None or payload.total_working_capital is None) and use_default
-        else (float(payload.total_working_capital) if payload and payload.total_working_capital is not None else None)
-    )
+    holdings_in = payload.holdings
+    cash_in = float(payload.cash_balance)
+    working_cap_in = float(payload.total_working_capital) if payload.total_working_capital is not None else None
 
     sync_res = await asyncio.to_thread(
         sync_full_portfolio_state,
@@ -1666,6 +1646,7 @@ async def sync_dashboard_portfolio(
         working_cap_in,
     )
     await asyncio.to_thread(seed_initial_predictions_if_empty)
+    await asyncio.to_thread(refresh_active_holdings_meta)
     background_tasks.add_task(refresh_portfolio_live_prices)
     await asyncio.to_thread(
         publish_agent_event,
@@ -2144,20 +2125,8 @@ async def create_dashboard_dividend(request: Request):
         _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
         _OVERVIEW_CKPT_CACHE["ts"] = 0.0
 
-        # Update in-memory LIVE_PORTFOLIO_STATE if credited to KTrade cash
         if entry.get("credited_to") == "ktrade_cash" or entry.get("status") == "SENT_TO_KTRADE":
-            try:
-                global LIVE_PORTFOLIO_STATE
-                if LIVE_PORTFOLIO_STATE and "totals" in LIVE_PORTFOLIO_STATE:
-                    cur_cash = float(LIVE_PORTFOLIO_STATE["totals"].get("ktrade_cash_balance", 0.0))
-                    new_cash = round(cur_cash + float(entry.get("net_amount", 0.0)), 2)
-                    LIVE_PORTFOLIO_STATE["totals"]["ktrade_cash_balance"] = new_cash
-                    if "portfolio_custody_value" in LIVE_PORTFOLIO_STATE["totals"]:
-                        LIVE_PORTFOLIO_STATE["totals"]["total_net_worth"] = round(
-                            float(LIVE_PORTFOLIO_STATE["totals"]["portfolio_custody_value"]) + new_cash, 2
-                        )
-            except Exception as st_err:
-                print(f"⚠️ [Live State Update Error]: {st_err}", flush=True)
+            await asyncio.to_thread(refresh_active_holdings_meta)
 
         return {"status": "ok", "dividend": entry}
     except asyncio.TimeoutError:
@@ -2222,20 +2191,7 @@ async def delete_dashboard_dividend(id: int, request: Request):
         _OVERVIEW_ENGINES_CACHE["ts"] = 0.0
         _OVERVIEW_CKPT_CACHE["ts"] = 0.0
 
-        try:
-            from portfolio_manager import get_complete_financial_summary
-            summary = get_complete_financial_summary(use_cached_prices=True)
-            kpis = summary.get("financial_kpis", {})
-            global LIVE_PORTFOLIO_STATE
-            if LIVE_PORTFOLIO_STATE and "totals" in LIVE_PORTFOLIO_STATE:
-                new_cash = round(float(kpis.get("ktrade_cash_balance", 0.0)), 2)
-                LIVE_PORTFOLIO_STATE["totals"]["ktrade_cash_balance"] = new_cash
-                if "portfolio_custody_value" in LIVE_PORTFOLIO_STATE["totals"]:
-                    LIVE_PORTFOLIO_STATE["totals"]["total_net_worth"] = round(
-                        float(LIVE_PORTFOLIO_STATE["totals"]["portfolio_custody_value"]) + new_cash, 2
-                    )
-        except Exception:
-            pass
+        await asyncio.to_thread(refresh_active_holdings_meta)
 
         return {"status": "ok", "deleted": True, "id": id}
     except asyncio.TimeoutError:
