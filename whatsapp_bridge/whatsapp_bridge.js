@@ -1061,9 +1061,6 @@ async function extractPsxMarketQuotes() {
         isExtractingPsx = false;
     }
 }
-        isExtractingPsx = false;
-    }
-}
 
 async function initPsxChromiumMonitor() {
     if (isPsxMonitorBooting || (psxPage && !psxPage.isClosed())) {
