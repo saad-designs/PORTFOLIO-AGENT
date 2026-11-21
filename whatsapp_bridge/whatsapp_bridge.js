@@ -111,6 +111,7 @@ const app = express();
 app.use(express.json());
 const BRIDGE_PORT = 3000; // Hardcoded internal bridge port (NEVER process.env.PORT)
 const PYTHON_PORT = Number(process.env.PORT) || 8000;
+const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 let latestQr = null;
 let isClientReady = false;
 let client = null;
@@ -357,7 +358,8 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                         await axios.post(`http://127.0.0.1:${PYTHON_PORT}/api/ingest-whatsapp-message`, payload, {
                             maxContentLength: 50 * 1024 * 1024,
                             maxBodyLength: 50 * 1024 * 1024,
-                            timeout: 15000
+                            timeout: 15000,
+                            headers: INGEST_TOKEN ? { 'x-ingest-token': INGEST_TOKEN } : {}
                         });
                         return;
                     } else {
@@ -388,7 +390,8 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                 has_media: false
             };
             await axios.post(`http://127.0.0.1:${PYTHON_PORT}/api/ingest-whatsapp-message`, payload, {
-                timeout: 15000
+                timeout: 15000,
+                headers: INGEST_TOKEN ? { 'x-ingest-token': INGEST_TOKEN } : {}
             });
         }
     } catch (err) {
