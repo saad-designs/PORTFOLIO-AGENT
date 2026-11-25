@@ -2,6 +2,16 @@ import sys
 # Force UTF-8 stdout before ANY import that may print emojis (Windows cp1252 fix)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
+import os as _os_tz
+import time as _time_tz
+
+# Pin the process clock to Pakistan time before any scheduler reads datetime.now().
+# The Docker image (python:3.12-slim) defaults to UTC, which shifted every "PKT"
+# schedule (intraday loop, cash sweeps, closing briefing) five hours late.
+# "PKT-5" is a POSIX TZ string, so it works without tzdata; Pakistan has no DST.
+if hasattr(_time_tz, "tzset") and not _os_tz.environ.get("TZ"):
+    _os_tz.environ["TZ"] = "PKT-5"
+    _time_tz.tzset()
 import asyncio
 
 # Force SelectorEventLoop on Windows to support psycopg async pools
@@ -462,6 +472,7 @@ _LAST_DB_SYNC_TS: float = 0.0
 _LAST_PORTFOLIO_DB_REFRESH_TS: float = 0.0
 _LATEST_QUOTES: Dict[str, Dict[str, Any]] = {}
 _PRICE_HISTORY_MAP: Dict[str, List[float]] = {}
+CLOSED_MARKET_POLL_SECONDS = 300.0
 
 from live_portfolio import build_live_state, mark_live_state_stale
 
@@ -650,17 +661,27 @@ async def background_quote_fetcher_loop():
 
     await asyncio.sleep(0.1)
     print("🚀 [PSX Quote Fetcher] Background Quote Fetcher loop initialized.", flush=True)
+    last_fetch_ts = 0.0
 
     while True:
         try:
             now_ts = time.time()
-            if now_ts - _LAST_PORTFOLIO_DB_REFRESH_TS >= 15.0:
+            market_open = is_psx_market_open() is True
+            # Outside trading hours prices cannot move: refresh holdings/quotes every
+            # 5 minutes instead of hammering PSX (and Supabase) every 1.5s all night,
+            # which risked the server IP being throttled or blocked.
+            db_refresh_interval = 15.0 if market_open else CLOSED_MARKET_POLL_SECONDS
+            if now_ts - _LAST_PORTFOLIO_DB_REFRESH_TS >= db_refresh_interval:
                 _LAST_PORTFOLIO_DB_REFRESH_TS = now_ts
                 await asyncio.to_thread(refresh_active_holdings_meta)
             target_tickers = list(_ACTIVE_HOLDINGS_META.keys())
             if not _PORTFOLIO_DB_AVAILABLE or not target_tickers:
                 await asyncio.sleep(1.5)
                 continue
+            if not market_open and (now_ts - last_fetch_ts) < CLOSED_MARKET_POLL_SECONDS:
+                await asyncio.sleep(1.5)
+                continue
+            last_fetch_ts = now_ts
             quotes = await asyncio.to_thread(fetch_realtime_psx_quotes, target_tickers, 3.0)
             if quotes and isinstance(quotes, dict):
                 _LATEST_QUOTES.update(quotes)
@@ -940,7 +961,7 @@ if SESSION_COOKIE_SECURE_MODE not in {"auto", "true", "false"}:
 if not DASHBOARD_KEY:
     print("⚠️ [Startup Warning] DASHBOARD_KEY is unset; dashboard/API access will fail closed.", flush=True)
 if not INGEST_TOKEN:
-    print("⚠️ [Startup Warning] INGEST_TOKEN is unset; WhatsApp/webhook ingestion remains unauthenticated.", flush=True)
+    print("⚠️ [Startup Warning] INGEST_TOKEN is unset; WhatsApp/webhook ingestion accepts loopback callers only.", flush=True)
 if SESSION_COOKIE_SECURE_MODE != "true":
     print(
         "⚠️ [Startup Warning] HTTPS is not enforced for dashboard sessions; "
@@ -1090,8 +1111,19 @@ async def logout_dashboard_session(request: Request, response: Response):
     return {"status": "logged_out"}
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
 def verify_ingest_auth(request: Request):
     if not INGEST_TOKEN:
+        # Without a shared token, only the in-container WhatsApp bridge (loopback) may
+        # inject messages. Public callers could otherwise forge KTrade signals.
+        client_host = (request.client.host if request.client else "") or ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized: set INGEST_TOKEN to accept non-local ingestion",
+            )
         return True
     supplied_token = request.headers.get("x-ingest-token", "")
     if not hmac.compare_digest(supplied_token.encode("utf-8"), INGEST_TOKEN.encode("utf-8")):
@@ -1216,6 +1248,21 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                             "detail": detail,
                         }
 
+                    head_proc = subprocess.run([git_bin, "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, timeout=5)
+                    remote_proc = subprocess.run([git_bin, "rev-parse", "origin/main"], cwd=repo_dir, capture_output=True, text=True, timeout=5)
+                    local_sha = (head_proc.stdout or "").strip()
+                    remote_sha = (remote_proc.stdout or "").strip()
+                    if local_sha and remote_sha and local_sha == remote_sha:
+                        # Nothing new: never reset or reload when origin/main has not moved.
+                        return {
+                            "status": "success",
+                            "updated": False,
+                            "commit": local_sha[:7],
+                            "changed_files": [],
+                            "trigger": trigger_source,
+                            "detail": "Already up to date",
+                        }
+
                     # Diff to detect changed files
                     diff_proc = subprocess.run(
                         [git_bin, "diff", "--name-only", "HEAD", "origin/main"],
@@ -1248,8 +1295,23 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                     if meta_r.status_code != 200:
                         return {"status": "error", "updated": False, "detail": f"GitHub API HTTP {meta_r.status_code}"}
                     new_sha = str(meta_r.json().get("sha") or "")
-                    commit_msg = (meta_r.json().get("commit") or {}).get("message", "").splitlines()[0]
+                    commit_msg = ((meta_r.json().get("commit") or {}).get("message", "").splitlines() or [""])[0]
                     commit_oneline = f"{new_sha[:7]} {commit_msg}".strip()
+                    if _LAST_TARBALL_SHA is None:
+                        try:
+                            with open(os.path.join(repo_dir, ".deployed_sha"), "r", encoding="utf-8") as sha_f:
+                                _LAST_TARBALL_SHA = sha_f.read().strip() or None
+                        except OSError:
+                            _LAST_TARBALL_SHA = None
+                    if new_sha and new_sha == _LAST_TARBALL_SHA:
+                        return {
+                            "status": "success",
+                            "updated": False,
+                            "commit": commit_oneline,
+                            "changed_files": [],
+                            "trigger": trigger_source,
+                            "detail": "Already up to date",
+                        }
 
                     tar_r = _req.get("https://codeload.github.com/saad-designs/PORTFOLIO-AGENT/tar.gz/refs/heads/main", timeout=25)
                     tar_r.raise_for_status()
@@ -1271,6 +1333,11 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                                     out_f.write(src_f.read())
                             changed_files.append(rel_path.replace("\\", "/"))
                     _LAST_TARBALL_SHA = new_sha
+                    try:
+                        with open(os.path.join(repo_dir, ".deployed_sha"), "w", encoding="utf-8") as sha_f:
+                            sha_f.write(new_sha)
+                    except OSError:
+                        pass
                     updated = True
             except Exception as sync_exc:
                 return {
@@ -1287,59 +1354,42 @@ async def execute_git_pull_and_reload(trigger_source: str = "manual") -> Dict[st
                     except Exception:
                         pass
 
-            # e) Reload updated Python modules & invalidate in-memory caches
-            reloaded_modules: List[str] = []
-            reload_order = [
-                "utils",
-                "model_router",
-                "market_data_scraper",
-                "psx_watchdog",
-                "news_scraper",
-                "youtube_scraper",
-                "business_books_engine",
-                "portfolio_manager",
-                "valuation_engine",
-                "learning_engine",
-                "central_brain",
-                "chat_copilot",
-                "schedulers",
-                "agent",
-            ]
-            for mod_name in reload_order:
-                try:
-                    if mod_name in sys.modules:
-                        importlib.reload(sys.modules[mod_name])
-                        reloaded_modules.append(mod_name)
-                    else:
-                        mod = importlib.import_module(mod_name)
-                        reloaded_modules.append(mod_name)
-                except Exception as rel_err:
-                    print(f"⚠️ [Hot Reload] Could not reload {mod_name}: {rel_err}", flush=True)
-
-            # Invalidate in-memory caches
-            global _OVERVIEW_CKPT_CACHE, _OVERVIEW_BRIDGE_CACHE
-            _OVERVIEW_CKPT_CACHE = {"ts": 0.0, "data": ({}, "Desk Manager synthesis standing by.")}
-            _OVERVIEW_BRIDGE_CACHE = {"ts": 0.0, "data": ("OFFLINE", [], None)}
-
-            try:
-                if "portfolio_manager" in sys.modules:
-                    pm = sys.modules["portfolio_manager"]
-                    if hasattr(pm, "invalidate_financial_summary_cache"):
-                        pm.invalidate_financial_summary_cache()
-            except Exception as cache_err:
-                print(f"⚠️ [Cache Invalidation] Error: {cache_err}", flush=True)
-
+            # e) Restart cleanly instead of importlib.reload(). Reloading modules in place
+            # re-ran their import-time code (new DB pools, Supabase clients, genai clients)
+            # while main.py kept references to the old ones, leaking Postgres connections,
+            # and changes to main.py itself never took effect.
             return {
                 "status": "success",
                 "commit": commit_oneline,
                 "updated": True,
                 "changed_files": changed_files,
-                "reloaded_modules": reloaded_modules,
+                "restart_scheduled": True,
                 "trigger": trigger_source,
             }
 
         res = await asyncio.to_thread(_sync_worker)
+        if res.get("updated"):
+            print(f"🔄 [Auto Deploy] Updated to {res.get('commit')}; restarting process in 2s.", flush=True)
+            asyncio.get_running_loop().call_later(2.0, _restart_process_in_place)
         return res
+
+
+def _restart_process_in_place():
+    """Re-executes the server with fresh code. PID is kept, so Docker/systemd/no supervisor all work."""
+    if os.name == "nt":
+        print("ℹ️ [Auto Deploy] New code pulled; restart the server manually on Windows.", flush=True)
+        return
+    try:
+        cleanup_node_process()
+    except Exception:
+        pass
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, "-u", os.path.abspath(__file__)])
 
 @app.post("/api/dashboard/git-pull")
 async def trigger_dashboard_git_pull(request: Request):
@@ -1474,25 +1524,21 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
         except Exception:
             pass
 
+        # No placeholder numbers here: the price card is filled from LIVE_PORTFOLIO_STATE
+        # below, and stays empty/UNAVAILABLE when no verified quotes exist.
         engines_payload = {
             "prices": {
-                "status": "ONLINE",
-                "latency_ms": 115,
-                "engine_name": "TradingView Pakistan Scanner JSON API",
-                "last_poll": "Friday Closing Settlement (0 Blocked Calls)",
-                "top_movers": [
-                    {"ticker": "SYS", "change_pct": 0.33, "day_change_pkr": 39.24, "type": "gainer"},
-                    {"ticker": "OGDC", "change_pct": 0.19, "day_change_pkr": 14.25, "type": "gainer"},
-                    {"ticker": "MEBL", "change_pct": 0.48, "day_change_pkr": 5.06, "type": "gainer"},
-                    {"ticker": "FFC", "change_pct": -0.28, "day_change_pkr": -23.40, "type": "loser"},
-                    {"ticker": "MARI", "change_pct": -2.07, "day_change_pkr": -51.59, "type": "loser"}
-                ]
+                "status": "UNAVAILABLE",
+                "latency_ms": None,
+                "engine_name": "PSX Official Data Portal (dps.psx.com.pk)",
+                "last_poll": "No verified quote received yet",
+                "top_movers": [],
             },
             "news": news_items,
             "youtube": playbook_items,
             "books_law": {
-                "status": "PASS",
-                "holdings_evaluated": 9,
+                "status": "CONFIGURED",
+                "holdings_evaluated": len(_ACTIVE_HOLDINGS_META),
                 "rules_audited": [
                     {"framework": "Benjamin Graham", "rule": "DCF Margin of Safety >= 20% required for fresh deployment", "status": "ACTIVE"},
                     {"framework": "Pakistan Tax Law", "rule": "Section 150 ITO: 15% Standard ATL Filer WHT vs 25% IPP Rate", "status": "ACTIVE"},
@@ -1694,19 +1740,26 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
 
         # Dynamic Top Movers for Scraped Intelligence card
         if isinstance(live_engines, dict) and "prices" in live_engines:
+            # Holdings with unavailable quotes carry change_pct=None; float(None) used to
+            # raise TypeError and 500 the entire overview. Only rank holdings with real data.
+            movers_with_data = [
+                item for item in lh.values()
+                if item.get("change_pct") is not None and item.get("status") != "suspect"
+            ]
             sorted_movers = sorted(
-                lh.values(),
-                key=lambda x: abs(float(x.get("change_pct", 0.0))),
+                movers_with_data,
+                key=lambda x: abs(float(x["change_pct"])),
                 reverse=True
             )
             top_movers_list = []
             for item in sorted_movers[:5]:
-                cp = float(item.get("change_pct", 0.0))
-                dp = float(item.get("day_pnl", 0.0))
+                cp = float(item["change_pct"])
+                dp = item.get("day_pnl")
                 top_movers_list.append({
                     "ticker": item.get("ticker"),
                     "change_pct": cp,
-                    "day_change_pkr": dp,
+                    "day_change_pkr": float(dp) if dp is not None else None,
+                    "status": item.get("status"),
                     "type": "gainer" if cp >= 0 else "loser"
                 })
             dom_src = LIVE_PORTFOLIO_STATE.get("source") or "unavailable"
@@ -1718,8 +1771,7 @@ async def get_dashboard_overview(request: Request, refresh: bool = False):
                 f"Last quote: {LIVE_PORTFOLIO_STATE.get('last_quote_received') or 'unavailable'} · "
                 f"Heartbeat #{LIVE_PORTFOLIO_STATE.get('tick_seq', 0)} · {dom_src}"
             )
-            if top_movers_list:
-                live_engines["prices"]["top_movers"] = top_movers_list
+            live_engines["prices"]["top_movers"] = top_movers_list
 
     now = time.time()
     model_cooldowns = {

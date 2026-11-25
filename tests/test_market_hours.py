@@ -31,7 +31,12 @@ def test_psx_holiday_and_weekend_are_closed():
 
 
 def test_unlisted_calendar_year_is_unverified():
-    assert is_psx_market_open(_pkt_datetime(2027, 1, 4, 10, 0)) is None
+    assert is_psx_market_open(_pkt_datetime(2028, 1, 4, 10, 0)) is None
+
+
+def test_2027_trading_day_and_fixed_holiday():
+    assert is_psx_market_open(_pkt_datetime(2027, 1, 4, 10, 0)) is True
+    assert is_psx_market_open(_pkt_datetime(2027, 3, 23, 10, 0)) is False
 
 
 def test_aware_utc_time_is_converted_to_karachi():

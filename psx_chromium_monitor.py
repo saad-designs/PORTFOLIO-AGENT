@@ -30,6 +30,18 @@ def _optional_float(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
+def _epoch_seconds(value: Any, now: float) -> Optional[float]:
+    """Normalizes a bridge timestamp (seconds or milliseconds) to epoch seconds; None if unusable."""
+    ts = _optional_float(value)
+    if ts is None or ts <= 0:
+        return None
+    if ts > 1e12:
+        ts = ts / 1000.0
+    if ts > now + 5:
+        return None
+    return ts
+
+
 def is_chromium_monitor_healthy(timeout: float = 0.8) -> bool:
     """Checks whether the Node Puppeteer Chromium PSX monitor on 127.0.0.1:3000 is active and healthy."""
     try:
@@ -69,9 +81,13 @@ def fetch_chromium_psx_quotes(
         if resp.status_code == 200:
             data = resp.json() or {}
             raw_quotes = data.get("quotes") or {}
+            bridge_ts = _epoch_seconds(data.get("timestamp"), now)
             if raw_quotes:
                 normalized: Dict[str, Dict[str, Any]] = {}
                 for sym_key, q in raw_quotes.items():
+                    # Use the bridge's extraction time, not this HTTP call's time, so a
+                    # frozen Chromium page cannot make old quotes look freshly received.
+                    received_ts = _epoch_seconds(q.get("timestamp"), now) or bridge_ts or now
                     sym_upper = sym_key.upper().strip()
                     price = _optional_float(q.get("price"))
                     if price is not None and price > 0:
@@ -101,9 +117,9 @@ def fetch_chromium_psx_quotes(
                             "indices": q.get("indices") or "",
                             "is_shariah": bool(q.get("is_shariah", False)),
                             "source": "chromium_psx_live",
-                            "timestamp": now,
+                            "timestamp": received_ts,
                             "timestamp_kind": "received",
-                            "received_timestamp": now,
+                            "received_timestamp": received_ts,
                         }
                         normalized[sym_upper] = item
                         # Also keep raw scrip if different

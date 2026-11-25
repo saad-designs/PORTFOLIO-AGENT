@@ -20,6 +20,18 @@
         {"date": "2026-11-09", "name": "Allama Iqbal Day", "provisional": false},
         {"date": "2026-12-25", "name": "Quaid-e-Azam Day/Christmas", "provisional": false}
       ]
+    },
+    "2027": {
+      "note": "Fixed-date national holidays only. Add Eid/Ashura/Milad dates once PSX publishes the 2027 calendar.",
+      "holidays": [
+        {"date": "2027-02-05", "name": "Kashmir Day", "provisional": false},
+        {"date": "2027-03-23", "name": "Pakistan Day", "provisional": false},
+        {"date": "2027-05-01", "name": "Labour Day", "provisional": false},
+        {"date": "2027-05-28", "name": "Youm-e-Takbeer", "provisional": false},
+        {"date": "2027-08-14", "name": "Independence Day", "provisional": false},
+        {"date": "2027-11-09", "name": "Allama Iqbal Day", "provisional": false},
+        {"date": "2027-12-25", "name": "Quaid-e-Azam Day/Christmas", "provisional": false}
+      ]
     }
   }
 }

@@ -3508,16 +3508,13 @@
         const res = await apiFetch('/api/dashboard/git-pull', { method: 'POST' });
         const data = await res.json();
         const commitStr = data.commit || 'latest';
-        if (data.status === 'success' || data.updated) {
-          showToast(`Synced to commit: ${commitStr}`);
+        if (data.status === 'success' && data.updated) {
+          showToast(`Updated to ${commitStr}. Server restarting, page reloads in ~30s...`);
           setTimeout(() => {
             window.location.reload();
-          }, 1200);
-        } else if (data.status === 'up_to_date') {
-          showToast(`Synced to commit: ${commitStr}`);
-          setTimeout(() => {
-            window.location.reload();
-          }, 1200);
+          }, 30000);
+        } else if (data.status === 'success') {
+          showToast(`Already up to date (${commitStr})`);
         } else {
           showToast('Sync status: ' + (data.detail || data.status || JSON.stringify(data)));
         }
@@ -3959,15 +3956,13 @@
       const moversEl = document.getElementById('engine-prices-movers');
       const latEl = document.getElementById('engine-prices-latency');
       const tsEl = document.getElementById('engine-prices-timestamp');
-      if (latEl && engines.prices?.latency_ms) latEl.textContent = `${engines.prices.latency_ms} ms`;
+      if (latEl) latEl.textContent = engines.prices?.latency_ms != null ? `${engines.prices.latency_ms} ms` : '-- ms';
       if (tsEl && engines.prices?.last_poll) tsEl.textContent = engines.prices.last_poll;
       if (moversEl) {
-        const movers = engines.prices?.top_movers || holdings.map(h => ({
-          ticker: h.ticker,
-          change_pct: Number(h.change_pct || 0),
-          day_change_pkr: Number(h.day_change_pkr || 0)
-        })).sort((a, b) => Math.abs(b.change_pct) - Math.abs(a.change_pct));
-        moversEl.innerHTML = `
+        const movers = (engines.prices?.top_movers || []).filter(m => m.change_pct !== null && m.change_pct !== undefined);
+        if (!movers.length) {
+          moversEl.innerHTML = '<div style="color:var(--muted);font-size:12px;">No verified price changes available yet.</div>';
+        } else moversEl.innerHTML = `
           <div style="display: flex; flex-wrap: wrap; gap: 6px;">
             ${movers.slice(0, 5).map(m => {
               const isPos = m.change_pct >= 0;

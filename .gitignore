@@ -27,6 +27,7 @@ temp_*
 *_cache.json
 scheduler_state.json
 scheduler_date_state.json
+.deployed_sha
 processed_videos.txt
 memory_cache/
 scratch/

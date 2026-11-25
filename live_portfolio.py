@@ -260,6 +260,18 @@ def build_live_state(
         if included
         else (0.0 if db_available and not holdings else None)
     )
+    day_pnl_holdings = [h for h in included if h["day_pnl"] is not None]
+    day_pnl = round(sum(h["day_pnl"] for h in day_pnl_holdings), 2) if day_pnl_holdings else None
+    day_base_value = (
+        sum(h["market_value"] for h in day_pnl_holdings) - day_pnl
+        if day_pnl is not None
+        else None
+    )
+    day_pnl_pct = (
+        round(day_pnl / day_base_value * 100.0, 2)
+        if day_base_value is not None and day_base_value > 0
+        else None
+    )
     cash = float(cash_balance) if db_available and cash_balance is not None else None
     net_worth = round(custody_value + cash, 2) if custody_value is not None and cash is not None else None
     total_statuses = statuses + (["unavailable"] if cash is None else [])
@@ -276,6 +288,7 @@ def build_live_state(
         and _is_real_source(q.get("source"))
         and _positive_number(q.get("price")) is not None
     ]
+    last_quotes = [ts for ts in last_quotes if ts is not None]
 
     return {
         "source": "mixed_verified_sources" if included else None,
@@ -304,8 +317,9 @@ def build_live_state(
                 if unrealized_pnl is not None and priced_invested_cost
                 else None
             ),
-            "day_pnl": None,
-            "day_pnl_pct": None,
+            "day_pnl": day_pnl,
+            "day_pnl_pct": day_pnl_pct,
+            "day_pnl_holdings": [h["ticker"] for h in day_pnl_holdings],
         },
         "holdings": holdings,
     }

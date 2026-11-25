@@ -89,6 +89,13 @@ def _load_psx_holiday_calendar() -> Dict[str, Any]:
     if not isinstance(calendar_data, dict) or not isinstance(calendar_data.get("years"), dict):
         print("⚠️ [PSX Calendar] Official holiday calendar has an invalid structure.", flush=True)
         return {}
+    current_year = str(datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5))).year)
+    if current_year not in calendar_data["years"]:
+        print(
+            f"⚠️ [PSX Calendar] No holiday calendar for {current_year}; market status will be 'unverified' "
+            "until data/psx_holidays.json is updated.",
+            flush=True,
+        )
     return calendar_data
 
 
