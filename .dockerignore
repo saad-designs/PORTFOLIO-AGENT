@@ -1,5 +1,11 @@
 .gitignore
 .env
+*.env
+*.key
+*.pem
+**/.env
+**/*.key
+**/*.pem
 *.log
 __pycache__
 *.pyc

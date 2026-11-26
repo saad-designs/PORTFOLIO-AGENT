@@ -111,6 +111,7 @@ const app = express();
 app.use(express.json());
 const BRIDGE_PORT = 3000; // Hardcoded internal bridge port (NEVER process.env.PORT)
 const PYTHON_PORT = Number(process.env.PORT) || 8000;
+const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 let latestQr = null;
 let isClientReady = false;
 let client = null;
@@ -357,7 +358,8 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                         await axios.post(`http://127.0.0.1:${PYTHON_PORT}/api/ingest-whatsapp-message`, payload, {
                             maxContentLength: 50 * 1024 * 1024,
                             maxBodyLength: 50 * 1024 * 1024,
-                            timeout: 15000
+                            timeout: 15000,
+                            headers: INGEST_TOKEN ? { 'x-ingest-token': INGEST_TOKEN } : {}
                         });
                         return;
                     } else {
@@ -388,7 +390,8 @@ async function forwardMessageToPython(msg, chatName, chatId) {
                 has_media: false
             };
             await axios.post(`http://127.0.0.1:${PYTHON_PORT}/api/ingest-whatsapp-message`, payload, {
-                timeout: 15000
+                timeout: 15000,
+                headers: INGEST_TOKEN ? { 'x-ingest-token': INGEST_TOKEN } : {}
             });
         }
     } catch (err) {
@@ -715,6 +718,56 @@ let psxMonitorError = null;
 let psxPollTimer = null;
 let psxCycleCounter = 0;
 let isExtractingPsx = false;
+let lastPsxChangeTimestamp = 0;
+let lastPsxPageReload = 0;
+const PSX_FROZEN_PAGE_MS = 3 * 60 * 1000;
+const PSX_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
+
+// Merges freshly extracted quotes, keeping each quote's original timestamp when its
+// price/change/volume did not move. Re-stamping unchanged rows every 1.5s made a
+// frozen market-watch page look like a live feed to the Python side.
+function mergePsxQuotes(incoming) {
+    let changed = false;
+    const nowSec = Date.now() / 1000;
+    for (const [sym, q] of Object.entries(incoming || {})) {
+        const prev = latestPsxQuotes[sym];
+        const same = prev
+            && prev.price === q.price
+            && prev.change === q.change
+            && prev.volume === q.volume;
+        if (same && prev.timestamp) {
+            latestPsxQuotes[sym] = Object.assign({}, q, { timestamp: prev.timestamp });
+        } else {
+            latestPsxQuotes[sym] = Object.assign({}, q, { timestamp: nowSec });
+            changed = true;
+        }
+    }
+    latestPsxTimestamp = Date.now();
+    if (changed) lastPsxChangeTimestamp = Date.now();
+    return changed;
+}
+
+function isPsxSessionHoursPkt() {
+    // Coarse PKT trading window (Mon-Fri 09:15-15:45) used only to decide page reloads.
+    const pkt = new Date(Date.now() + 5 * 60 * 60 * 1000);
+    const day = pkt.getUTCDay();
+    const mins = pkt.getUTCHours() * 60 + pkt.getUTCMinutes();
+    return day >= 1 && day <= 5 && mins >= 555 && mins <= 945;
+}
+
+async function reloadFrozenPsxPage() {
+    if (!psxPage || psxPage.isClosed() || !isPsxSessionHoursPkt()) return;
+    const now = Date.now();
+    if (!lastPsxChangeTimestamp || now - lastPsxChangeTimestamp < PSX_FROZEN_PAGE_MS) return;
+    if (now - lastPsxPageReload < PSX_RELOAD_COOLDOWN_MS) return;
+    lastPsxPageReload = now;
+    console.warn('⚠️ [PSX Monitor] Market-watch page unchanged for 3+ minutes during session; reloading.');
+    try {
+        await psxPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (err) {
+        psxMonitorError = err && err.message ? err.message : String(err);
+    }
+}
 
 const SCRIP_TO_SYMBOL = {
     'Systems Limited': 'SYS',
@@ -865,8 +918,7 @@ function fetchPsxMarketSummaryDirect() {
                 try {
                     const { bySymbol, count } = parseMarketSummaryHtml(data);
                     if (count > 0) {
-                        latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
-                        latestPsxTimestamp = Date.now();
+                        mergePsxQuotes(bySymbol);
                         psxMonitorError = null;
                         return resolve(true);
                     }
@@ -1027,18 +1079,17 @@ async function extractPsxMarketQuotes() {
                 });
 
                 if (domQuotes && Object.keys(domQuotes).length > 0) {
-                    latestPsxQuotes = Object.assign(latestPsxQuotes, domQuotes);
-                    latestPsxTimestamp = Date.now();
+                    mergePsxQuotes(domQuotes);
                     psxMonitorError = null;
                 } else {
                     const html = await psxPage.content();
                     const { bySymbol, count } = parseDpsMarketWatchHtml(html);
                     if (count > 0) {
-                        latestPsxQuotes = Object.assign(latestPsxQuotes, bySymbol);
-                        latestPsxTimestamp = Date.now();
+                        mergePsxQuotes(bySymbol);
                         psxMonitorError = null;
                     }
                 }
+                await reloadFrozenPsxPage();
             } catch (pageErr) {
                 const errMsg = pageErr && pageErr.message ? pageErr.message : String(pageErr);
                 if (!errMsg.includes('Execution context was destroyed') && !errMsg.includes('Navigation')) {
@@ -1058,9 +1109,6 @@ async function extractPsxMarketQuotes() {
             await fetchPsxMarketSummaryDirect();
         } catch (_) {}
     } finally {
-        isExtractingPsx = false;
-    }
-}
         isExtractingPsx = false;
     }
 }
@@ -1142,9 +1190,11 @@ process.on('exit', cleanupPsx);
 process.on('SIGINT', cleanupPsx);
 process.on('SIGTERM', cleanupPsx);
 
-// START EXPRESS IMMEDIATELY ON 0.0.0.0:3000
-app.listen(BRIDGE_PORT, '0.0.0.0', () => {
-    console.log(`⚙️  [WhatsApp Bridge] Local API listening on 0.0.0.0:${BRIDGE_PORT} instantly on startup.`);
+// START EXPRESS IMMEDIATELY ON LOOPBACK ONLY. The bridge API (catch-up, QR, quotes) has no
+// auth; only the Python app in the same container/host calls it via 127.0.0.1.
+const BRIDGE_HOST = process.env.BRIDGE_HOST || '127.0.0.1';
+app.listen(BRIDGE_PORT, BRIDGE_HOST, () => {
+    console.log(`⚙️  [WhatsApp Bridge] Local API listening on ${BRIDGE_HOST}:${BRIDGE_PORT} instantly on startup.`);
 
     // 1. Immediately fetch direct market summary (<1s) so /psx-live-quotes has all 580+ quotes right away
     fetchPsxMarketSummaryDirect().then((ok) => {

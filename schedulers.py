@@ -10,6 +10,7 @@ import os
 import time
 import json
 from datetime import datetime, timedelta
+import yfinance as yf
 from vector_brain import query_mentor_brain_tool, ingest_knowledge_tool, vector_db, evaluate_trade_trigger
 import traceback
 from portfolio_manager import get_db_connection, publish_agent_event
@@ -56,7 +57,7 @@ def get_last_run_date(task_name):
             try:
                 data = json.load(f)
                 return data.get(task_name, "")
-            except:
+            except Exception:
                 pass
     return ""
 
@@ -66,7 +67,7 @@ def set_last_run_date(task_name, date_str):
         with open(STATE_DATE_FILE, "r") as f:
             try:
                 data = json.load(f)
-            except:
+            except Exception:
                 pass
     data[task_name] = date_str
     with open(STATE_DATE_FILE, "w") as f:

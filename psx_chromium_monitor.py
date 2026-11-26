@@ -6,6 +6,7 @@ on http://127.0.0.1:3000 (Node.js Puppeteer Bridge) to retrieve live PSX quotes
 for 580+ stocks in sub-5ms latency without triggering WAF blocks.
 """
 
+import math
 import time
 import requests
 from typing import Dict, Any, Optional, Iterable
@@ -19,6 +20,26 @@ PSX_TIMESERIES_ENDPOINT = f"{NODE_BRIDGE_URL}/api/psx/timeseries"
 _CHROMIUM_QUOTES_CACHE: Dict[str, Dict[str, Any]] = {}
 _CHROMIUM_CACHE_TS: float = 0.0
 _CHROMIUM_CACHE_TTL: float = 2.5
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _epoch_seconds(value: Any, now: float) -> Optional[float]:
+    """Normalizes a bridge timestamp (seconds or milliseconds) to epoch seconds; None if unusable."""
+    ts = _optional_float(value)
+    if ts is None or ts <= 0:
+        return None
+    if ts > 1e12:
+        ts = ts / 1000.0
+    if ts > now + 5:
+        return None
+    return ts
 
 
 def is_chromium_monitor_healthy(timeout: float = 0.8) -> bool:
@@ -60,35 +81,45 @@ def fetch_chromium_psx_quotes(
         if resp.status_code == 200:
             data = resp.json() or {}
             raw_quotes = data.get("quotes") or {}
+            bridge_ts = _epoch_seconds(data.get("timestamp"), now)
             if raw_quotes:
                 normalized: Dict[str, Dict[str, Any]] = {}
                 for sym_key, q in raw_quotes.items():
+                    # Use the bridge's extraction time, not this HTTP call's time, so a
+                    # frozen Chromium page cannot make old quotes look freshly received.
+                    received_ts = _epoch_seconds(q.get("timestamp"), now) or bridge_ts or now
                     sym_upper = sym_key.upper().strip()
-                    price = float(q.get("price") or 0.0)
-                    if price > 0:
-                        ldcp = float(q.get("ldcp") or q.get("prev_close") or price)
-                        change = float(q.get("change") or (price - ldcp))
-                        change_pct = float(q.get("change_pct") or (((change / ldcp) * 100.0) if ldcp > 0 else 0.0))
-                        high = float(q.get("high") or price)
-                        low = float(q.get("low") or price)
-                        open_p = float(q.get("open") or price)
-                        vol = int(q.get("volume") or 0)
+                    price = _optional_float(q.get("price"))
+                    if price is not None and price > 0:
+                        ldcp = _optional_float(q.get("ldcp") or q.get("prev_close"))
+                        change = _optional_float(q.get("change"))
+                        if change is None and ldcp is not None and ldcp > 0:
+                            change = price - ldcp
+                        change_pct = _optional_float(q.get("change_pct"))
+                        if change_pct is None and change is not None and ldcp is not None and ldcp > 0:
+                            change_pct = (change / ldcp) * 100.0
+                        high = _optional_float(q.get("high"))
+                        low = _optional_float(q.get("low"))
+                        open_p = _optional_float(q.get("open"))
+                        volume = _optional_float(q.get("volume"))
 
                         item = {
                             "price": round(price, 2),
-                            "change": round(change, 2),
-                            "change_pct": round(change_pct, 2),
-                            "change_abs": round(change, 2),
-                            "prev_close": round(ldcp, 2),
-                            "high": round(high, 2),
-                            "low": round(low, 2),
-                            "open": round(open_p, 2),
-                            "volume": vol,
+                            "change": round(change, 2) if change is not None else None,
+                            "change_pct": round(change_pct, 2) if change_pct is not None else None,
+                            "change_abs": round(change, 2) if change is not None else None,
+                            "prev_close": round(ldcp, 2) if ldcp is not None and ldcp > 0 else None,
+                            "high": round(high, 2) if high is not None and high > 0 else None,
+                            "low": round(low, 2) if low is not None and low > 0 else None,
+                            "open": round(open_p, 2) if open_p is not None and open_p > 0 else None,
+                            "volume": volume,
                             "sector": q.get("sector") or "",
                             "indices": q.get("indices") or "",
                             "is_shariah": bool(q.get("is_shariah", False)),
                             "source": "chromium_psx_live",
-                            "timestamp": now,
+                            "timestamp": received_ts,
+                            "timestamp_kind": "received",
+                            "received_timestamp": received_ts,
                         }
                         normalized[sym_upper] = item
                         # Also keep raw scrip if different

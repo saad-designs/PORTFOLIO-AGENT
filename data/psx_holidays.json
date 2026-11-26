@@ -1,0 +1,37 @@
+{
+  "source_url": "https://www.psx.com.pk/psx/exchange/general/calendar-holidays",
+  "retrieved_at": "2026-11-21",
+  "years": {
+    "2026": {
+      "holidays": [
+        {"date": "2026-02-05", "name": "Kashmir Day", "provisional": false},
+        {"date": "2026-03-20", "name": "Juma-Tul-Wida", "provisional": true},
+        {"date": "2026-03-21", "name": "Eid-ul-Fitr", "provisional": true},
+        {"date": "2026-03-22", "name": "Eid-ul-Fitr", "provisional": true},
+        {"date": "2026-03-23", "name": "Pakistan Day; Eid-ul-Fitr", "provisional": false},
+        {"date": "2026-05-01", "name": "Labour Day", "provisional": false},
+        {"date": "2026-05-26", "name": "Eid-ul-Azha", "provisional": true},
+        {"date": "2026-05-27", "name": "Eid-ul-Azha", "provisional": true},
+        {"date": "2026-05-28", "name": "Youm-e-Takbeer; Eid-ul-Azha", "provisional": false},
+        {"date": "2026-06-25", "name": "Ashura", "provisional": true},
+        {"date": "2026-06-26", "name": "Ashura", "provisional": true},
+        {"date": "2026-08-14", "name": "Independence Day", "provisional": false},
+        {"date": "2026-08-25", "name": "Eid Milad-un-Nabi", "provisional": true},
+        {"date": "2026-11-09", "name": "Allama Iqbal Day", "provisional": false},
+        {"date": "2026-12-25", "name": "Quaid-e-Azam Day/Christmas", "provisional": false}
+      ]
+    },
+    "2027": {
+      "note": "Fixed-date national holidays only. Add Eid/Ashura/Milad dates once PSX publishes the 2027 calendar.",
+      "holidays": [
+        {"date": "2027-02-05", "name": "Kashmir Day", "provisional": false},
+        {"date": "2027-03-23", "name": "Pakistan Day", "provisional": false},
+        {"date": "2027-05-01", "name": "Labour Day", "provisional": false},
+        {"date": "2027-05-28", "name": "Youm-e-Takbeer", "provisional": false},
+        {"date": "2027-08-14", "name": "Independence Day", "provisional": false},
+        {"date": "2027-11-09", "name": "Allama Iqbal Day", "provisional": false},
+        {"date": "2027-12-25", "name": "Quaid-e-Azam Day/Christmas", "provisional": false}
+      ]
+    }
+  }
+}

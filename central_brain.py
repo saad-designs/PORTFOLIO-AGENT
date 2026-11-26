@@ -782,7 +782,25 @@ def scan_shariah_golden_opportunities(quick_mode: bool = True) -> Dict[str, Any]
     holdings = summary.get("holdings", [])
     kpis = summary.get("financial_kpis", {})
 
-    available_cash = float(kpis.get("ktrade_available_cash", 4357.38))
+    available_cash_value = kpis.get("ktrade_available_cash")
+    if available_cash_value is None:
+        return sanitize_for_json({
+            "status": "unavailable",
+            "message": "KTrade cash balance unavailable from the database; no allocation calculated.",
+            "shariah_certified": True,
+            "investor_profile": {
+                "owner": "Saad",
+                "mandate": "Strict Shariah-Compliant Capital Accumulation (No Selling)",
+                "available_dry_powder_pkr": None,
+                "portfolio_market_value_pkr": kpis.get("portfolio_market_value"),
+                "portfolio_cost_basis_pkr": kpis.get("portfolio_cost_basis"),
+            },
+            "golden_opportunities_count": 0,
+            "golden_opportunities": [],
+            "allocation_directive": None,
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+        })
+    available_cash = float(available_cash_value)
     custody_val = float(kpis.get("portfolio_market_value", 0.0))
     total_cost = float(kpis.get("portfolio_cost_basis", 0.0))
 
