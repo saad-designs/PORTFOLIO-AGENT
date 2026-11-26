@@ -3236,9 +3236,17 @@
       if (key) headers.set('x-dashboard-key', key);
       const res = await fetch(url, { ...options, headers });
       if (res.status === 401) {
-        openAuthKeyModal(true);
+        // Open the key prompt once. Background polls (every 1s) used to re-open it on every
+        // 401, rebuilding the input and wiping whatever was being typed.
+        APP_STATE.needsAuth = true;
+        const modalOpen = document.getElementById('detail-modal')?.classList.contains('open');
+        if (!APP_STATE.authPromptOpen || !modalOpen) {
+          APP_STATE.authPromptOpen = true;
+          openAuthKeyModal(true);
+        }
         throw new Error('Unauthorized — enter DASHBOARD_KEY');
       }
+      if (res.ok) APP_STATE.needsAuth = false;
       return res;
     }
 
@@ -3478,6 +3486,8 @@
       const val = (document.getElementById('auth-key-input')?.value || '').trim();
       if (val) localStorage.setItem('alphawise_dashboard_key', val);
       else localStorage.removeItem('alphawise_dashboard_key');
+      APP_STATE.authPromptOpen = false;
+      APP_STATE.needsAuth = false;
       closeModal('detail-modal');
       bootDashboard(true);
     }
@@ -3548,7 +3558,7 @@
     let _tickInFlight = false;
 
     async function pollLiveTickEverySecond() {
-      if (_tickInFlight || document.hidden) return;
+      if (_tickInFlight || document.hidden || APP_STATE.needsAuth) return;
       _tickInFlight = true;
       try {
         const res = await apiFetch('/api/live-prices/tick');
