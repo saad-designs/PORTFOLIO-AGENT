@@ -575,9 +575,13 @@ async def process_whatsapp_text_payload(text: str, source: str = "KTrade", times
             update_whatsapp_checkpoint(timestamp)
         return {"status": "ignored", "reason": "chitchat_noise_filter"}
 
+    # Defensive cap for direct API callers (the queue worker already batches within this size).
+    max_chars = 12000
+    prompt_text = text if len(text) <= max_chars else text[:max_chars] + "\n[... trimmed to fit model limits]"
+
     extraction_prompt = f"""
     You are an elite quantitative PSX financial analyst. Analyze this KTrade WhatsApp commentary:
-    "{text}"
+    "{prompt_text}"
     Source: {source}
 
     Extract the structured intelligence strictly as a JSON object with this schema:

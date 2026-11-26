@@ -74,51 +74,70 @@ def rotate_to_next_google_key(reason: str = "Quota Exhausted") -> Optional[str]:
     new_key = keys[CURRENT_GOOGLE_KEY_INDEX]
 
     # Reset Gemini model cooldowns for the fresh key (excluding permanently blacklisted 404 strings)
-    for model_list in GEMINI_TASK_ROUTING.values():
-        for m in model_list:
-            if m not in BLACKLISTED_MODELS:
-                MODEL_COOLDOWN_UNTIL.pop(m, None)
+    for m in list(MODEL_COOLDOWN_UNTIL):
+        if m.startswith("gemini") and m not in BLACKLISTED_MODELS:
+            MODEL_COOLDOWN_UNTIL.pop(m, None)
 
     print(f"🔄 [Key Rotation] Google Key #{old_idx + 1} marked on cooldown ({reason}). Rotated to Key #{CURRENT_GOOGLE_KEY_INDEX + 1} (quota refreshed).")
     return new_key
 
 # --- GROQ CLIENT INITIALIZATION ---
 groq_client = None
-_groq_models_probed = False
-PROTECTED_GROQ_MODELS = {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"}
+CATALOG_REFRESH_SECONDS = 6 * 3600
+# Live Groq catalog (model ids). None = not fetched yet / fetch failed -> fall back to GROQ_TEXT_MODELS.
+_GROQ_LIVE_MODELS: Optional[set] = None
+_GROQ_CATALOG_TS: float = 0.0
+_GROQ_NON_CHAT_MARKERS = ("whisper", "guard", "tts", "playai", "distil", "compound", "embed", "orpheus")
+
+
+def _refresh_groq_catalog(client) -> None:
+    """Fetches Groq's live model list so retired models (e.g. old Llama ids) are never called."""
+    global _GROQ_LIVE_MODELS, _GROQ_CATALOG_TS
+    _GROQ_CATALOG_TS = time.time()
+    try:
+        live = {m.id for m in client.models.list().data if getattr(m, "id", None)}
+    except Exception as probe_err:
+        status_code = getattr(probe_err, "status_code", None)
+        if status_code == 401 or "invalid_api_key" in str(probe_err).lower():
+            raise
+        print(f"ℹ️ [Groq Init] Catalog probe failed ({probe_err}); using built-in model list.", flush=True)
+        _GROQ_CATALOG_TS = time.time() - CATALOG_REFRESH_SECONDS + 600  # retry in 10 min
+        return
+    if live:
+        _GROQ_LIVE_MODELS = live
+        print(f"ℹ️ [Groq Init] Live catalog: {len(live)} models; text cascade = {get_groq_text_models()}", flush=True)
+
+
+def get_groq_text_models() -> List[str]:
+    """Preferred Groq chat models that exist in the live catalog, then any other live chat models."""
+    if _GROQ_LIVE_MODELS is None:
+        return list(GROQ_TEXT_MODELS)
+    ordered = [m for m in GROQ_TEXT_MODELS if m in _GROQ_LIVE_MODELS]
+    extras = sorted(
+        m for m in _GROQ_LIVE_MODELS
+        if m not in ordered and not any(marker in m.lower() for marker in _GROQ_NON_CHAT_MARKERS)
+    )
+    return ordered + extras
+
 
 def get_groq_client():
-    global groq_client, _groq_models_probed
+    global groq_client
     if not is_model_available("groq"):
         return None
-    if groq_client is not None:
-        return groq_client
     key = os.getenv("GROQ_API_KEY")
-    if key and key.strip():
-        try:
+    if not key or not key.strip():
+        return None
+    try:
+        if groq_client is None:
             from groq import Groq
             groq_client = Groq(api_key=key.strip())
-            if not _groq_models_probed:
-                _groq_models_probed = True
-                try:
-                    live_models = {m.id for m in groq_client.models.list().data if getattr(m, "id", None)}
-                    if live_models:
-                        for candidate in list(GROQ_TEXT_MODELS):
-                            if candidate not in live_models and candidate not in PROTECTED_GROQ_MODELS:
-                                BLACKLISTED_MODELS.add(candidate)
-                                print(f"ℹ️ [Groq Init] Model '{candidate}' not in active Groq catalog; pre-blacklisted cleanly.", flush=True)
-                except Exception as probe_err:
-                    # Do NOT pre-blacklist llama-3.3-70b-versatile or llama-3.1-8b-instant on boot if models.list() fails
-                    status_code = getattr(probe_err, "status_code", None)
-                    if status_code == 401 or "invalid_api_key" in str(probe_err).lower():
-                        record_model_error("groq", probe_err)
-                        groq_client = None
-                        return None
-                    print(f"ℹ️ [Groq Init] Skipping boot catalog probe ({probe_err}); keeping Groq models active.", flush=True)
-            return groq_client
-        except Exception:
-            return None
-    return None
+        if time.time() - _GROQ_CATALOG_TS >= CATALOG_REFRESH_SECONDS:
+            _refresh_groq_catalog(groq_client)
+        return groq_client
+    except Exception as auth_err:
+        record_model_error("groq", auth_err)
+        groq_client = None
+        return None
 
 # --- ACTIVE PSX TICKERS & PRE-LLM NOISE FILTER ---
 ACTIVE_PSX_TICKERS: set[str] = set()
@@ -183,38 +202,107 @@ TASK_FAST_INGESTION = "TASK_FAST_INGESTION"
 TASK_DEEP_REASONING = "TASK_DEEP_REASONING"
 TASK_MULTIMODAL = "TASK_MULTIMODAL"
 
-# Groq text models: Current supported Groq production models with resilient fallback cascade.
+# Groq text models in preference order. Only ids present in Groq's live catalog are used;
+# any other live chat model is appended, so retirements no longer break the cascade.
 GROQ_TEXT_MODELS: List[str] = [
-    "llama-3.3-70b-versatile",                     # Llama 3.3 70B versatile (primary)
-    "meta-llama/llama-4-scout-17b-16e-instruct",   # Active Meta Llama 4 Scout on Groq
-    "openai/gpt-oss-120b",                         # Active Groq 120B MoE
-    "qwen/qwen3-32b",                              # Active Qwen 3 32B production model on Groq
-    "openai/gpt-oss-20b",                          # Active Groq ultra-fast 20B
-    "llama-3.1-8b-instant"                         # Llama 3.1 8B instant fallback
+    "openai/gpt-oss-120b",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3-32b",
+    "moonshotai/kimi-k2-instruct",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
 ]
 
-# Gemini fallback cascade (active Google GenAI models):
+# Groq's free tier caps tokens-per-minute (~6k-8k on most models). Prompts estimated above this are
+# sent straight to Gemini instead of failing with 413 on every Groq model.
+GROQ_MAX_INPUT_TOKENS = int(os.getenv("GROQ_MAX_INPUT_TOKENS", "5500") or 5500)
+
+
+def estimate_tokens(text: str) -> int:
+    """Cheap token estimate (~4 chars/token) used to keep requests inside free-tier limits."""
+    return len(text or "") // 4 + 1
+
+# Gemini preference order per task. Filtered against Google's live model list at runtime, and
+# newer Flash models found in that list are appended automatically.
 GEMINI_TASK_ROUTING: Dict[str, List[str]] = {
     TASK_FAST_INGESTION: [
+        "gemini-3.8-flash-lite",
+        "gemini-3.5-flash-lite",
         "gemini-3.8-flash",
         "gemini-3.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-flash"
     ],
     TASK_DEEP_REASONING: [
         "gemini-3.8-flash",
         "gemini-3.5-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash-lite"
+        "gemini-3.8-flash-lite",
+        "gemini-3.5-flash-lite",
     ],
     TASK_MULTIMODAL: [
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash-lite",
         "gemini-3.8-flash",
         "gemini-3.5-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite"
     ]
 }
+
+_GEMINI_LIVE_MODELS: Optional[set] = None
+_GEMINI_CATALOG_TS: float = 0.0
+_GEMINI_EXCLUDED_MARKERS = (
+    "image", "tts", "audio", "live", "embedding", "exp", "computer", "robotics", "native", "veo", "imagen", "omni",
+)
+
+
+def _gemini_version_key(name: str):
+    match = re.search(r"gemini-(\d+(?:\.\d+)?)", name)
+    version = float(match.group(1)) if match else 0.0
+    return (-version, "preview" in name, "lite" in name, name)
+
+
+def _refresh_gemini_catalog() -> None:
+    """Fetches Google's live model list (free call) so retired Gemini ids are skipped up front."""
+    global _GEMINI_LIVE_MODELS, _GEMINI_CATALOG_TS
+    _GEMINI_CATALOG_TS = time.time()
+    key = get_active_google_api_key()
+    if not key:
+        return
+    try:
+        from google import genai
+        lister = genai.Client(api_key=key, http_options={"timeout": 15000})
+        live = set()
+        for model in lister.models.list():
+            name = str(getattr(model, "name", "") or "").replace("models/", "")
+            actions = getattr(model, "supported_actions", None) or []
+            if name.startswith("gemini") and (not actions or "generateContent" in actions):
+                live.add(name)
+    except Exception as list_err:
+        print(f"ℹ️ [Gemini Init] Model list unavailable ({list_err}); using built-in routing.", flush=True)
+        _GEMINI_CATALOG_TS = time.time() - CATALOG_REFRESH_SECONDS + 600  # retry in 10 min
+        return
+    if live:
+        _GEMINI_LIVE_MODELS = live
+        print(f"ℹ️ [Gemini Init] Live catalog: {len(live)} models.", flush=True)
+
+
+def get_gemini_models_for_task(task: str) -> List[str]:
+    """Configured preference order filtered by the live catalog, plus newer live Flash models."""
+    if time.time() - _GEMINI_CATALOG_TS >= CATALOG_REFRESH_SECONDS:
+        _refresh_gemini_catalog()
+    preferred = GEMINI_TASK_ROUTING.get(task, GEMINI_TASK_ROUTING[TASK_FAST_INGESTION])
+    if _GEMINI_LIVE_MODELS is None:
+        return list(preferred)
+    ordered = [m for m in preferred if m in _GEMINI_LIVE_MODELS]
+    discovered = sorted(
+        (
+            m for m in _GEMINI_LIVE_MODELS
+            if m not in ordered
+            and "flash" in m
+            and not any(marker in m for marker in _GEMINI_EXCLUDED_MARKERS)
+        ),
+        key=_gemini_version_key,
+    )
+    return ordered + discovered or list(preferred)
 
 # --- IN-MEMORY CIRCUIT BREAKER & DEAD-MODEL BLACKLIST ---
 # Maps model_name -> timestamp until which model is on cooldown
@@ -233,14 +321,14 @@ def is_any_groq_text_model_available() -> bool:
     """Returns True if GROQ_API_KEY is configured, Groq auth is valid, and at least one Groq text model is available."""
     if not is_model_available("groq"):
         return False
-    return any(is_model_available(m) for m in GROQ_TEXT_MODELS)
+    return any(is_model_available(m) for m in get_groq_text_models())
 
 def get_candidate_models(task: str = TASK_FAST_INGESTION) -> List[str]:
     """
     Returns candidate Gemini models for a given task, dynamically filtering out
     any blacklisted 404 model or model currently in MODEL_COOLDOWN_UNTIL.
     """
-    raw_models = GEMINI_TASK_ROUTING.get(task, GEMINI_TASK_ROUTING[TASK_FAST_INGESTION])
+    raw_models = get_gemini_models_for_task(task)
     models = [m for m in raw_models if m not in BLACKLISTED_MODELS] or raw_models
     now = time.time()
     available = [m for m in models if MODEL_COOLDOWN_UNTIL.get(m, 0.0) <= now]
@@ -298,11 +386,17 @@ def record_model_error(model: str, error: Any):
         MODEL_COOLDOWN_UNTIL[model] = now + 86400.0
         if model == "groq" or any(m in model for m in ["llama", "groq", "gpt-oss", "qwen", "whisper"]):
             MODEL_COOLDOWN_UNTIL["groq"] = now + 86400.0
-            for gm in GROQ_TEXT_MODELS + ["whisper-large-v3-turbo", "whisper-large-v3"]:
+            for gm in get_groq_text_models() + ["whisper-large-v3-turbo", "whisper-large-v3"]:
                 MODEL_COOLDOWN_UNTIL[gm] = now + 86400.0
             print(f"🚫 [Circuit Breaker] Groq API key is invalid or unauthorized (401). Disabling Groq models; cascading cleanly to Gemini.")
         else:
             print(f"🚫 [Circuit Breaker] Model '{model}' authorization failed (401). Cooldown set for 24 hours.")
+        return
+
+    # 413 "Request too large": the prompt exceeded this model's per-request/TPM ceiling. That is a
+    # property of this one request, so do NOT cool the model down for everyone else.
+    if status_code == 413 or "request too large" in err_lower or "error code: 413" in err_lower:
+        print(f"ℹ️ [Circuit Breaker] Prompt too large for '{model}'; skipping it for this request only.")
         return
 
     # 429 RESOURCE_EXHAUSTUSTED / Quota limits / Rate limits
@@ -382,9 +476,17 @@ def transcribe_audio_groq(
 # --- GROQ TEXT COMPLETION ---
 def generate_text_groq(prompt: str, system_prompt: Optional[str] = None) -> Optional[str]:
     """
-    High-speed free text completion via Groq (llama-3.3-70b-versatile -> llama-3.1-8b-instant).
-    Returns generated string or None on failure.
+    High-speed free text completion via Groq using models from the live catalog.
+    Returns generated string or None on failure, or when the prompt is too large for the
+    free tier (callers then fall back to Gemini).
     """
+    if estimate_tokens(prompt) + estimate_tokens(system_prompt or "") > GROQ_MAX_INPUT_TOKENS:
+        print(
+            f"ℹ️ [Groq Text] Prompt ~{estimate_tokens(prompt)} tokens exceeds free-tier budget "
+            f"({GROQ_MAX_INPUT_TOKENS}); using Gemini instead."
+        )
+        return None
+
     client = get_groq_client()
     if not client:
         return None
@@ -394,7 +496,7 @@ def generate_text_groq(prompt: str, system_prompt: Optional[str] = None) -> Opti
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    for model_name in GROQ_TEXT_MODELS:
+    for model_name in get_groq_text_models():
         if not is_model_available(model_name):
             continue
         try:
@@ -553,8 +655,8 @@ def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
     if groq_key and groq_key.strip():
         try:
             from langchain_groq import ChatGroq
-            candidate_groq = ["llama-3.3-70b-versatile", "qwen/qwen3-32b", "llama-3.1-8b-instant"]
-            for g_model in candidate_groq:
+            get_groq_client()  # refreshes the live catalog when due
+            for g_model in get_groq_text_models()[:3]:
                 if is_model_available(g_model):
                     groq_llms.append(ChatGroq(model=g_model, groq_api_key=groq_key.strip(), **kwargs))
         except Exception:
@@ -583,7 +685,7 @@ def get_langchain_llm(task: str = TASK_DEEP_REASONING, **kwargs):
         all_llms = gemini_llms + groq_llms if gemini_llms else groq_llms
 
     if not all_llms:
-        fallback_model = GEMINI_TASK_ROUTING[task][0]
+        fallback_model = get_gemini_models_for_task(task)[0]
         fallback_key = get_active_google_api_key() or os.getenv("GOOGLE_API_KEY")
         if fallback_key:
             fallback_key = fallback_key.strip().strip('"').strip("'").strip()

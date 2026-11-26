@@ -214,6 +214,17 @@ ALLOWED_KTRADE_CHATS = [
 # --- ASYNC NON-BLOCKING INGESTION QUEUE ---
 whatsapp_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
 
+# Keep each LLM request inside free-tier limits: ~12k chars ≈ 3k tokens fits Groq's ~6-8k TPM
+# with room for the prompt template and reply. Larger batches (60k-110k chars were seen) failed on
+# every Groq model and burned Gemini's daily quota on catch-up after each restart.
+MAX_INTEL_BATCH_CHARS = 12000
+
+
+def _clip_intel_text(text: str, limit: int = MAX_INTEL_BATCH_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"\n[... trimmed {len(text) - limit} chars to fit model limits]"
+
 async def whatsapp_queue_worker():
     """
     Sequential background consumer for WhatsApp incoming payloads.
@@ -282,7 +293,7 @@ async def whatsapp_queue_worker():
 
                 # 2. Text intelligence payload with 15-second micro-batching
                 elif body and len(body.strip()) > 0:
-                    batched_bodies = [body.strip()]
+                    batched_bodies = [_clip_intel_text(body.strip())]
                     batched_timestamps = [timestamp]
 
                     # Micro-batching window: wait and drain up to 8 text messages from the same chat_id within 15s
@@ -290,6 +301,8 @@ async def whatsapp_queue_worker():
                     window_deadline = time.time() + 15.0
 
                     while len(batched_bodies) < max_batch:
+                        if sum(len(b) for b in batched_bodies) >= MAX_INTEL_BATCH_CHARS:
+                            break
                         remaining_window = window_deadline - time.time()
                         if remaining_window <= 0:
                             break
@@ -306,12 +319,15 @@ async def whatsapp_queue_worker():
                         _archive_payload(next_payload)
 
                         # Check if next_payload can be batched (same chat_id, text-only, non-empty body)
+                        next_body = _clip_intel_text((next_payload.body or "").strip())
+                        current_size = sum(len(b) for b in batched_bodies)
                         if (
                             not next_payload.has_media
                             and (next_payload.chat_id or "KTrade") == chat_id
-                            and (next_payload.body or "").strip()
+                            and next_body
+                            and current_size + len(next_body) <= MAX_INTEL_BATCH_CHARS
                         ):
-                            batched_bodies.append(next_payload.body.strip())
+                            batched_bodies.append(next_body)
                             if next_payload.timestamp:
                                 batched_timestamps.append(next_payload.timestamp)
                             whatsapp_queue.task_done()

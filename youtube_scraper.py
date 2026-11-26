@@ -238,11 +238,8 @@ def _tier1_native_gemini(video_id: str, title: str = "", mentor_name: str = "Men
         TASK_MULTIMODAL
     )
     
-    # Enforce strictly: gemini-3.5-flash-lite -> gemini-3.5-flash -> gemini-3.8-flash
-    preferred_order = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"]
-    models_to_try = [m for m in preferred_order if is_model_available(m)]
-    if not models_to_try:
-        models_to_try = get_candidate_models(TASK_MULTIMODAL)
+    # Shared router order (live catalog, Flash-Lite first for the higher free-tier quota).
+    models_to_try = get_candidate_models(TASK_MULTIMODAL)
 
     active_key = get_active_google_api_key()
     active_client = genai.Client(api_key=active_key, http_options={"timeout": 300000}) if active_key else client
