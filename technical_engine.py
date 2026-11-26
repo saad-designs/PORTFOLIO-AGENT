@@ -2,10 +2,37 @@ import os
 import psycopg2
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import logging
 
 logger = logging.getLogger("PortfolioAgentTechnicalEngine")
+
+
+def wilder_rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    """Textbook Wilder RSI: SMA seed over the first `length` moves, then Wilder smoothing.
+
+    Replaces pandas-ta, which was never in requirements.txt, so the scanner failed on import.
+    """
+    close = pd.to_numeric(close, errors="coerce").reset_index(drop=True)
+    values = [float("nan")] * len(close)
+    delta = close.diff()
+    if len(close) <= length:
+        return pd.Series(values, index=range(len(close)))
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain = gains.iloc[1:length + 1].mean()
+    avg_loss = losses.iloc[1:length + 1].mean()
+
+    def _rsi(g: float, l: float) -> float:
+        if l == 0:
+            return 100.0 if g > 0 else float("nan")
+        return 100.0 - 100.0 / (1.0 + g / l)
+
+    values[length] = _rsi(avg_gain, avg_loss)
+    for i in range(length + 1, len(close)):
+        avg_gain = (avg_gain * (length - 1) + gains.iloc[i]) / length
+        avg_loss = (avg_loss * (length - 1) + losses.iloc[i]) / length
+        values[i] = _rsi(avg_gain, avg_loss)
+    return pd.Series(values, index=range(len(close)))
 
 def sanitize_ohlc_data(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """
@@ -65,8 +92,7 @@ def fetch_technical_signals(ticker: str) -> dict:
         if close_series.isnull().all() or volume_series.isnull().all():
             return None
 
-        # Add pandas-ta RSI calculation
-        df['RSI_14'] = df.ta.rsi(length=14)
+        df['RSI_14'] = wilder_rsi(close_series, length=14).values
         
         # Calculate 20-day Volume SMA
         df['Volume_SMA_20'] = volume_series.rolling(window=20).mean()
