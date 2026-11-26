@@ -8,10 +8,17 @@ import time as _time_tz
 # Pin the process clock to Pakistan time before any scheduler reads datetime.now().
 # The Docker image (python:3.12-slim) defaults to UTC, which shifted every "PKT"
 # schedule (intraday loop, cash sweeps, closing briefing) five hours late.
-# "PKT-5" is a POSIX TZ string, so it works without tzdata; Pakistan has no DST.
-if hasattr(_time_tz, "tzset") and not _os_tz.environ.get("TZ"):
-    _os_tz.environ["TZ"] = "PKT-5"
-    _time_tz.tzset()
+# Use the IANA name: tzlocal (APScheduler) rejects POSIX strings like "PKT-5".
+# Only switch when the system zone file exists, otherwise tzset() silently means UTC.
+if hasattr(_time_tz, "tzset"):
+    _current_tz = _os_tz.environ.get("TZ", "")
+    if (not _current_tz or _current_tz == "PKT-5") and _os_tz.path.exists("/usr/share/zoneinfo/Asia/Karachi"):
+        _os_tz.environ["TZ"] = "Asia/Karachi"
+        _time_tz.tzset()
+    elif _current_tz == "PKT-5":
+        # Never leave the unsupported POSIX value set: it crashes APScheduler on import.
+        _os_tz.environ.pop("TZ", None)
+        _time_tz.tzset()
 import asyncio
 
 # Force SelectorEventLoop on Windows to support psycopg async pools

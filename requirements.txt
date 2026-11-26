@@ -25,6 +25,7 @@ groq>=0.37.0
 matplotlib>=3.9.2
 pandas>=2.2.0
 mplfinance==0.12.10b0
+tzdata>=2024.1  # IANA zone data for zoneinfo (scheduler timezone) on slim images
 six>=1.16.0  # imported by mplfinance 0.12.10b0 but not declared as its dependency
 psycopg2-binary>=2.9.9
 psxdata>=0.2.0

@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     MPLCONFIGDIR=/tmp/matplotlib \
     PYTHONUNBUFFERED=1 \
-    TZ=PKT-5
+    TZ=Asia/Karachi
 
 WORKDIR /app
 
@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
     ca-certificates \
+    tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && git config --global --add safe.directory /app \
     && git config --global --add safe.directory '*'
